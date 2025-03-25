@@ -70,13 +70,13 @@ source setup.sh
 
 An example can be found in ```tests/make_tensor.py -o test_tensor.hdf5```. 
 
-### Systematic uncertainties
-Systematic uncertainties are implemented by default using a log-normal probability density (with a multiplicative effect on the event yield).  Gaussian uncertainties with an additive effect on the event yield can also be used.  This is configured through the `systematic_type` parameter of the `TensorWriter`.
-
 ### Sparse tensor
 By setting `sparse=True` in the `TensorWriter` constructor the tensor is stored in the sparse representation. 
 This is useful when working with a sparse tensor, e.g. having many bins/processes/systematics where each bin/process/systematic only contributes to a small number of bins/processes/systematics. 
 This is often the case in the standard profile likelihood unfolding. 
+
+### Systematic uncertainties
+Systematic uncertainties are implemented by default using a log-normal probability density (with a multiplicative effect on the event yield). Gaussian uncertainties with an additive effect on the event yield can also be used. This is configured through the `systematic_type` parameter of the `TensorWriter`.
 
 ### Symmetrization
 By default, systematic variations are asymmetric. 

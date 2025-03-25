@@ -93,7 +93,7 @@ class Fitter:
 
         # observed number of events per bin
         self.nobs = tf.Variable(
-            self.indata.data_obs[: self.indata.nbins], trainable=False, name="nobs"
+            self.expected_events_nominal(), trainable=False, name="nobs"
         )
 
         if self.chisqFit:
@@ -163,6 +163,12 @@ class Fitter:
             return tf.ones_like(self.indata.kstat[: self.indata.nbins])
         elif self.binByBinStatType == "normal":
             return tf.zeros_like(self.indata.kstat[: self.indata.nbins])
+
+    def nobsassign(self, asimov=False):
+        if asimov:
+            self.nobs.assign(self.expected_events_nominal())
+        else:
+            self.nobs.assign(self.indata.data_obs[: self.indata.nbins])
 
     def prefit_covariance(self, unconstrained_err=0.0):
         # free parameters are taken to have zero uncertainty for the purposes of prefit uncertainties
@@ -581,8 +587,9 @@ class Fitter:
 
         expcov_noBBB = expcov
         if self.binByBinStat:
-            varbeta = self.varbeta
-            exp_cov_BBB = pdexpdbeta @ (varbeta[:, None] * tf.transpose(pdexpdbeta))
+            exp_cov_BBB = pdexpdbeta @ (
+                self.varbeta[:, None] * tf.transpose(pdexpdbeta)
+            )
             expcov += exp_cov_BBB
 
         if compute_global_impacts:
@@ -832,16 +839,11 @@ class Fitter:
                             - nexp_profile * self.beta0
                         )
                         beta = 0.5 * (-bbeta + tf.sqrt(bbeta**2 - 4.0 * cbeta))
-
-                if full and self.indata.nbinsmasked:
-                    beta = tf.concat(
-                        [beta, self.indata.kstat[self.indata.nbins :]], axis=0
-                    )
             else:
-                if not full and self.indata.nbinsmasked:
-                    beta = self.indata.kstat[: self.indata.nbins]
-                else:
-                    beta = self.indata.kstat
+                beta = self.beta
+
+            if full and self.indata.nbinsmasked:
+                beta = tf.concat([beta, self.indata.kstat[self.indata.nbins :]], axis=0)
 
             if self.binByBinStatType == "gamma":
                 nexp = nexp * beta
@@ -857,7 +859,7 @@ class Fitter:
 
     @tf.function
     def _profile_beta(self):
-        nexp, norm, beta = self._compute_yields_with_beta()
+        nexp, norm, beta = self._compute_yields_with_beta(full=False)
         self.beta.assign(beta)
 
     @tf.function
