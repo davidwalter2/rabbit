@@ -619,7 +619,7 @@ def main():
             group = "results"
             if ifit == -1:
                 group += "_asimov"
-                ifitter.nobs.assign(ifitter.expected_yield())
+                ifitter.nobs.assign(ifitter.expected_events_nominal())
             if ifit == 0:
                 ifitter.nobs.assign(ifitter.indata.data_obs)
             elif ifit >= 1:
