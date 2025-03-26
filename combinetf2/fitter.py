@@ -93,7 +93,7 @@ class Fitter:
 
         # observed number of events per bin
         self.nobs = tf.Variable(
-            self.expected_events_nominal(), trainable=False, name="nobs"
+            self.indata.data_obs[: self.indata.nbins], trainable=False, name="nobs"
         )
 
         if self.chisqFit:
@@ -126,8 +126,8 @@ class Fitter:
         self.beta = tf.Variable(self.beta0, trainable=False, name="beta")
 
         # cache the constraint variance since it's used in several places
-        n0 = self.expected_events_nominal()
         # this is treated as a constant
+        n0 = self.expected_events_nominal()
         if self.binByBinStatType == "gamma":
             self.varbeta = tf.stop_gradient(
                 tf.math.reciprocal(self.indata.kstat[: self.indata.nbins])
