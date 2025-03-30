@@ -48,6 +48,7 @@ source env/bin/activate
 pip install wums[pickling,plotting] tensorflow tensorflow-probability numpy h5py hist scipy matplotlib mplhep seaborn pandas plotly kaleido
 ```
 The packages `matplotlib`, `mplhep`, `seaborn`, `pandas`, `plotly`, and `kaleido` are only needed for the plotting scripts. 
+For the `text2hdf5.py` conversion also the `uproot` package is needed.
 In case you want to contribute to the development, please also install the linters `isort`, `flake8`, `autoflake`, `black`, and `pylint` used in the pre-commit hooks and the github CI
 Deactivate the environment with `deactivate`.
 
@@ -67,7 +68,6 @@ source setup.sh
 ```
 
 ## Making the input tensor
-
 An example can be found in ```tests/make_tensor.py -o test_tensor.hdf5```. 
 
 ### Systematic uncertainties
@@ -94,8 +94,12 @@ This is done by defining `masked=True` in the `tensorwriter` `add_channel` funct
 (Pseudo) Data histograms for masked channels are not supported.
 This is useful for example to compute unfolded (differential) cross sections and their uncertainties, including global impacts, taking into account all nuisance parameters that affect these channels.
 
-## Run the fit
+### text2hdf5
+The input tensor can also be generated from the input used for the [Combine tool](https://link.springer.com/article/10.1007/s41781-024-00121-4)  using the `text2hdf5.py` command.
+This script is mainly intented for user that have these inputs already and want's to perform some cross checks.
+Only basic functionality is supported and for complex models the conversion can take long, it is thus recommended to directly produce the input tensor using the provided interface as explained above. 
 
+## Run the fit
 For example:
 ```bash
 combinetf2_fit test_tensor.hdf5 -o results/fitresult.hdf5 -t 0 --doImpacts --globalImpacts --binByBinStat --saveHists --computeHistErrors

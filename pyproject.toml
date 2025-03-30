@@ -33,7 +33,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-plotting = ["matplotlib","mplhep", "seaborn", "pandas", "plotly", "kaleido"]
+plotting = ["matplotlib", "mplhep", "seaborn", "pandas", "plotly", "kaleido"]
+convsersion = ["uproot"]
+all = ["plotting", "convsersion"]
 
 [project.scripts]
 combinetf2 = "bin.combinetf2:main"
@@ -46,6 +48,7 @@ combinetf2_plot_likelihood_scan2D = "bin.combinetf2_plot_likelihood_scan2D:main"
 combinetf2_plot_pulls_and_impacts = "bin.combinetf2_plot_pulls_and_impacts:main"
 combinetf2_print_impacts = "bin.combinetf2_print_impacts:main"
 combinetf2_print_pulls_and_constraints = "bin.combinetf2_print_pulls_and_constraints:main"
+text2hdf5 = "bin.text2hdf5:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

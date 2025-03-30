@@ -7,7 +7,9 @@ import numpy as np
 
 from combinetf2 import common, h5pyutils
 
-from wums import ioutils, output_tools  # isort: skip
+from wums import ioutils, logging, output_tools  # isort: skip
+
+logger = logging.child_logger(__name__)
 
 
 class TensorWriter:
@@ -134,7 +136,7 @@ class TensorWriter:
     def add_channel(self, axes, name=None, masked=False):
         if name is None:
             name = f"ch{len(self.channels)}"
-        print(f"Add new channel {name}")
+        logger.debug(f"Add new channel {name}")
         ibins = np.prod([len(a) for a in axes])
         self.nbinschan[name] = ibins
         self.dict_norm[name] = {}
@@ -166,6 +168,65 @@ class TensorWriter:
                 """
             )
 
+    def _compute_asym_syst(
+        self,
+        logkup,
+        logkdown,
+        name,
+        process,
+        channel,
+        symmetrize="average",
+        add_to_data_covariance=False,
+        **kargs,
+    ):
+
+        if symmetrize == "conservative":
+            # symmetrize by largest magnitude of up and down variations
+            logkavg_proc = np.where(
+                np.abs(logkup) > np.abs(logkdown),
+                logkup,
+                logkdown,
+            )
+        elif symmetrize == "average":
+            # symmetrize by average of up and down variations
+            logkavg_proc = 0.5 * (logkup + logkdown)
+        elif symmetrize in ["linear", "quadratic"]:
+            # "linear" corresponds to a piecewise linear dependence of logk on theta
+            # while "quadratic" corresponds to a quadratic dependence and leads
+            # to a large variance
+            diff_fact = np.sqrt(3.0) if symmetrize == "quadratic" else 1.0
+
+            # split asymmetric variation into two symmetric variations
+            logkavg_proc = 0.5 * (logkup + logkdown)
+            logkdiffavg_proc = 0.5 * diff_fact * (logkup - logkdown)
+
+            var_name_out = name + "SymAvg"
+            var_name_out_diff = name + "SymDiff"
+
+            # special case, book the extra systematic
+            self.book_logk_avg(logkdiffavg_proc, channel, process, var_name_out_diff)
+            self.book_systematic(
+                var_name_out_diff,
+                add_to_data_covariance=add_to_data_covariance,
+                **kargs,
+            )
+        else:
+            if add_to_data_covariance:
+                raise RuntimeError(
+                    "add_to_data_covariance requires symmetric uncertainties"
+                )
+
+            self.symmetric_tensor = False
+
+            logkavg_proc = 0.5 * (logkup + logkdown)
+            logkhalfdiff_proc = 0.5 * (logkup - logkdown)
+
+            self.book_logk_halfdiff(logkhalfdiff_proc, channel, process, var_name_out)
+        logkup = None
+        logkdown = None
+
+        return logkavg_proc
+
     def add_lnN_systematic(
         self,
         name,
@@ -175,6 +236,8 @@ class TensorWriter:
         profile=True,
         add_to_data_covariance=False,
         groups=None,
+        symmetrize="average",
+        **kargs,
     ):
         if not isinstance(process, (list, tuple, np.ndarray)):
             process = [process]
@@ -191,15 +254,46 @@ class TensorWriter:
 
         for p, u in zip(process, uncertainty):
             norm = self.dict_norm[channel][p]
-            syst = norm * u
-            logk = self.get_logk(syst, norm, systematic_type=systematic_type)
-            self.book_logk_avg(logk, channel, p, name)
+            if isinstance(u, (list, tuple, np.ndarray)):
+                if len(u) != 2:
+                    raise RuntimeError(
+                        f"lnN uncertainty can only be a scalar for a symmetric or a list of 2 elements for asymmetric lnN uncertainties, but got a list of {len(u)} elements"
+                    )
+                # asymmetric lnN uncertainty
+                syst_up = norm * u[0]
+                syst_down = norm * u[1]
+
+                logkup_proc = self.get_logk(
+                    syst_up, norm, systematic_type=systematic_type
+                )
+                logkdown_proc = -self.get_logk(
+                    syst_down, norm, systematic_type=systematic_type
+                )
+
+                logkavg_proc = self._compute_asym_syst(
+                    logkup_proc,
+                    logkdown_proc,
+                    name,
+                    process,
+                    channel,
+                    symmetrize=symmetrize,
+                    add_to_data_covariance=add_to_data_covariance,
+                    **kargs,
+                )
+            else:
+                syst = norm * u
+                logkavg_proc = self.get_logk(
+                    syst, norm, systematic_type=systematic_type
+                )
+
+            self.book_logk_avg(logkavg_proc, channel, p, name)
 
         self.book_systematic(
             name,
             groups=groups,
             profile=profile,
             add_to_data_covariance=add_to_data_covariance,
+            **kargs,
         )
 
     def add_systematic(
@@ -238,54 +332,16 @@ class TensorWriter:
                 syst_down, norm, kfactor, systematic_type=systematic_type
             )
 
-            if symmetrize == "conservative":
-                # symmetrize by largest magnitude of up and down variations
-                logkavg_proc = np.where(
-                    np.abs(logkup_proc) > np.abs(logkdown_proc),
-                    logkup_proc,
-                    logkdown_proc,
-                )
-            elif symmetrize == "average":
-                # symmetrize by average of up and down variations
-                logkavg_proc = 0.5 * (logkup_proc + logkdown_proc)
-            elif symmetrize in ["linear", "quadratic"]:
-                # "linear" corresponds to a piecewise linear dependence of logk on theta
-                # while "quadratic" corresponds to a quadratic dependence and leads
-                # to a large variance
-                diff_fact = np.sqrt(3.0) if symmetrize == "quadratic" else 1.0
-
-                # split asymmetric variation into two symmetric variations
-                logkavg_proc = 0.5 * (logkup_proc + logkdown_proc)
-                logkdiffavg_proc = 0.5 * diff_fact * (logkup_proc - logkdown_proc)
-
-                var_name_out = name + "SymAvg"
-                var_name_out_diff = name + "SymDiff"
-
-                # special case, book the extra systematic
-                self.book_logk_avg(
-                    logkdiffavg_proc, channel, process, var_name_out_diff
-                )
-                self.book_systematic(
-                    var_name_out_diff,
-                    add_to_data_covariance=add_to_data_covariance,
-                    **kargs,
-                )
-            else:
-                if add_to_data_covariance:
-                    raise RuntimeError(
-                        "add_to_data_covariance requires symmetric uncertainties"
-                    )
-
-                self.symmetric_tensor = False
-
-                logkavg_proc = 0.5 * (logkup_proc + logkdown_proc)
-                logkhalfdiff_proc = 0.5 * (logkup_proc - logkdown_proc)
-
-                self.book_logk_halfdiff(
-                    logkhalfdiff_proc, channel, process, var_name_out
-                )
-            logkup_proc = None
-            logkdown_proc = None
+            logkavg_proc = self._compute_asym_syst(
+                logkup_proc,
+                logkdown_proc,
+                name,
+                process,
+                channel,
+                symmetrize,
+                add_to_data_covariance,
+                **kargs,
+            )
         elif mirror:
             self._check_hist_and_channel(h, channel)
             syst = self.get_flat_values(h)
@@ -412,7 +468,7 @@ class TensorWriter:
         # nbinsfull including masked channels
         nbinsfull = sum([v for v in self.nbinschan.values()])
 
-        print(f"Write out nominal arrays")
+        logger.info(f"Write out nominal arrays")
         sumw = np.zeros([nbinsfull], self.dtype)
         sumw2 = np.zeros([nbinsfull], self.dtype)
         data_obs = np.zeros([nbins], self.dtype)
@@ -443,11 +499,11 @@ class TensorWriter:
         nsyst = len(systs)
 
         if self.symmetric_tensor:
-            print("No asymmetric systematics - write fully symmetric tensor")
+            logger.info("No asymmetric systematics - write fully symmetric tensor")
 
         ibin = 0
         if self.sparse:
-            print(f"Write out sparse array")
+            logger.info(f"Write out sparse array")
             norm_sparse_size = 0
             norm_sparse_indices = np.zeros([norm_sparse_size, 2], self.idxdtype)
             norm_sparse_values = np.zeros([norm_sparse_size], self.dtype)
@@ -571,7 +627,7 @@ class TensorWriter:
 
                 ibin += nbinschan
 
-            print(f"Resize and sort sparse arrays into canonical order")
+            logger.info(f"Resize and sort sparse arrays into canonical order")
             # resize sparse arrays to actual length
             norm_sparse_indices.resize([norm_sparse_size, 2])
             norm_sparse_values.resize([norm_sparse_size])
@@ -616,7 +672,7 @@ class TensorWriter:
             logk_sort_indices = None
 
         else:
-            print(f"Write out dense array")
+            logger.info(f"Write out dense array")
             # initialize with zeros, i.e. no variation
             norm = np.zeros([nbinsfull, nproc], self.dtype)
             if self.symmetric_tensor:
@@ -674,7 +730,7 @@ class TensorWriter:
         systSize = 2 * nsyst * np.dtype(self.dtype).itemsize
         amax = np.max([procSize, systSize])
         if amax > self.chunkSize:
-            print(
+            logger.info(
                 f"Maximum chunk size in bytes was increased from {self.chunkSize} to {amax} to align with tensor sizes and allow more efficient reading/writing."
             )
             self.chunkSize = amax
@@ -685,7 +741,7 @@ class TensorWriter:
         outpath = f"{outfolder}/{outfilename}"
         if len(outfilename.split(".")) < 2:
             outpath += ".hdf5"
-        print(f"Write output file {outpath}")
+        logger.info(f"Write output file {outpath}")
         f = h5py.File(outpath, rdcc_nbytes=self.chunkSize, mode="w")
 
         # propagate meta info into result file
@@ -827,7 +883,7 @@ class TensorWriter:
             )
             logk = None
 
-        print(f"Total raw bytes in arrays = {nbytes}")
+        logger.info(f"Total raw bytes in arrays = {nbytes}")
 
     def get_systsstandard(self):
         return list(common.natural_sort(self.systsstandard))
