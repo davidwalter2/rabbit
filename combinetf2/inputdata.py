@@ -1,13 +1,10 @@
 import h5py
 import hist
 import numpy as np
-import tensorflow as tf
-
-from combinetf2.h5pyutils import makesparsetensor, maketensor
 
 
 class FitInputData:
-    def __init__(self, filename, pseudodata=None):
+    def __init__(self, bn, filename, pseudodata=None):
         with h5py.File(filename, mode="r") as f:
 
             # load text arrays from file
@@ -30,7 +27,7 @@ class FitInputData:
 
             if "hdata_cov_inv" in f.keys():
                 hdata_cov_inv = f["hdata_cov_inv"]
-                self.data_cov_inv = maketensor(hdata_cov_inv)
+                self.data_cov_inv = bn.maketensor(hdata_cov_inv)
             else:
                 self.data_cov_inv = None
 
@@ -47,13 +44,13 @@ class FitInputData:
                 print(self.pseudodatanames[pseudodata_idx])
                 hdata_obs = f["hpseudodata"]
 
-                data_obs = maketensor(hdata_obs)
+                data_obs = bn.maketensor(hdata_obs)
                 self.data_obs = data_obs[:, pseudodata_idx]
             else:
-                self.data_obs = maketensor(f["hdata_obs"])
+                self.data_obs = bn.maketensor(f["hdata_obs"])
 
             # start by creating tensors which read in the hdf5 arrays (optimized for memory consumption)
-            self.constraintweights = maketensor(f["hconstraintweights"])
+            self.constraintweights = bn.maketensor(f["hconstraintweights"])
 
             self.sparse = not "hnorm" in f
 
@@ -61,11 +58,11 @@ class FitInputData:
                 print(
                     "WARNING: The sparse tensor implementation is experimental and probably slower than with a dense tensor!"
                 )
-                self.norm = makesparsetensor(f["hnorm_sparse"])
-                self.logk = makesparsetensor(f["hlogk_sparse"])
+                self.norm = bn.makesparsetensor(f["hnorm_sparse"])
+                self.logk = bn.makesparsetensor(f["hlogk_sparse"])
             else:
-                self.norm = maketensor(f["hnorm"])
-                self.logk = maketensor(f["hlogk"])
+                self.norm = bn.maketensor(f["hnorm"])
+                self.logk = bn.maketensor(f["hlogk"])
 
             # infer some metadata from loaded information
             self.dtype = self.data_obs.dtype
@@ -124,16 +121,16 @@ class FitInputData:
             self.systematic_type = self.metadata.get("systematic_type", "log_normal")
 
             if "hsumw2" in f.keys():
-                self.sumw = maketensor(f["hsumw"])
-                self.sumw2 = maketensor(f["hsumw2"])
+                self.sumw = bn.maketensor(f["hsumw"])
+                self.sumw2 = bn.maketensor(f["hsumw2"])
             else:
                 # fallback for older datacards
-                kstat = maketensor(f["hkstat"])
+                kstat = bn.maketensor(f["hkstat"])
 
-                self.sumw = self.expected_events_nominal()
+                self.sumw = self.expected_events_nominal(bn)
                 self.sumw2 = self.sumw**2 / kstat
 
-                self.sumw2 = tf.where(kstat == 0.0, self.sumw, self.sumw2)
+                self.sumw2 = bn.where(kstat == 0.0, self.sumw, self.sumw2)
 
             # compute indices for channels
             ibin = 0
@@ -155,16 +152,16 @@ class FitInputData:
 
             self.axis_procs = hist.axis.StrCategory(self.procs, name="processes")
 
-    @tf.function
-    def expected_events_nominal(self):
-        rnorm = tf.ones(self.nproc, dtype=self.dtype)
-        mrnorm = tf.expand_dims(rnorm, -1)
+    # @tf.function
+    def expected_events_nominal(self, bn):
+        rnorm = bn.ones(self.nproc, dtype=self.dtype)
+        mrnorm = bn.expand_dims(rnorm, -1)
 
         if self.sparse:
-            nexpfullcentral = tf.sparse.sparse_dense_matmul(self.norm, mrnorm)
-            nexpfullcentral = tf.squeeze(nexpfullcentral, -1)
+            nexpfullcentral = bn.sparse.sparse_dense_matmul(self.norm, mrnorm)
+            nexpfullcentral = bn.squeeze(nexpfullcentral, -1)
         else:
-            nexpfullcentral = tf.matmul(self.norm, mrnorm)
-            nexpfullcentral = tf.squeeze(nexpfullcentral, -1)
+            nexpfullcentral = bn.matmul(self.norm, mrnorm)
+            nexpfullcentral = bn.squeeze(nexpfullcentral, -1)
 
         return nexpfullcentral

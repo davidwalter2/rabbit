@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 
-import tensorflow as tf
-
-tf.config.experimental.enable_op_determinism()
-
 import argparse
 import time
 
 import h5py
 import numpy as np
 
-from combinetf2 import fitter, inputdata, io_tools, workspace
+from combinetf2 import inputdata, io_tools, workspace
 from combinetf2.physicsmodels import helpers as ph
 from combinetf2.tfhelpers import edmval_cov
 
@@ -37,6 +33,13 @@ def make_parser():
         action="store_true",
         default=False,
         help="Run tensorflow in eager mode (for debugging)",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="tf",
+        choices=["tf", "jax"],
+        help="Choose backend library for computations",
     )
     parser.add_argument(
         "--diagnostics",
@@ -385,7 +388,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
             )
 
             if prefit:
-                fitter.cov.assign(tf.constant(cov_prefit))
+                fitter.assign_cov(cov_prefit)
 
 
 def fit(args, fitter, ws, dofit=True):
@@ -421,7 +424,7 @@ def fit(args, fitter, ws, dofit=True):
         covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
 
         fitter.x.assign(xvals)
-        fitter.cov.assign(tf.constant(covval))
+        fitter.assign_cov(covval)
     else:
         if dofit:
             fitter.minimize()
@@ -472,8 +475,7 @@ def fit(args, fitter, ws, dofit=True):
     )
 
     ws.add_parms_hist(
-        values=fitter.x,
-        variances=tf.linalg.diag_part(fitter.cov),
+        *fitter.get_params(),
         hist_name="parms",
     )
 
@@ -546,26 +548,29 @@ def main():
     start_time = time.time()
     args = make_parser()
 
-    if args.eager:
-        tf.config.run_functions_eagerly(True)
-
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
-    indata = inputdata.FitInputData(args.filename, args.pseudoData)
-    ifitter = fitter.Fitter(indata, args)
+    if args.backend == "tf":
+        from combinetf2.backend_tf import BackendTf as Backend
+        from combinetf2.fitter_tf import FitterTf as Fitter
+    elif args.backend == "jax":
+        from combinetf2.backend_jax import BackendJax as Backend
+        from combinetf2.fitter_jax import FitterJax as Fitter
 
-    # physics models for observables and transformations
-    if len(args.physicsModel) == 0:
-        # if no model is explicitly added, fall back to Basemodel
-        args.physicsModel = [["Basemodel"]]
+    bn = Backend(args)
+
+    indata = inputdata.FitInputData(bn, args.filename, args.pseudoData)
+    ifitter = Fitter(bn, indata, args)
+
+    # # physics models for observables and transformations
+    # if len(args.physicsModel) == 0:
+    #     # if no model is explicitly added, fall back to Basemodel
+    #     args.physicsModel = [["Basemodel"]]
     models = []
     for margs in args.physicsModel:
         model = ph.instance_from_class(margs[0], indata, *margs[1:])
         models.append(model)
-
-    np.random.seed(args.seed)
-    tf.random.set_seed(args.seed)
 
     # pass meta data into output file
     meta = {
@@ -617,8 +622,7 @@ def main():
                 )
 
             ws.add_parms_hist(
-                values=ifitter.x,
-                variances=tf.linalg.diag_part(ifitter.cov),
+                *ifitter.get_params(),
                 hist_name="parms_prefit",
             )
 
