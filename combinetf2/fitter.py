@@ -204,7 +204,10 @@ class Fitter:
 
         unblind_parameters = [
             s
-            for s in [*self.indata.signals, *self.indata.noigroups]
+            for s in [
+                *self.indata.signals,
+                *[self.indata.systs[i] for i in self.indata.noigroupidxs],
+            ]
             if any(regex.match(s.decode()) for regex in compiled_expressions)
         ]
 
