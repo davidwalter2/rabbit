@@ -7,6 +7,17 @@ from wums import logging
 logger = logging.child_logger(__name__)
 
 
+class FitterCallback:
+    def __init__(self, xv):
+        self.iiter = 0
+        self.xval = xv
+
+    def __call__(self, intermediate_result):
+        logger.debug(f"Iteration {self.iiter}: loss value {intermediate_result.fun}")
+        self.xval = intermediate_result.x
+        self.iiter += 1
+
+
 class Fitter:
     def __init__(self, bn, indata, options):
         self.bn = bn
@@ -60,24 +71,12 @@ class Fitter:
 
         self.pois = []
 
-        if 0 in options.toys:
-            self.init_blinding_values(options.unblind)
-
         self.parms = np.concatenate([self.pois, self.indata.systs])
 
         self.allowNegativePOI = options.allowNegativePOI
 
         # observed number of events per bin
         self.data_cov_inv = None
-
-        # determine if problem is linear (ie likelihood is purely quadratic)
-        self.is_linear = (
-            self.chisqFit
-            and (self.npoi == 0 or self.allowNegativePOI)
-            and self.indata.symmetric_tensor
-            and self.indata.systematic_type == "normal"
-            and ((not self.binByBinStat) or self.binByBinStatType == "normal")
-        )
 
         if options.POIMode == "mu":
             self.npoi = self.indata.nsignals
@@ -102,6 +101,9 @@ class Fitter:
             trainable=False,
             name="offset_theta",
         )
+
+        if 0 in options.toys:
+            self.init_blinding_values(options.unblind)
 
         self.parms = np.concatenate([self.pois, self.indata.systs])
 
@@ -186,6 +188,48 @@ class Fitter:
             name="cov",
         )
 
+        # determine if problem is linear (ie likelihood is purely quadratic)
+        self.is_linear = (
+            self.chisqFit
+            and (self.npoi == 0 or self.allowNegativePOI)
+            and self.indata.symmetric_tensor
+            and self.indata.systematic_type == "normal"
+            and ((not self.binByBinStat) or self.binByBinStatType == "normal")
+        )
+
+    def theta0defaultassign(self):
+        self.theta0 = self.bn.assign(
+            self.theta0, self.bn.zeros([self.indata.nsyst], dtype=self.theta0.dtype)
+        )
+
+    def xdefaultassign(self):
+        if self.npoi == 0:
+            self.x = self.bn.assign(self.x, self.theta0)
+        else:
+            self.x = self.bn.assign(
+                self.x, self.bn.concat([self.xpoidefault, self.theta0], axis=0)
+            )
+
+    def beta0defaultassign(self):
+        self.beta0 = self.bn.assign(self.beta0, self._default_beta0())
+
+    def betadefaultassign(self):
+        self.beta = self.bn.assign(self.beta, self.beta0)
+
+    def defaultassign(self):
+        self.cov = self.bn.assign(
+            self.cov,
+            self.prefit_covariance(
+                unconstrained_err=self.prefitUnconstrainedNuisanceUncertainty
+            ),
+        )
+        self.theta0defaultassign()
+        if self.binByBinStat:
+            self.beta0defaultassign()
+            self.betadefaultassign()
+        self.xdefaultassign()
+        self.set_blinding_offsets(False)
+
     def init_blinding_values(self, unblind_parameter_expressions=[]):
         # Find parameters that match any regex
         compiled_expressions = [
@@ -242,12 +286,19 @@ class Fitter:
 
     def set_blinding_offsets(self, blind=True):
         if blind:
-            self._blinding_offsets_poi.assign(self._blinding_values_poi)
-            self._blinding_offsets_theta.assign(self._blinding_values_theta)
+            self._blinding_offsets_poi = self.bn.assign(
+                self._blinding_offsets_poi, self._blinding_values_poi
+            )
+            self._blinding_offsets_theta = self.bn.assign(
+                self._blinding_offsets_theta, self._blinding_values_theta
+            )
         else:
-            self._blinding_offsets_poi.assign(np.ones(self.npoi, dtype=np.float64))
-            self._blinding_offsets_theta.assign(
-                np.zeros(self.indata.nsyst, dtype=np.float64)
+            self._blinding_offsets_poi = self.bn.assign(
+                self._blinding_offsets_poi, np.ones(self.npoi, dtype=np.float64)
+            )
+            self._blinding_offsets_theta = self.bn.assign(
+                self._blinding_offsets_theta,
+                np.zeros(self.indata.nsyst, dtype=np.float64),
             )
 
     def get_blinded_theta(self):

@@ -7,8 +7,13 @@ logger = logging.child_logger(__name__)
 
 
 class BackendTf(Backend):
+
+    _math_funcs = ["reciprocal", "reduce_any"]
+    _linalg_funcs = ["diag_part", "diag"]
+
     def __init__(self, options):
         super().__init__(options)
+        self.bn = tf
         tf.config.experimental.enable_op_determinism()
 
         if options.eager:
@@ -16,52 +21,29 @@ class BackendTf(Backend):
 
         tf.random.set_seed(options.seed)
 
-    def ones(self, *args, **kwargs):
-        return tf.ones(*args, **kwargs)
+        self._initialize_shared_funcs()
 
-    def ones_like(self, *args, **kwargs):
-        return tf.ones_like(*args, **kwargs)
+        for name in self._math_funcs:
+            setattr(self, name, getattr(tf.math, name))
 
-    def zeros(self, *args, **kwargs):
-        return tf.zeros(*args, **kwargs)
+        for name in self._linalg_funcs:
+            setattr(self, name, getattr(tf.linalg, name))
 
-    def zeros_like(self, *args, **kwargs):
-        return tf.zeros_like(*args, **kwargs)
+    @staticmethod
+    def assign(variable, values, *args, **kwargs):
+        variable.assign(values, *args, **kwargs)
+        return variable
 
-    def eye(self, *args, **kwargs):
-        return tf.eye(*args, **kwargs)
-
-    def sqrt(self, *args, **kwargs):
-        return tf.sqrt(*args, **kwargs)
-
-    def square(self, *args, **kwargs):
-        return tf.square(*args, **kwargs)
-
-    def reciprocal(self, *args, **kwargs):
-        return tf.math.reciprocal(*args, **kwargs)
-
-    def concat(self, *args, **kwargs):
-        return tf.concat(*args, **kwargs)
-
-    def reduce_any(self, *args, **kwargs):
-        return tf.math.reduce_any(*args, **kwargs).numpy()
-
-    def where(self, *args, **kwargs):
-        return tf.where(*args, **kwargs)
-
-    def diag_part(self, *args, **kwargs):
-        return tf.linalg.diag_part(*args, **kwargs)
-
-    def diag(self, *args, **kwargs):
-        return tf.linalg.diag(*args, **kwargs)
-
-    def diag_operator(self, *args, **kwargs):
+    @staticmethod
+    def diag_operator(*args, **kwargs):
         return tf.linalg.LinearOperatorDiag(*args, **kwargs)
 
-    def lu(self, x, *args, **kwargs):
+    @staticmethod
+    def lu(x, *args, **kwargs):
         return tf.linalg.lu(x)
 
-    def variable(self, x, *args, **kwargs):
+    @staticmethod
+    def variable(x, *args, **kwargs):
         return tf.Variable(x, *args, **kwargs)
 
     def assign_cov(self, values):

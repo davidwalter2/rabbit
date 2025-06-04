@@ -8,7 +8,6 @@ import numpy as np
 
 from combinetf2 import inputdata, io_tools, workspace
 from combinetf2.physicsmodels import helpers as ph
-from combinetf2.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
 
@@ -429,7 +428,7 @@ def fit(args, fitter, ws, dofit=True):
         xvals[idxs] = x_ext[idxs_ext]
         covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
 
-        fitter.x.assign(xvals)
+        fitter.x = fitter.x.assign(xvals)
         fitter.assign_cov(covval)
     else:
         if dofit:
@@ -441,13 +440,11 @@ def fit(args, fitter, ws, dofit=True):
 
             val, grad, hess = fitter.loss_val_grad_hess()
 
-            edmval, cov = edmval_cov(grad, hess)
+            edmval, cov = fitter.edmval_cov(grad, hess)
 
             logger.info(f"edmval: {edmval}")
 
-            fitter.cov.assign(cov)
-
-            del cov
+            fitter.assign_cov(cov)
 
             if fitter.binByBinStat and fitter.diagnostics:
                 # This is the estimated distance to minimum with respect to variations of
@@ -455,7 +452,7 @@ def fit(args, fitter, ws, dofit=True):
                 # It should be near-zero by construction as long as the analytic profiling is
                 # correct
                 _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
-                edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
+                edmvalbeta, covbeta = fitter.edmval_cov(gradbeta, hessbeta)
                 logger.info(f"edmvalbeta: {edmvalbeta}")
 
             if args.doImpacts:
@@ -466,11 +463,8 @@ def fit(args, fitter, ws, dofit=True):
             if args.globalImpacts:
                 ws.add_global_impacts_hists(*fitter.global_impacts_parms())
 
-    nllvalfull = fitter.full_nll().numpy()
+    nllvalfull = fitter.full_nll()
     satnllvalfull, ndfsat = fitter.saturated_nll()
-
-    satnllvalfull = satnllvalfull.numpy()
-    ndfsat = ndfsat.numpy()
 
     ws.results.update(
         {
@@ -621,9 +615,9 @@ def main():
             group = "results"
             if ifit == -1:
                 group += "_asimov"
-                ifitter.nobs.assign(ifitter.expected_yield())
+                ifitter.bn.assign(ifitter.nobs, ifitter.expected_yield())
             if ifit == 0:
-                ifitter.nobs.assign(ifitter.indata.data_obs)
+                ifitter.bn.assign(ifitter.nobs, ifitter.indata.data_obs)
 
             elif ifit >= 1:
                 group += f"_toy{ifit}"

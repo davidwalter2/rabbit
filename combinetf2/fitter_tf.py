@@ -5,20 +5,10 @@ import tensorflow_probability as tfp
 from wums import logging
 
 from combinetf2 import tfhelpers as tfh
-from combinetf2.fitter import Fitter
+from combinetf2.fitter import Fitter, FitterCallback
+from combinetf2.tfhelpers import edmval_cov
 
 logger = logging.child_logger(__name__)
-
-
-class FitterCallback:
-    def __init__(self, xv):
-        self.iiter = 0
-        self.xval = xv
-
-    def __call__(self, intermediate_result):
-        logger.debug(f"Iteration {self.iiter}: loss value {intermediate_result.fun}")
-        self.xval = intermediate_result.x
-        self.iiter += 1
 
 
 class FitterTf(Fitter):
@@ -35,6 +25,10 @@ class FitterTf(Fitter):
     def assign_cov(self, values):
         self.cov.assign(tf.constant(values))
 
+    @staticmethod
+    def edmval_cov(*args, **kwargs):
+        return edmval_cov(*args, **kwargs)
+
     @tf.function
     def val_jac(self, fun, *args, **kwargs):
         with tf.GradientTape() as t:
@@ -42,34 +36,6 @@ class FitterTf(Fitter):
         jac = t.jacobian(val, self.x)
 
         return val, jac
-
-    def theta0defaultassign(self):
-        self.theta0.assign(tf.zeros([self.indata.nsyst], dtype=self.theta0.dtype))
-
-    def xdefaultassign(self):
-        if self.npoi == 0:
-            self.x.assign(self.theta0)
-        else:
-            self.x.assign(tf.concat([self.xpoidefault, self.theta0], axis=0))
-
-    def beta0defaultassign(self):
-        self.beta0.assign(self._default_beta0())
-
-    def betadefaultassign(self):
-        self.beta.assign(self.beta0)
-
-    def defaultassign(self):
-        self.cov.assign(
-            self.prefit_covariance(
-                unconstrained_err=self.prefitUnconstrainedNuisanceUncertainty
-            )
-        )
-        self.theta0defaultassign()
-        if self.binByBinStat:
-            self.beta0defaultassign()
-            self.betadefaultassign()
-        self.xdefaultassign()
-        self.set_blinding_offsets(False)
 
     def bayesassign(self):
         # FIXME use theta0 as the mean and constraintweight to scale the width
@@ -1094,8 +1060,12 @@ class FitterTf(Fitter):
         res, _ = self._compute_yields_noBBB(full=full)
         return res
 
-    @tf.function
     def saturated_nll(self):
+        lsaturated, ndof = self._saturated_nll()
+        return lsaturated.numpy(), ndof.numpy()
+
+    @tf.function
+    def _saturated_nll(self):
 
         nobs = self.nobs
 
@@ -1125,13 +1095,19 @@ class FitterTf(Fitter):
 
         return lsaturated, ndof
 
-    @tf.function
     def full_nll(self):
+        return self._full_nll().numpy()
+
+    def reduced_nll(self):
+        return self._reduced_nll().numpy()
+
+    @tf.function
+    def _full_nll(self):
         l, lfull = self._compute_nll()
         return lfull
 
     @tf.function
-    def reduced_nll(self):
+    def _reduced_nll(self):
         l, lfull = self._compute_nll()
         return l
 
@@ -1334,12 +1310,18 @@ class FitterTf(Fitter):
                 self.x.assign(xval)
                 val, grad = self.loss_val_grad()
                 # print(f"Gradient: {grad}")
+                logger.debug(f"val = {val}")
+                logger.debug(f"grad = {grad}")
                 return val.__array__(), grad.__array__()
 
             def scipy_hessp(xval, pval):
+                # logger.debug(f"xval = {xval}")
+                # logger.debug(f"pval = {pval}")
                 self.x.assign(xval)
                 p = tf.convert_to_tensor(pval)
                 val, grad, hessp = self.loss_val_grad_hessp(p)
+                # logger.debug(f"hessp = {hessp.__array__()}")
+                logger.debug(f"hessp = {hessp}")
                 return hessp.__array__()
 
             def scipy_hess(xval):

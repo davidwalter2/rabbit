@@ -8,66 +8,60 @@ from combinetf2.backend import Backend
 
 
 class BackendJax(Backend):
+
+    _jnp_funcs = [
+        "reciprocal",
+        "diag",
+        "eye",
+        "where",
+        "sqrt",
+        "square",
+        "concat",
+        "matmul",
+        "expand_dims",
+    ]
+
     def __init__(self, options):
+        jax.config.update("jax_enable_x64", True)
+
         super().__init__(options)
         # tf.config.experimental.enable_op_determinism()
 
+        self.bn = jnp
         if options.eager:
             # TODO
             pass
 
         # tf.random.set_seed(options.seed)
 
-    def ones(self, *args, **kwargs):
-        return jnp.ones(*args, **kwargs)
+        self._initialize_shared_funcs()
 
-    def ones_like(self, *args, **kwargs):
-        return jnp.ones_like(*args, **kwargs)
+        for name in self._jnp_funcs:
+            setattr(self, name, getattr(self.bn, name))
 
-    def zeros(self, *args, **kwargs):
-        return jnp.zeros(*args, **kwargs)
+    @staticmethod
+    def diag_part(*args, **kwargs):
+        return jnp.diagonal(*args, **kwargs)
 
-    def zeros_like(self, *args, **kwargs):
-        return jnp.zeros_like(*args, **kwargs)
-
-    def eye(self, *args, **kwargs):
-        return jnp.eye(*args, **kwargs)
-
-    def sqrt(self, *args, **kwargs):
-        return jnp.sqrt(*args, **kwargs)
-
-    def square(self, *args, **kwargs):
-        return jnp.square(*args, **kwargs)
-
-    def reciprocal(self, *args, **kwargs):
-        return jnp.reciprocal(*args, **kwargs)
-
-    def concat(self, *args, **kwargs):
-        return jnp.concatenate(*args, **kwargs)
-
-    def reduce_any(self, *args, **kwargs):
+    @staticmethod
+    def reduce_any(*args, **kwargs):
         return jnp.any(*args, **kwargs)
 
-    def where(self, *args, **kwargs):
-        return jnp.where(*args, **kwargs)
-
-    def diag_part(self, *args, **kwargs):
-        return jnp.diag_part(*args, **kwargs)
-
-    def diag(self, *args, **kwargs):
-        return jnp.diag(*args, **kwargs)
-
-    def diag_operator(self, *args, **kwargs):
-        return jnp.diag(*args, **kwargs)
-
-    def lu(self, *args, **kwargs):
+    @staticmethod
+    def lu(*args, **kwargs):
         return jax.scipy.linalg.lu(*args, **kwargs)
 
-    def variable(self, x, *args, **kwargs):
+    @staticmethod
+    def variable(x, *args, **kwargs):
         # JAX has no mutable variables; just return x
         return x
 
-    def maketensor(self, h5dset):
+    @staticmethod
+    def assign(variable, values, *args, **kwargs):
+        return values
+
+    @staticmethod
+    def maketensor(h5dset):
         # Determine the intended shape
         shape = h5dset.attrs.get("original_shape", h5dset.shape)
 
