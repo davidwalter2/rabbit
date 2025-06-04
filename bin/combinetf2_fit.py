@@ -169,6 +169,12 @@ def make_parser():
         help="use prefit uncertainty to define scan range",
     )
     parser.add_argument(
+        "--noHessian",
+        default=False,
+        action="store_true",
+        help="Don't compute the hessian of parameters",
+    )
+    parser.add_argument(
         "--saveHists",
         default=False,
         action="store_true",
@@ -295,7 +301,7 @@ def make_parser():
         type=str,
         default=[],
         nargs="*",
-        help="Specify list of parameters or regex (leading by 'r:') to unblind matching parameters of interest. E.g. 'r:.*' to unblind all.",
+        help="Specify list of regex to unblind matching parameters of interest. E.g. use '^signal$' to unblind a parameter named signal or '.*' to unblind all.",
     )
 
     return parser.parse_args()
@@ -431,32 +437,34 @@ def fit(args, fitter, ws, dofit=True):
 
         # compute the covariance matrix and estimated distance to minimum
 
-        val, grad, hess = fitter.loss_val_grad_hess()
+        if not args.noHessian:
 
-        edmval, cov = edmval_cov(grad, hess)
+            val, grad, hess = fitter.loss_val_grad_hess()
 
-        logger.info(f"edmval: {edmval}")
+            edmval, cov = edmval_cov(grad, hess)
 
-        fitter.cov.assign(cov)
+            logger.info(f"edmval: {edmval}")
 
-        del cov
+            fitter.cov.assign(cov)
 
-        if fitter.binByBinStat and fitter.diagnostics:
-            # This is the estimated distance to minimum with respect to variations of
-            # the implicit binByBinStat nuisances beta at fixed parameter values.
-            # It should be near-zero by construction as long as the analytic profiling is
-            # correct
-            _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
-            edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
-            logger.info(f"edmvalbeta: {edmvalbeta}")
+            del cov
 
-        if args.doImpacts:
-            ws.add_impacts_hists(*fitter.impacts_parms(hess))
+            if fitter.binByBinStat and fitter.diagnostics:
+                # This is the estimated distance to minimum with respect to variations of
+                # the implicit binByBinStat nuisances beta at fixed parameter values.
+                # It should be near-zero by construction as long as the analytic profiling is
+                # correct
+                _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
+                edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
+                logger.info(f"edmvalbeta: {edmvalbeta}")
 
-        del hess
+            if args.doImpacts:
+                ws.add_impacts_hists(*fitter.impacts_parms(hess))
 
-        if args.globalImpacts:
-            ws.add_global_impacts_hists(*fitter.global_impacts_parms())
+            del hess
+
+            if args.globalImpacts:
+                ws.add_global_impacts_hists(*fitter.global_impacts_parms())
 
     nllvalfull = fitter.full_nll().numpy()
     satnllvalfull, ndfsat = fitter.saturated_nll()
@@ -475,11 +483,12 @@ def fit(args, fitter, ws, dofit=True):
     )
 
     ws.add_parms_hist(
-        *fitter.get_params(),
+        *fitter.get_params(variances=not args.noHessian),
         hist_name="parms",
     )
 
-    ws.add_cov_hist(fitter.cov)
+    if not args.noHessian:
+        ws.add_cov_hist(fitter.cov)
 
     if args.scan is not None:
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
@@ -548,6 +557,9 @@ def main():
     start_time = time.time()
     args = make_parser()
 
+    if args.noHessian and args.doImpacts:
+        raise Exception('option "--noHessian" only works without "--doImpacts"')
+
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
@@ -563,10 +575,11 @@ def main():
     indata = inputdata.FitInputData(bn, args.filename, args.pseudoData)
     ifitter = Fitter(bn, indata, args)
 
-    # # physics models for observables and transformations
-    # if len(args.physicsModel) == 0:
-    #     # if no model is explicitly added, fall back to Basemodel
-    #     args.physicsModel = [["Basemodel"]]
+    # physics models for observables and transformations
+    if len(args.physicsModel) == 0 and args.saveHists:
+        # if no model is explicitly added and --saveHists is specified, fall back to Basemodel
+        args.physicsModel = [["Basemodel"]]
+
     models = []
     for margs in args.physicsModel:
         model = ph.instance_from_class(margs[0], indata, *margs[1:])
