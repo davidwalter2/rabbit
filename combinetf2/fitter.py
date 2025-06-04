@@ -14,6 +14,8 @@ class FitterCallback:
 
     def __call__(self, intermediate_result):
         logger.debug(f"Iteration {self.iiter}: loss value {intermediate_result.fun}")
+        if np.isnan(intermediate_result.fun):
+            raise ValueError(f"Loss value is NaN at iteration {self.iiter}")
         self.xval = intermediate_result.x
         self.iiter += 1
 

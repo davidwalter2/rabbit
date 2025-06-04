@@ -78,7 +78,7 @@ class FitterTf(Fitter):
                     tf.random.normal(
                         shape=[],
                         mean=self.beta0,
-                        sigma=tf.ones_like(self.beta0),
+                        stddev=tf.ones_like(self.beta0),
                         dtype=self.beta.dtype,
                     )
                 )
@@ -107,7 +107,7 @@ class FitterTf(Fitter):
                     tf.random.normal(
                         shape=[],
                         mean=self.beta,
-                        sigma=tf.ones_like(self.beta0),
+                        stddev=tf.ones_like(self.beta0),
                         dtype=self.beta.dtype,
                     )
                 )
