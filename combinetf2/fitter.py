@@ -19,6 +19,8 @@ class FitterCallback:
 
     def __call__(self, intermediate_result):
         logger.debug(f"Iteration {self.iiter}: loss value {intermediate_result.fun}")
+        if np.isnan(intermediate_result.fun):
+            raise ValueError(f"Loss value is NaN at iteration {self.iiter}")
         self.xval = intermediate_result.x
         self.iiter += 1
 
@@ -370,7 +372,7 @@ class Fitter:
                     tf.random.normal(
                         shape=[],
                         mean=self.beta0,
-                        sigma=tf.ones_like(self.beta0),
+                        stddev=tf.ones_like(self.beta0),
                         dtype=self.beta.dtype,
                     )
                 )
@@ -399,7 +401,7 @@ class Fitter:
                     tf.random.normal(
                         shape=[],
                         mean=self.beta,
-                        sigma=tf.ones_like(self.beta0),
+                        stddev=tf.ones_like(self.beta0),
                         dtype=self.beta.dtype,
                     )
                 )
