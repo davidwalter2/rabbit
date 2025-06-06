@@ -570,7 +570,7 @@ class Fitter:
                     _1, _2, beta = self._compute_yields_with_beta(
                         profile=True, compute_norm=False, full=False
                     )
-                    lbeta, _ = self._compute_lbeta(beta)
+                    lbeta = self._compute_lbeta(beta)
                 pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
                 dlcdx = t1.gradient(lc, self.x)
                 dbetadx = t1.jacobian(beta, self.x)
@@ -648,7 +648,7 @@ class Fitter:
                     _1, _2, beta = self._compute_yields_with_beta(
                         profile=False, compute_norm=False, full=False
                     )
-                    lbeta, _ = self._compute_lbeta(beta)
+                    lbeta = self._compute_lbeta(beta)
                     val = lbeta
 
             pdldbeta = t1.gradient(val, self.ubeta)
@@ -813,7 +813,7 @@ class Fitter:
                         _1, _2, beta = self._compute_yields_with_beta(
                             profile=profile, compute_norm=False, full=False
                         )
-                        lbeta, _ = self._compute_lbeta(beta)
+                        lbeta = self._compute_lbeta(beta)
                     pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
                     dlcdx = t1.gradient(lc, self.x)
                     dbetadx = t1.jacobian(beta, self.x)
@@ -1230,7 +1230,7 @@ class Fitter:
                     _1, _2, beta = self._compute_yields_with_beta(
                         profile=False, compute_norm=False, full=False
                     )
-                    lbeta, _ = self._compute_lbeta(beta)
+                    lbeta = self._compute_lbeta(beta)
 
                 dlbetadbeta = t1.gradient(lbeta, self.ubeta)
             pd2lbetadbetadbeta0 = t2.gradient(dlbetadbeta, self.beta0)
@@ -1385,45 +1385,49 @@ class Fitter:
 
     @tf.function
     def full_nll(self):
-        l, lfull = self._compute_nll()
-        return lfull
+        return self._compute_nll(full_nll=True)
 
     @tf.function
     def reduced_nll(self):
-        l, lfull = self._compute_nll()
-        return l
+        return self._compute_nll(full_nll=False)
 
-    def _compute_lc(self):
+    def _compute_lc(self, full_nll=False):
         # constraints
         theta = self.get_blinded_theta()
-        lc = tf.reduce_sum(
-            self.indata.constraintweights * 0.5 * tf.square(theta - self.theta0)
-        )
-        return lc
+        lc = self.indata.constraintweights * 0.5 * tf.square(theta - self.theta0)
+        if full_nll:
+            # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
+            lc = lc + 0.9189385332046727 * self.indata.constraintweights
 
-    def _compute_lbeta(self, beta):
+        return tf.reduce_sum(lc)
+
+    def _compute_lbeta(self, beta, full_nll=False):
         if self.binByBinStat:
             beta0 = self.beta0
             if self.binByBinStatType == "gamma":
                 kstat = self.kstat
+                if full_nll:
+                    # constant terms
+                    lgammaalpha = tf.math.lgamma(kstat*beta0)
+                    alphalntheta = -kstat * beta0 * tf.math.log(kstat)
 
-                lbetavfull = -kstat * beta0 * tf.math.log(beta) + kstat * beta
-
-                lbetav = -kstat * beta0 * tf.math.log(beta) + kstat * (beta - 1.0)
-
-                lbetafull = tf.reduce_sum(lbetavfull)
-                lbeta = tf.reduce_sum(lbetav)
+                    lbeta = -kstat * beta0 * tf.math.log(beta) + kstat * beta + lgammaalpha + alphalntheta
+                else:
+                    lbeta = -kstat * beta0 * tf.math.log(beta) + kstat * (beta - 1.0)
             elif self.binByBinStatType == "normal":
-                lbetavfull = 0.5 * (beta - beta0) ** 2
+                lbeta = 0.5 * tf.square(beta - beta0)
 
-                lbetafull = tf.reduce_sum(lbetavfull)
-                lbeta = lbetafull
-        else:
-            lbeta = None
-            lbetafull = None
-        return lbeta, lbetafull
+                if full_nll:
+                    sigma2 = self.indata.sumw2/tf.square(self.indata.sumw)
 
-    def _compute_nll_components(self, profile=True):
+                    # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
+                    lbeta = lbeta + tf.cast(tf.shape(sigma2), tf.float64) * 0.9189385332046727 + 0.5 * tf.math.log(sigma2)
+
+            return tf.reduce_sum(lbeta)
+
+        return None
+
+    def _compute_nll_components(self, profile=True, full_nll=False):
         nexpfullcentral, _, beta = self._compute_yields_with_beta(
             profile=profile,
             compute_norm=False,
@@ -1436,7 +1440,7 @@ class Fitter:
             if self.externalCovariance:
                 # Solve the system without inverting
                 residual = tf.reshape(self.nobs - nexp, [-1, 1])  # chi2 residual
-                ln = lnfull = 0.5 * tf.reduce_sum(
+                ln = 0.5 * tf.reduce_sum(
                     tf.matmul(
                         residual,
                         tf.matmul(self.data_cov_inv, residual),
@@ -1446,7 +1450,7 @@ class Fitter:
             else:
                 # stop_gradient needed in denominator here because it should be considered
                 # constant when evaluating global impacts from observed data
-                ln = lnfull = 0.5 * tf.math.reduce_sum(
+                ln = 0.5 * tf.math.reduce_sum(
                     (nexp - self.nobs) ** 2 / tf.stop_gradient(self.nobs), axis=-1
                 )
         else:
@@ -1455,40 +1459,38 @@ class Fitter:
             nexpsafe = tf.where(nobsnull, tf.ones_like(self.nobs), nexp)
             lognexp = tf.math.log(nexpsafe)
 
-            nexpnomsafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nexpnom)
-            lognexpnom = tf.math.log(nexpnomsafe)
-
             # final likelihood computation
 
             # poisson term
-            lnfull = tf.reduce_sum(-self.nobs * lognexp + nexp, axis=-1)
+            if full_nll:
+                ldatafac = tf.math.lgamma(self.nobs + 1)
+                ln = tf.reduce_sum(-self.nobs * lognexp + nexp + ldatafac, axis=-1)
+            else:
+                # poisson w/o constant factorial part term and with offset to improve numerical precision
+                nexpnomsafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nexpnom)
+                lognexpnom = tf.math.log(nexpnomsafe)
 
-            # poisson term with offset to improve numerical precision
-            ln = tf.reduce_sum(
-                -self.nobs * (lognexp - lognexpnom) + nexp - self.nexpnom, axis=-1
-            )
+                ln = tf.reduce_sum(
+                    -self.nobs * (lognexp - lognexpnom) + nexp - self.nexpnom, axis=-1
+                )
 
-        lc = lcfull = self._compute_lc()
+        lc = self._compute_lc(full_nll)
 
-        lbeta, lbetafull = self._compute_lbeta(beta)
+        lbeta = self._compute_lbeta(beta, full_nll)
 
-        return ln, lc, lbeta, lnfull, lcfull, lbetafull, beta
+        return ln, lc, lbeta, beta
 
-    def _compute_nll(self, profile=True):
-        ln, lc, lbeta, lnfull, lcfull, lbetafull, beta = self._compute_nll_components(
-            profile=profile
-        )
+    def _compute_nll(self, profile=True, full_nll=False):
+        ln, lc, lbeta, beta = self._compute_nll_components(profile=profile, full_nll=full_nll)
         l = ln + lc
-        lfull = lnfull + lcfull
 
         if lbeta is not None:
             l = l + lbeta
-            lfull = lfull + lbetafull
 
-        return l, lfull
+        return l
 
     def _compute_loss(self, profile=True):
-        l, lfull = self._compute_nll(profile=profile)
+        l = self._compute_nll(profile=profile)
         return l
 
     @tf.function
