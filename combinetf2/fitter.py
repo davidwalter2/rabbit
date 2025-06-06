@@ -1408,22 +1408,27 @@ class Fitter:
             beta0 = self.beta0
             if self.binByBinStatType == "gamma":
                 kstat = self.kstat
+                lbeta = -kstat * beta0 * tf.math.log(beta)
                 if full_nll:
                     # constant terms
-                    lgammaalpha = tf.math.lgamma(kstat*beta0)
+                    lgammaalpha = tf.math.lgamma(kstat * beta0)
                     alphalntheta = -kstat * beta0 * tf.math.log(kstat)
 
-                    lbeta = -kstat * beta0 * tf.math.log(beta) + kstat * beta + lgammaalpha + alphalntheta
+                    lbeta = lbeta + kstat * beta + lgammaalpha + alphalntheta
                 else:
-                    lbeta = -kstat * beta0 * tf.math.log(beta) + kstat * (beta - 1.0)
+                    lbeta = lbeta + kstat * (beta - 1.0)
             elif self.binByBinStatType == "normal":
                 lbeta = 0.5 * tf.square(beta - beta0)
 
                 if full_nll:
-                    sigma2 = self.indata.sumw2/tf.square(self.indata.sumw)
+                    sigma2 = self.indata.sumw2 / tf.square(self.indata.sumw)
 
                     # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
-                    lbeta = lbeta + tf.cast(tf.shape(sigma2), tf.float64) * 0.9189385332046727 + 0.5 * tf.math.log(sigma2)
+                    lbeta = (
+                        lbeta
+                        + tf.cast(tf.shape(sigma2), tf.float64) * 0.9189385332046727
+                        + 0.5 * tf.math.log(sigma2)
+                    )
 
             return tf.reduce_sum(lbeta)
 
@@ -1483,7 +1488,9 @@ class Fitter:
         return ln, lc, lbeta, beta
 
     def _compute_nll(self, profile=True, full_nll=False):
-        ln, lc, lbeta, beta = self._compute_nll_components(profile=profile, full_nll=full_nll)
+        ln, lc, lbeta, beta = self._compute_nll_components(
+            profile=profile, full_nll=full_nll
+        )
         l = ln + lc
 
         if lbeta is not None:
