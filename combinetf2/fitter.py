@@ -131,7 +131,7 @@ class Fitter:
                 self.data_cov_inv = self.indata.data_cov_inv
             else:
                 # covariance from data stat
-                if tf.math.reduce_any(self.nobs <= 0).numpy():
+                if tf.reduce_any(self.nobs <= 0).numpy():
                     raise RuntimeError(
                         "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
                     )
@@ -156,7 +156,7 @@ class Fitter:
         self.ubeta = tf.zeros_like(self.beta)
 
         if self.binByBinStat:
-            if tf.math.reduce_any(self.indata.sumw2 < 0.0).numpy():
+            if tf.reduce_any(self.indata.sumw2 < 0.0).numpy():
                 raise ValueError("Negative variance for binByBinStat")
 
             if self.binByBinStatType == "gamma":
@@ -167,7 +167,7 @@ class Fitter:
                 # precompute decomposition of composite matrix to speed up
                 # calculation of profiled beta values
                 varbeta = self.indata.sumw2[: self.indata.nbins]
-                sbeta = tf.math.sqrt(varbeta)
+                sbeta = tf.sqrt(varbeta)
                 sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
                 self.betaauxlu = tf.linalg.lu(
                     sbeta_m @ self.data_cov_inv @ sbeta_m
@@ -613,9 +613,9 @@ class Fitter:
             var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
             var_nobs -= var_beta0
 
-            impacts_beta0 = tf.math.sqrt(var_beta0)
+            impacts_beta0 = tf.sqrt(var_beta0)
 
-        impacts_nobs = tf.math.sqrt(var_nobs)
+        impacts_nobs = tf.sqrt(var_nobs)
 
         if self.binByBinStat:
             impacts_grouped = tf.stack([impacts_nobs, impacts_beta0], axis=-1)
@@ -875,9 +875,9 @@ class Fitter:
                 var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
                 var_nobs -= var_beta0
 
-                impacts_beta0 = tf.math.sqrt(var_beta0)
+                impacts_beta0 = tf.sqrt(var_beta0)
 
-            impacts_nobs = tf.math.sqrt(var_nobs)
+            impacts_nobs = tf.sqrt(var_nobs)
 
             if self.binByBinStat:
                 impacts_grouped = tf.stack([impacts_nobs, impacts_beta0], axis=-1)
@@ -935,11 +935,11 @@ class Fitter:
             # construct the matrix such that the columns represent
             # the variations associated with profiling a given parameter
             # taking into account its correlations with the other parameters
-            dx = self.cov / tf.math.sqrt(tf.linalg.diag_part(self.cov))[None, :]
+            dx = self.cov / tf.sqrt(tf.linalg.diag_part(self.cov))[None, :]
 
             dexp = dexpdx @ dx
         else:
-            dexp = dexpdx * tf.math.sqrt(tf.linalg.diag_part(self.cov))[None, :]
+            dexp = dexpdx * tf.sqrt(tf.linalg.diag_part(self.cov))[None, :]
 
         new_shape = tf.concat([tf.shape(expected), [-1]], axis=0)
         dexp = tf.reshape(dexp, new_shape)
@@ -1079,7 +1079,7 @@ class Fitter:
                         beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal":
                         varbeta = self.indata.sumw2[: self.indata.nbins]
-                        sbeta = tf.math.sqrt(varbeta)
+                        sbeta = tf.sqrt(varbeta)
                         if self.externalCovariance:
                             sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
                             beta = tf.linalg.lu_solve(
@@ -1103,7 +1103,7 @@ class Fitter:
                         beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal":
                         varbeta = self.indata.sumw2[: self.indata.nbins]
-                        sbeta = tf.math.sqrt(varbeta)
+                        sbeta = tf.sqrt(varbeta)
                         abeta = sbeta
                         abeta = tf.where(varbeta == 0.0, tf.ones_like(abeta), abeta)
                         bbeta = varbeta + nexp_profile - sbeta * beta0
@@ -1136,7 +1136,7 @@ class Fitter:
                     )
             elif self.binByBinStatType == "normal":
                 varbeta = self.indata.sumw2[: nexp.shape[0]]
-                sbeta = tf.math.sqrt(varbeta)
+                sbeta = tf.sqrt(varbeta)
                 nexpnorm = nexp[..., None]
                 nexp = nexp + sbeta * betasel
                 if compute_norm:
@@ -1355,37 +1355,6 @@ class Fitter:
         return res
 
     @tf.function
-    def saturated_nll(self):
-
-        nobs = self.nobs
-
-        if self.chisqFit:
-            lsaturated = tf.zeros(shape=(), dtype=self.nobs.dtype)
-        else:
-            nobsnull = tf.equal(nobs, tf.zeros_like(nobs))
-
-            # saturated model
-            nobssafe = tf.where(nobsnull, tf.ones_like(nobs), nobs)
-            lognobs = tf.math.log(nobssafe)
-
-            lsaturated = tf.reduce_sum(-nobs * lognobs + nobs, axis=-1)
-
-        if self.binByBinStat:
-            if self.binByBinStatType == "gamma":
-                kstat = self.kstat
-                beta0 = self.beta0
-                lsaturated += tf.reduce_sum(
-                    -kstat * beta0 * tf.math.log(beta0) + kstat * beta0
-                )
-            elif self.binByBinStatType == "normal":
-                # mc stat contribution to the saturated likelihood is zero in this case
-                pass
-
-        ndof = tf.size(nobs) - self.npoi - self.indata.nsystnoconstraint
-
-        return lsaturated, ndof
-
-    @tf.function
     def full_nll(self):
         return self._compute_nll(full_nll=True)
 
@@ -1408,15 +1377,29 @@ class Fitter:
             beta0 = self.beta0
             if self.binByBinStatType == "gamma":
                 kstat = self.kstat
-                lbeta = -kstat * beta0 * tf.math.log(beta)
+
+                beta0null = tf.equal(self.beta0, tf.zeros_like(beta0))
+                logbetasafe = tf.where(
+                    beta0null, tf.ones_like(beta0), tf.math.log(beta)
+                )
                 if full_nll:
                     # constant terms
                     lgammaalpha = tf.math.lgamma(kstat * beta0)
                     alphalntheta = -kstat * beta0 * tf.math.log(kstat)
 
-                    lbeta = lbeta + kstat * beta + lgammaalpha + alphalntheta
+                    lbeta = (
+                        -kstat * beta0 * logbetasafe
+                        + kstat * beta
+                        + lgammaalpha
+                        + alphalntheta
+                    )
                 else:
-                    lbeta = lbeta + kstat * (beta - 1.0)
+                    logbeta0safe = tf.where(
+                        beta0null, tf.ones_like(beta0), tf.math.log(beta0)
+                    )
+                    lbeta = -kstat * beta0 * (logbetasafe - logbeta0safe) + kstat * (
+                        beta - beta0
+                    )
             elif self.binByBinStatType == "normal":
                 lbeta = 0.5 * tf.square(beta - beta0)
 
@@ -1457,7 +1440,7 @@ class Fitter:
             else:
                 # stop_gradient needed in denominator here because it should be considered
                 # constant when evaluating global impacts from observed data
-                ln = 0.5 * tf.math.reduce_sum(
+                ln = 0.5 * tf.reduce_sum(
                     (nexp - self.nobs) ** 2 / tf.stop_gradient(self.nobs), axis=-1
                 )
         else:
@@ -1474,11 +1457,14 @@ class Fitter:
                 ln = tf.reduce_sum(-self.nobs * lognexp + nexp + ldatafac, axis=-1)
             else:
                 # poisson w/o constant factorial part term and with offset to improve numerical precision
-                nexpnomsafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nexpnom)
-                lognexpnom = tf.math.log(nexpnomsafe)
+                # nexpnomsafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nexpnom)
+                # lognexpnom = tf.math.log(nexpnomsafe)
+
+                nobssafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nobs)
+                lognobs = tf.math.log(nobssafe)
 
                 ln = tf.reduce_sum(
-                    -self.nobs * (lognexp - lognexpnom) + nexp - self.nexpnom, axis=-1
+                    -self.nobs * (lognexp - lognobs) + nexp - self.nobs, axis=-1
                 )
 
         lc = self._compute_lc(full_nll)
