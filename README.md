@@ -1,4 +1,6 @@
-![Framework Logo](data/logo/logo.png)
+<p align="center">
+  <img src="data/logo/logo.png" alt="Framework logo" width="180"/>
+</p>
 
 Perform complex profile binned maximum likelihood fits by exploiting state-of-the-art differential programming. 
 Computations are based on the tensorflow 2 library and scipy minimizers with multithreading support on CPU (FIXME: and GPU).
