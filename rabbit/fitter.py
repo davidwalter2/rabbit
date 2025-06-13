@@ -7,7 +7,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 from wums import logging
 
-from combinetf2 import tfhelpers as tfh
+from rabbit import tfhelpers as tfh
 
 logger = logging.child_logger(__name__)
 
