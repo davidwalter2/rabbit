@@ -3,7 +3,7 @@ import argparse
 import hist
 import numpy as np
 
-from combinetf2 import tensorwriter
+from rabbit import tensorwriter
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-o", "--output", default="./", help="output directory")

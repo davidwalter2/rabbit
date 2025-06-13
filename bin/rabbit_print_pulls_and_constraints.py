@@ -4,7 +4,7 @@ import argparse
 
 import numpy as np
 
-from combinetf2 import io_tools
+from rabbit import io_tools
 
 sort_choices = []
 sort_choices_abs = [f"abs {s}" for s in sort_choices]

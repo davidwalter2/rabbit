@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
 
-from combinetf2 import io_tools
+from rabbit import io_tools
 
 from wums import output_tools, plot_tools  # isort: skip
 
@@ -780,7 +780,7 @@ def parseArgs():
     )
     parser.add_argument(
         "--title",
-        default="CombineTF2",
+        default="Rabbit",
         type=str,
         help="Title to be printed in upper left",
     )
@@ -1180,7 +1180,7 @@ def main():
         fitresult_ref = None
 
     meta_out = {
-        "combinetf2": meta["meta_info"],
+        "rabbit": meta["meta_info"],
     }
 
     outdir = output_tools.make_plot_dir(args.outpath, eoscp=args.eoscp)

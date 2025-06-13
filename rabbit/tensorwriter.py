@@ -5,7 +5,7 @@ from collections import defaultdict
 import h5py
 import numpy as np
 
-from combinetf2 import common, h5pyutils
+from rabbit import common, h5pyutils
 
 from wums import ioutils, logging, output_tools  # isort: skip
 
@@ -475,7 +475,7 @@ class TensorWriter:
             for group in groups:
                 target_dict[group].add(name)
 
-    def write(self, outfolder="./", outfilename="combinetf2_input.hdf5", args={}):
+    def write(self, outfolder="./", outfilename="rabbit_input.hdf5", args={}):
 
         if self.signals.intersection(self.bkgs):
             raise RuntimeError(

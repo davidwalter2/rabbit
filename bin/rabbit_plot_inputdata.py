@@ -11,7 +11,7 @@ import numpy as np
 from wums import boostHistHelpers as hh
 from wums import logging, output_tools, plot_tools
 
-from combinetf2 import debugdata, inputdata
+from rabbit import debugdata, inputdata
 
 
 def parseArgs():
@@ -21,7 +21,7 @@ def parseArgs():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("infile", help="Output h5py file of the setupCombine.py")
+    parser.add_argument("infile", help="Output h5py input data file")
     parser.add_argument(
         "--logx", action="store_true", help="Enable log scale for x axis"
     )
@@ -157,7 +157,7 @@ def parseArgs():
     )
     parser.add_argument(
         "--title",
-        default="CombineTF2",
+        default="Rabbit",
         type=str,
         help="Title to be printed in upper left",
     )
