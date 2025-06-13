@@ -1,7 +1,7 @@
 import hist
 import tensorflow as tf
 
-from combinetf2.physicsmodels.physicsmodel import PhysicsModel
+from rabbit.physicsmodels.physicsmodel import PhysicsModel
 
 
 class Param(PhysicsModel):

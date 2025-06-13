@@ -5,7 +5,7 @@ import hist
 import numpy as np
 from wums import logging
 
-from combinetf2 import debugdata, inputdata
+from rabbit import debugdata, inputdata
 
 logger = None
 
