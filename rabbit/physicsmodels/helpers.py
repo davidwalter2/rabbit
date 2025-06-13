@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 from wums import boostHistHelpers as hh
 
-from combinetf2 import tfhelpers
+from rabbit import tfhelpers
 
 # dictionary with class name and the corresponding filename where it is defined
 baseline_models = {
@@ -33,7 +33,7 @@ def instance_from_class(class_name, *args, **kwargs):
             raise ValueError(
                 f"Model {class_name} not found, available baseline models are {baseline_models.keys()}"
             )
-        module_name = f"combinetf2.physicsmodels.{baseline_models[class_name]}"
+        module_name = f"rabbit.physicsmodels.{baseline_models[class_name]}"
 
     # Try to import the module
     module = importlib.import_module(module_name)

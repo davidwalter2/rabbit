@@ -5,7 +5,7 @@ import itertools
 
 import numpy as np
 
-from combinetf2 import io_tools
+from rabbit import io_tools
 
 
 def parseArgs():

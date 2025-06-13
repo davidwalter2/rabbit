@@ -6,7 +6,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
-from combinetf2 import io_tools
+from rabbit import io_tools
 
 from wums import output_tools, plot_tools  # isort: skip
 
@@ -72,7 +72,7 @@ def parseArgs():
     )
     parser.add_argument(
         "--title",
-        default="CombineTF2",
+        default="Rabbit",
         type=str,
         help="Title to be printed in upper left",
     )
@@ -161,7 +161,7 @@ def main():
     fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
 
     meta = {
-        "combinetf2": meta["meta_info"],
+        "rabbit": meta["meta_info"],
     }
 
     h_params = fitresult["parms"].get()

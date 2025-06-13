@@ -1,7 +1,7 @@
 import tensorflow as tf
 
-from combinetf2.physicsmodels import helpers
-from combinetf2.physicsmodels.physicsmodel import PhysicsModel
+from rabbit.physicsmodels import helpers
+from rabbit.physicsmodels.physicsmodel import PhysicsModel
 
 
 class AngularCoefficients(PhysicsModel):
