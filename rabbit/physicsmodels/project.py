@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from combinetf2.physicsmodels.physicsmodel import Channelmodel
+from rabbit.physicsmodels.physicsmodel import Channelmodel
 
 
 class Project(Channelmodel):

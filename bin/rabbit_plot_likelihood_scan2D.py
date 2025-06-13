@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import chi2
 
-from combinetf2 import io_tools
+from rabbit import io_tools
 
 from wums import output_tools, plot_tools  # isort: skip
 
@@ -73,7 +73,7 @@ def parseArgs():
     )
     parser.add_argument(
         "--title",
-        default="CombineTF2",
+        default="Rabbit",
         type=str,
         help="Title to be printed in upper left",
     )

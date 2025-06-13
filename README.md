@@ -1,4 +1,4 @@
-![Framework Logo](data/logo/logo.svg)
+![Framework Logo](data/logo/logo.png)
 
 Perform complex profile binned maximum likelihood fits by exploiting state-of-the-art differential programming. 
 Computations are based on the tensorflow 2 library and scipy minimizers with multithreading support on CPU (FIXME: and GPU).
@@ -6,24 +6,24 @@ Implemented approximations in the limit of large sample size to simplify intensi
 
 ## Install
 
-You can install combinetf2 via pip. It can be installed with the core functionality:
+You can install rabbit via pip. It can be installed with the core functionality:
 ```bash
-pip install combinetf2
+pip install rabbit-fit
 ```
 Or with optional dependencies to use the plotting scripts
 ```bash
-pip install combinetf2[plotting]
+pip install rabbit-fit[plotting]
 ```
 
 ### Get the code
 
-If you want to have more control or want to develop CombineTF2 you can check it our as (sub) module.
+If you want to have more control or want to develop rabbit you can check it our as (sub) module.
 
 ```bash
 MY_GIT_USER=$(git config user.github)
-git clone git@github.com:$MY_GIT_USER/combinetf2.git
-cd combinetf2/
-git remote add upstream git@github.com:WMass/combinetf2.git
+git clone git@github.com:$MY_GIT_USER/rabbit.git
+cd rabbit/
+git remote add upstream git@github.com:WMass/rabbit.git
 ```
 
 Get updates from the central repository (and main branch)
@@ -37,7 +37,7 @@ It makes use of the [wums](https://pypi.org/project/wums) package for storing hd
 
 ### In a python virtual environment
 The simplest is to make a python virtual environment. It depends on the python version you are working with (tested with 3.9.18).
-First, make a python version, e.g. in the combinetf2 base directory (On some machines you have to use `python3`):
+First, make a python version, e.g. in the rabbit base directory (On some machines you have to use `python3`):
 ```bash
 python -m venv env
 ```
@@ -107,14 +107,14 @@ debug_inputdata.py test_tensor.hdf5
 ```
 Plotting the histograms that are actually used in the fit, supporting adding of systematic variations in the plot:
 ```bash
-combinetf2_plor_inputdata.py test_tensor.hdf5 -o results/fitresult.hdf5
+rabbit_plot_inputdata.py test_tensor.hdf5 -o results/fitresult.hdf5
 ```
 
 
 ## Run the fit
 For example:
 ```bash
-combinetf2_fit test_tensor.hdf5 -o results/fitresult.hdf5 -t 0 --doImpacts --globalImpacts --saveHists --computeHistErrors
+rabbit_fit test_tensor.hdf5 -o results/fitresult.hdf5 -t 0 --doImpacts --globalImpacts --saveHists --computeHistErrors
 ```
 
 ### Bin-by-bin statistical uncertainties
@@ -122,7 +122,7 @@ Bin-by-bin statistical uncertainties on the templates are added by default and c
 
 ### Physics models
 Physics models are used to perform transformation on the parameters and observables (the histogram bins in the (masked) channels). 
-Baseline models are defined in `combinetf2/physicsmodels/` and can be called in `combinetf2_fit` with the `--PhysicsModel` or `-m` option e.g. `-m Select ch0 -m Project ch1 b`. 
+Baseline models are defined in `rabbit/physicsmodels/` and can be called in `rabbit_fit` with the `--PhysicsModel` or `-m` option e.g. `-m Select ch0 -m Project ch1 b`. 
 The first argument is the physics model name followed by arguments passed into the physics model.
 Available physics models are
  * `Basemodel`: Compute histograms in all bins and all channels.
@@ -152,12 +152,12 @@ The path must be accessable from your `$PYTHONPATH` variable and an `__ini__.py`
 
 Parameter values and their uncertainties:
 ```bash
-combinetf2_print_pulls_and_constraints.py results/fitresult.hdf5
+rabbit_print_pulls_and_constraints.py results/fitresult.hdf5
 ```
 
 Uncertainty breakdown for parameter of interest, sometimes referred to nuisance parameter impacts:
 ```bash
-combinetf2_print_impacts results/fitresult.hdf5
+rabbit_print_impacts results/fitresult.hdf5
 ```
 
 
@@ -167,7 +167,7 @@ We use pre-commit hooks and linters in the CI. Activate git pre-commit hooks (on
 ```
 git config --local include.path ../.gitconfig
 ```
-I case combineTF2 is included as a submodule, use instead:
+I case rabbit is included as a submodule, use instead:
 ```
 git config --local include.path "$(git rev-parse --show-superproject-working-tree)/.gitconfig"
 ```

@@ -5,8 +5,8 @@ import numpy as np
 from tqdm import tqdm
 from wums import logging
 
-from combinetf2 import tensorwriter
-from combinetf2.datacard_parser import DatacardParser
+from rabbit import tensorwriter
+from rabbit.datacard_parser import DatacardParser
 
 logger = logging.child_logger(__name__)
 

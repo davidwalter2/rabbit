@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from combinetf2.physicsmodels import helpers
+from rabbit.physicsmodels import helpers
 
 
 class PhysicsModel:

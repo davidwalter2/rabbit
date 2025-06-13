@@ -10,9 +10,9 @@ import time
 import h5py
 import numpy as np
 
-from combinetf2 import fitter, inputdata, io_tools, workspace
-from combinetf2.physicsmodels import helpers as ph
-from combinetf2.tfhelpers import edmval_cov
+from rabbit import fitter, inputdata, io_tools, workspace
+from rabbit.physicsmodels import helpers as ph
+from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
 
@@ -257,7 +257,7 @@ def make_parser():
         default=[],
         help="""
         add physics model to perform transformations on observables for the prefit and postfit histograms, 
-        specifying the model defined in combinetf2/physicsmodels/ followed by arguments passed in the model __init__, 
+        specifying the model defined in rabbit/physicsmodels/ followed by arguments passed in the model __init__, 
         e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.  
         This argument can be called multiple times.
         Custom models can be specified with the full path to the custom model e.g. '-m custom_modesl.MyCustomModel'.
@@ -407,7 +407,7 @@ def fit(args, fitter, ws, dofit=True):
                 parms_ext = fext["parms"][...].astype(str)
                 cov_ext = fext["cov"][...]
             else:
-                # fitresult from combinetf2
+                # fitresult from rabbit
                 h5results_ext = io_tools.get_fitresult(fext, args.externalPostfitResult)
                 h_parms_ext = h5results_ext["parms"].get()
 

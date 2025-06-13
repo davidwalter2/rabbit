@@ -11,7 +11,7 @@ import mplhep as hep
 import numpy as np
 from matplotlib import colormaps
 
-import combinetf2.io_tools
+import rabbit.io_tools
 
 from wums import boostHistHelpers as hh  # isort: skip
 from wums import logging, output_tools, plot_tools  # isort: skip
@@ -74,7 +74,7 @@ def parseArgs():
     )
     parser.add_argument(
         "--title",
-        default="CombineTF2",
+        default="Rabbit",
         type=str,
         help="Title to be printed in upper left",
     )
@@ -132,7 +132,7 @@ def parseArgs():
     parser.add_argument(
         "infile",
         type=str,
-        help="hdf5 file from combinetf2 or root file from combinetf1",
+        help="hdf5 file from rabbit or root file from combinetf",
     )
     parser.add_argument(
         "--result",
@@ -393,7 +393,7 @@ def make_plot(
     if meta is not None:
         if "meta_info_input" in meta:
             analysis_meta_info = {
-                "Combinetf2Output": meta["meta_info"],
+                "RabbitOutput": meta["meta_info"],
                 "AnalysisOutput": meta["meta_info_input"]["meta_info"],
             }
         else:
@@ -571,10 +571,8 @@ def main():
             for i in range(len(varNames))
         ]
 
-    # load .hdf5 file first, must exist in combinetf and combinetf2
-    fitresult, meta = combinetf2.io_tools.get_fitresult(
-        args.infile, args.result, meta=True
-    )
+    # load .hdf5 file first, must exist in combinetf and rabbit
+    fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
 
     plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
 
