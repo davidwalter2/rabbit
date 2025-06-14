@@ -3,8 +3,8 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "combinetf2"
-version = "0.2.0"
+name = "rabbit"
+version = "0.1.0"
 description = "."
 readme = { file = "README.md", content-type = "text/markdown" }
 license = { text = "MIT" }
@@ -13,7 +13,7 @@ authors = [
     {name = "Josh Bendavid", email = "josh.bendavid@cern.ch"},
     {name = "Kenneth Long", email = "kenneth.long@cern.ch"},
 ]
-urls = {Homepage = "https://github.com/WMass/combinetf2"}
+urls = {Homepage = "https://github.com/WMass/rabbit"}
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
@@ -38,16 +38,16 @@ convsersion = ["uproot"]
 all = ["plotting", "convsersion"]
 
 [project.scripts]
-combinetf2_fit = "bin.combinetf2_fit:main"
-combinetf2_plot_inputdata = "bin.combinetf2_plot_inputdata:main"
-combinetf2_plot_hists = "bin.combinetf2_plot_hists:main"
-combinetf2_plot_hists_cov = "bin.combinetf2_plot_hists_cov:main"
-combinetf2_plot_hists_uncertainties = "bin.combinetf2_plot_hists_uncertainties:main"
-combinetf2_plot_likelihood_scan = "bin.combinetf2_plot_likelihood_scan:main"
-combinetf2_plot_likelihood_scan2D = "bin.combinetf2_plot_likelihood_scan2D:main"
-combinetf2_plot_pulls_and_impacts = "bin.combinetf2_plot_pulls_and_impacts:main"
-combinetf2_print_impacts = "bin.combinetf2_print_impacts:main"
-combinetf2_print_pulls_and_constraints = "bin.combinetf2_print_pulls_and_constraints:main"
+rabbit_fit = "bin.rabbit_fit:main"
+rabbit_plot_inputdata = "bin.rabbit_plot_inputdata:main"
+rabbit_plot_hists = "bin.rabbit_plot_hists:main"
+rabbit_plot_hists_cov = "bin.rabbit_plot_hists_cov:main"
+rabbit_plot_hists_uncertainties = "bin.rabbit_plot_hists_uncertainties:main"
+rabbit_plot_likelihood_scan = "bin.rabbit_plot_likelihood_scan:main"
+rabbit_plot_likelihood_scan2D = "bin.rabbit_plot_likelihood_scan2D:main"
+rabbit_plot_pulls_and_impacts = "bin.rabbit_plot_pulls_and_impacts:main"
+rabbit_print_impacts = "bin.rabbit_print_impacts:main"
+rabbit_print_pulls_and_constraints = "bin.rabbit_print_pulls_and_constraints:main"
 text2hdf5 = "bin.text2hdf5:main"
 debug_inputdata = "bin.debug_inputdata:main"
 

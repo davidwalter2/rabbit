@@ -6,7 +6,7 @@ from pprint import pprint
 
 from wums import logging
 
-from combinetf2.datacard_converter import DatacardConverter
+from rabbit.datacard_converter import DatacardConverter
 
 logger = None
 

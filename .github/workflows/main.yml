@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 env: 
-  LOCAL_WEB_DIR: www/CombineTF2/PRValidation
+  LOCAL_WEB_DIR: www/Rabbit/PRValidation
   EOS_DIR: /eos/user/c/cmsmwbot
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
@@ -56,7 +56,7 @@ jobs:
     needs: linting
 
     outputs:
-      COMBINETF2_OUTDIR: ${{steps.export.outputs.COMBINETF2_OUTDIR}}
+      RABBIT_OUTDIR: ${{steps.export.outputs.RABBIT_OUTDIR}}
       WEB_DIR: ${{steps.export.outputs.WEB_DIR}}
       PLOT_DIR: ${{steps.export.outputs.PLOT_DIR}}
       PYTHONPATH: ${{steps.export.outputs.PYTHONPATH}}
@@ -83,7 +83,7 @@ jobs:
           echo PLOT_DIR=ReferenceRuns/$(date +%Y_%m_%d)_$(git rev-parse --short "$GITHUB_SHA") >> $GITHUB_ENV
 
       - name: setup outdir
-        run: echo "COMBINETF2_OUTDIR=/tmp/${USER}/$(uuidgen)" >> $GITHUB_ENV
+        run: echo "RABBIT_OUTDIR=/tmp/${USER}/$(uuidgen)" >> $GITHUB_ENV
 
       - name: setup python path
         run: |
@@ -91,14 +91,14 @@ jobs:
           echo "PATH=$GITHUB_WORKSPACE/bin:$PATH" >> $GITHUB_ENV
 
       - name: setup webdir
-        run: echo "WEB_DIR=$COMBINETF2_OUTDIR/$LOCAL_WEB_DIR" >> $GITHUB_ENV
+        run: echo "WEB_DIR=$RABBIT_OUTDIR/$LOCAL_WEB_DIR" >> $GITHUB_ENV
 
       - name: create plot dir
         run: mkdir -p $WEB_DIR/$PLOT_DIR
 
       - id: export
         run: |
-          echo "COMBINETF2_OUTDIR=$COMBINETF2_OUTDIR" >> $GITHUB_OUTPUT
+          echo "RABBIT_OUTDIR=$RABBIT_OUTDIR" >> $GITHUB_OUTPUT
           echo "WEB_DIR=$WEB_DIR" >> $GITHUB_OUTPUT
           echo "PLOT_DIR=$PLOT_DIR" >> $GITHUB_OUTPUT
           echo "PYTHONPATH=$PYTHONPATH" >> $GITHUB_OUTPUT
@@ -110,13 +110,13 @@ jobs:
 
     steps:
       - env:
-          COMBINETF2_OUTDIR: ${{ needs.setenv.outputs.COMBINETF2_OUTDIR }}
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
           PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
           PATH: ${{ needs.setenv.outputs.PATH }}
           WEB_DIR: ${{ needs.setenv.outputs.WEB_DIR }}
           PLOT_DIR: ${{ needs.setenv.outputs.PLOT_DIR }}
         run: |
-          echo "COMBINETF2_OUTDIR=${COMBINETF2_OUTDIR}" >> $GITHUB_ENV
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
@@ -126,27 +126,27 @@ jobs:
 
       - name: make tensor
         run: >-
-          python tests/make_tensor.py -o $COMBINETF2_OUTDIR/
+          python tests/make_tensor.py -o $RABBIT_OUTDIR/
 
       - name: make symmetric tensor
         run: >-
-          python tests/make_tensor.py -o $COMBINETF2_OUTDIR/ --symmetrizeAll --systematicType normal --postfix symmetric
+          python tests/make_tensor.py -o $RABBIT_OUTDIR/ --symmetrizeAll --systematicType normal --postfix symmetric
 
       - name: make sparse tensor
         run: >-
-          python tests/make_tensor.py -o $COMBINETF2_OUTDIR/ --sparse --postfix sparse
+          python tests/make_tensor.py -o $RABBIT_OUTDIR/ --sparse --postfix sparse
 
       - name: debug input
-        run: debug_inputdata.py $COMBINETF2_OUTDIR//test_tensor.hdf5
+        run: debug_inputdata.py $RABBIT_OUTDIR//test_tensor.hdf5
 
       - name: plot input
         run: >-
-          combinetf2_plot_inputdata.py $COMBINETF2_OUTDIR/test_tensor.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          rabbit_plot_inputdata.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $WEB_DIR/$PLOT_DIR 
           --varName slope_2_signal_ch1 --varLabel "Slope signal, 2 (ch1)" --varColor cyan
 
       - name: plot symmetric input
         run: >-
-          combinetf2_plot_inputdata.py $COMBINETF2_OUTDIR/test_tensor_symmetric.hdf5 -o $WEB_DIR/$PLOT_DIR --postfix symmetric
+          rabbit_plot_inputdata.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $WEB_DIR/$PLOT_DIR --postfix symmetric
           --varName slope_2_signal_ch1SymAvg slope_2_signal_ch1SymDiff --varLabel "Slope signal, 2 (ch1) [Avg.]" "Slope signal, 2 (ch1) [Diff.]" --varColor cyan magenta
 
   fitting:
@@ -155,11 +155,11 @@ jobs:
 
     steps:
       - env:
-          COMBINETF2_OUTDIR: ${{ needs.setenv.outputs.COMBINETF2_OUTDIR }}
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
           PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
           PATH: ${{ needs.setenv.outputs.PATH }}
         run: |
-          echo "COMBINETF2_OUTDIR=${COMBINETF2_OUTDIR}" >> $GITHUB_ENV
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
 
@@ -167,7 +167,7 @@ jobs:
 
       - name: nominal fit
         run: >- 
-          combinetf2_fit.py $COMBINETF2_OUTDIR/test_tensor.hdf5 -o $COMBINETF2_OUTDIR/
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/
           -t 0 --unblind '.*' --doImpacts --globalImpacts
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistCov --computeHistImpacts --computeVariations
@@ -185,24 +185,24 @@ jobs:
 
       - name: nominal fit blinded
         run: >- 
-          combinetf2_fit.py $COMBINETF2_OUTDIR/test_tensor.hdf5 -o $COMBINETF2_OUTDIR/
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/
           -t 0 --postfix blinded --doImpacts --globalImpacts
 
       - name: sparse tensor fit 
         run: >- 
-          combinetf2_fit.py $COMBINETF2_OUTDIR/test_tensor_sparse.hdf5 -o $COMBINETF2_OUTDIR/ --postfix sparse
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_sparse.hdf5 -o $RABBIT_OUTDIR/ --postfix sparse
           -t -0 --noBinByBinStat --doImpacts --globalImpacts --computeVariations
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
 
       - name: pseudodata fit
         run: >- 
-          combinetf2_fit.py $COMBINETF2_OUTDIR/test_tensor.hdf5 -o $COMBINETF2_OUTDIR/ --postfix pseudodata
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix pseudodata
           -t 0 --pseudoData original --doImpacts --globalImpacts --unblind ^sig$
 
       - name: chi2 fit
         run: >- 
-          combinetf2_fit.py $COMBINETF2_OUTDIR/test_tensor.hdf5 -o $COMBINETF2_OUTDIR/ --postfix chi2
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix chi2
           -t 0 --unblind '.*' --chisqFit --externalCovariance --doImpacts --globalImpacts 
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
@@ -210,7 +210,7 @@ jobs:
 
       - name: linearized solution
         run: >- 
-          combinetf2_fit.py $COMBINETF2_OUTDIR/test_tensor_symmetric.hdf5 -o $COMBINETF2_OUTDIR/ --postfix linearized
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix linearized
           -t 0 --chisqFit --doImpacts --globalImpacts --binByBinStatType normal --allowNegativePOI
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistImpacts --computeHistCov -m Project ch1 a -m Project ch1 b 
@@ -222,13 +222,13 @@ jobs:
 
     steps:
       - env:
-          COMBINETF2_OUTDIR: ${{ needs.setenv.outputs.COMBINETF2_OUTDIR }}
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
           PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
           PATH: ${{ needs.setenv.outputs.PATH }}
           WEB_DIR: ${{ needs.setenv.outputs.WEB_DIR }}
           PLOT_DIR: ${{ needs.setenv.outputs.PLOT_DIR }}
         run: |
-          echo "COMBINETF2_OUTDIR=${COMBINETF2_OUTDIR}" >> $GITHUB_ENV
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
@@ -237,79 +237,79 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: print pulls & constraints blinded
-        run: combinetf2_print_pulls_and_constraints.py $COMBINETF2_OUTDIR/fitresults_blinded.hdf5 
+        run: rabbit_print_pulls_and_constraints.py $RABBIT_OUTDIR/fitresults_blinded.hdf5 
 
       - name: print pulls & constraints
-        run: combinetf2_print_pulls_and_constraints.py $COMBINETF2_OUTDIR/fitresults.hdf5 
+        run: rabbit_print_pulls_and_constraints.py $RABBIT_OUTDIR/fitresults.hdf5 
 
       - name: print impacts
-        run: combinetf2_print_impacts.py $COMBINETF2_OUTDIR/fitresults.hdf5 -s
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s
 
       - name: print global impacts
-        run: combinetf2_print_impacts.py $COMBINETF2_OUTDIR/fitresults.hdf5 -s --globalImpacts
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s --globalImpacts
 
       - name: print global impacts of observable
-        run: combinetf2_print_impacts.py $COMBINETF2_OUTDIR/fitresults.hdf5 --globalImpacts -m Project ch0_masked --ungroup --sort
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 --globalImpacts -m Project ch0_masked --ungroup --sort
 
       - name: plot impacts
         run: >-
-          combinetf2_plot_pulls_and_impacts.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
+          rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
           --otherExtensions pdf png -n 50 --config tests/style_config.py -s absimpact --subtitle Preliminary --grouping max
 
       - name: plot global impacts
         run: >-
-          combinetf2_plot_pulls_and_impacts.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
-          -r $COMBINETF2_OUTDIR/fitresults_pseudodata.hdf5 --refName "Pseudo data" -s absimpact
+          rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
+          -r $RABBIT_OUTDIR/fitresults_pseudodata.hdf5 --refName "Pseudo data" -s absimpact
           --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --globalImpacts --diffPullAsym --showNumbers
           --grouping max --subtitle Preliminary --postfix data_vs_pseudodata
 
       - name: plot global impacts on observable
         run: >-
-          combinetf2_plot_pulls_and_impacts.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
+          rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
           -s absimpact -m Project ch0_masked
           --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --globalImpacts --showNumbers
           --grouping max --subtitle Preliminary --postfix ch0_masked
 
       - name: plot prefit distributions
         run: >-
-          combinetf2_plot_hists.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
           --extraTextLoc '0.05' '0.7' --legCols 1 -m Basemodel -m Project ch1 a -m Project ch1 b --yscale '1.2' 
           --subtitle Preliminary --prefit --config tests/style_config.py
 
       - name: plot postfit distributions
         run: >-
-          combinetf2_plot_hists.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
           --extraTextLoc '0.05' '0.7' --legCols 1 -m Basemodel -m Project ch1 a -m Project ch1 b -m Normalize ch0 x --yscale '1.2' 
           --subtitle Preliminary --varNames 'slope_signal' --varColors orange --config tests/style_config.py --rrange 0.8 1.2
 
       - name: plot histogram uncertainties
         run: >-
-          combinetf2_plot_hists_uncertainties.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          rabbit_plot_hists_uncertainties.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
           --extraTextLoc '0.05' '0.7' --legCols 1 -m Project ch1 a -m Project ch1 b --yscale '1.2' --subtitle Preliminary --config tests/style_config.py
 
       - name: plot postfit signal fraction
         run: >-
-          combinetf2_plot_hists.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR  
+          rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR  
           -m Ratio ch0 ch0 sig sig,bkg --yscale 1.2 --subtitle Preliminary --config tests/style_config.py --ylabel 'sig/(sig+bkg)' --postfix signalfraction
 
       - name: plot postfit signal fraction uncertainties
         run: >-
-          combinetf2_plot_hists_uncertainties.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR  
+          rabbit_plot_hists_uncertainties.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR  
           -m Ratio ch0 ch0 sig sig,bkg --subtitle Preliminary --config tests/style_config.py --ylabel 'sig/(sig+bkg)' --postfix signalfraction
 
       - name: plot postfit ratio
         run: >-
-          combinetf2_plot_hists.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR  
+          rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR  
           -m Ratio ch0 ch1 'None:None' 'b:slice(0,2)' --yscale 1.2 --subtitle Preliminary --config tests/style_config.py --ylabel 'ch0/ch1' --postfix ratio
 
       - name: plot postfit ratio uncertainties
         run: >-
-          combinetf2_plot_hists_uncertainties.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR  
+          rabbit_plot_hists_uncertainties.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR  
           -m Ratio ch0 ch1 'None:None' 'b:slice(0,2)' --subtitle Preliminary --config tests/style_config.py --ylabel 'ch0/ch1' --postfix ratio
 
       - name: plot histogram covariance matrices
         run: >-
-          combinetf2_plot_hists_cov.py $COMBINETF2_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          rabbit_plot_hists_cov.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
           --subtitle Preliminary -m Project ch1 a -m Project ch1 b --subtitle Preliminary --config tests/style_config.py
 
 
@@ -319,13 +319,13 @@ jobs:
 
     steps:
       - env:
-          COMBINETF2_OUTDIR: ${{ needs.setenv.outputs.COMBINETF2_OUTDIR }}
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
           PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
           PATH: ${{ needs.setenv.outputs.PATH }}
           WEB_DIR: ${{ needs.setenv.outputs.WEB_DIR }}
           PLOT_DIR: ${{ needs.setenv.outputs.PLOT_DIR }}
         run: |
-          echo "COMBINETF2_OUTDIR=${COMBINETF2_OUTDIR}" >> $GITHUB_ENV
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
@@ -335,7 +335,7 @@ jobs:
 
       - name: nominal fit with scans
         run: >- 
-          combinetf2_fit.py $COMBINETF2_OUTDIR/test_tensor.hdf5 -o $COMBINETF2_OUTDIR/ --postfix scans
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix scans
           -t 0 --doImpacts 
           --scan sig slope_signal --contourScan sig slope_signal --contourLevels 1 2
           --scan2D sig slope_signal
@@ -344,13 +344,13 @@ jobs:
 
       - name: plot 1D likelihood scan
         run: >-
-          combinetf2_plot_likelihood_scan.py $COMBINETF2_OUTDIR/fitresults_scans.hdf5 -o $WEB_DIR/$PLOT_DIR 
-          --title CombineTF2 --subtitle Preliminary --params sig slope_signal
+          rabbit_plot_likelihood_scan.py $RABBIT_OUTDIR/fitresults_scans.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          --title Rabbit --subtitle Preliminary --params sig slope_signal
 
       - name: plot 2D likelihood scan
         run: >-
-          combinetf2_plot_likelihood_scan2D.py $COMBINETF2_OUTDIR/fitresults_scans.hdf5 -o $WEB_DIR/$PLOT_DIR 
-          --title CombineTF2 --subtitle Preliminary --params sig slope_signal
+          rabbit_plot_likelihood_scan2D.py $RABBIT_OUTDIR/fitresults_scans.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          --title Rabbit --subtitle Preliminary --params sig slope_signal
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
@@ -358,18 +358,18 @@ jobs:
     if: always() 
     steps:
       - env:
-          COMBINETF2_OUTDIR: ${{ needs.setenv.outputs.COMBINETF2_OUTDIR }}
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
         run: |
-          echo "COMBINETF2_OUTDIR=${COMBINETF2_OUTDIR}" >> $GITHUB_ENV
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
 
       - name: copy clean plots
         run: |
-          echo "xrdcp --parallel 4 -R -f $COMBINETF2_OUTDIR/$LOCAL_WEB_DIR/* root://eosuser.cern.ch//$EOS_DIR/$LOCAL_WEB_DIR"
-          xrdcp --parallel 4 -R -f $COMBINETF2_OUTDIR/$LOCAL_WEB_DIR/* root://eosuser.cern.ch//$EOS_DIR/$LOCAL_WEB_DIR
-          echo "Removing temp directory $COMBINETF2_OUTDIR/$LOCAL_WEB_DIR"
-          rm -r $COMBINETF2_OUTDIR/$LOCAL_WEB_DIR
+          echo "xrdcp --parallel 4 -R -f $RABBIT_OUTDIR/$LOCAL_WEB_DIR/* root://eosuser.cern.ch//$EOS_DIR/$LOCAL_WEB_DIR"
+          xrdcp --parallel 4 -R -f $RABBIT_OUTDIR/$LOCAL_WEB_DIR/* root://eosuser.cern.ch//$EOS_DIR/$LOCAL_WEB_DIR
+          echo "Removing temp directory $RABBIT_OUTDIR/$LOCAL_WEB_DIR"
+          rm -r $RABBIT_OUTDIR/$LOCAL_WEB_DIR
 
       - name: clean
         run: |
-          echo "Removing temp directory $COMBINETF2_OUTDIR"
-          rm -r $COMBINETF2_OUTDIR
+          echo "Removing temp directory $RABBIT_OUTDIR"
+          rm -r $RABBIT_OUTDIR
