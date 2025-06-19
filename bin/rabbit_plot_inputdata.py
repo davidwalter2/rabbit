@@ -590,7 +590,7 @@ def make_plot(
         output_tools.write_index_and_log(
             outdir,
             outfile,
-            analysis_meta_info={"setupCombine": indata.metadata["meta_info"]},
+            analysis_meta_info={"setupRabbit": indata.metadata["meta_info"]},
             args=args,
         )
 
