@@ -233,9 +233,9 @@ def make_parser():
     )
     parser.add_argument(
         "--binByBinStatMode",
-        default="automatic",
-        choices=["automatic", "light", "full"],
-        help="Barlow-Beeston mode bin-by-bin statistical uncertainties, ('automatic' is 'full' for '--chisqFit' and '--binByBinStatType normal' otherwise 'light')",
+        default="light",
+        choices=["light", "full"],
+        help="Barlow-Beeston mode bin-by-bin statistical uncertainties",
     )
     parser.add_argument(
         "--externalPostfit",

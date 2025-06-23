@@ -39,14 +39,7 @@ class Fitter:
         else:
             self.binByBinStatType = options.binByBinStatType
 
-        if options.binByBinStatMode == "automatic":
-            self.binByBinStatMode = (
-                "full"
-                if self.binByBinStatType == "normal" and options.chisqFit
-                else "light"
-            )
-        else:
-            self.binByBinStatMode = options.binByBinStatMode
+        self.binByBinStatMode = options.binByBinStatMode
 
         if (
             self.binByBinStat
@@ -197,10 +190,8 @@ class Fitter:
                 if self.externalCovariance or self.binByBinStatMode == "full":
                     sbeta = tf.math.sqrt(self.varbeta[: self.indata.nbins])
 
-                    if sbeta.ndim == 1:
-                        sbeta = tf.linalg.LinearOperatorDiag(sbeta)
-
                     if self.externalCovariance and self.binByBinStatMode == "light":
+                        sbeta = tf.linalg.LinearOperatorDiag(sbeta)
                         self.betaauxlu = tf.linalg.lu(
                             sbeta @ self.data_cov_inv @ sbeta
                             + tf.eye(
@@ -209,7 +200,30 @@ class Fitter:
                             )
                         )
                     elif self.externalCovariance and self.binByBinStatMode == "full":
-                        raise NotImplementedError()
+                        # make copies of each element nproc x nproc submatrices
+                        cov_inv = tf.expand_dims(
+                            tf.expand_dims(self.data_cov_inv, -1), -1
+                        )
+                        cov_inv = tf.broadcast_to(
+                            cov_inv,
+                            [*self.data_cov_inv.shape, sbeta.shape[1], sbeta.shape[1]],
+                        )
+                        cov_inv = tf.transpose(
+                            cov_inv, perm=[0, 2, 1, 3]
+                        )  # switch axes to be aligned with sbeta (nbins x nbins) x (nproc x nproc) -> (nbins x nproc) x (nbins x nproc)
+
+                        # flatten nproc, nbin axes
+                        sbeta = tf.reshape(sbeta, (-1,))
+                        sbeta = tf.linalg.LinearOperatorDiag(sbeta)
+                        cov_inv = tf.reshape(cov_inv, sbeta.shape)
+
+                        self.betaauxlu = tf.linalg.lu(
+                            sbeta @ cov_inv @ sbeta
+                            + tf.eye(
+                                cov_inv.shape[0],
+                                dtype=self.data_cov_inv.dtype,
+                            )
+                        )
                     else:
                         # first dimension is batch dimension
                         self.betaauxlu = tf.linalg.lu(
@@ -1165,7 +1179,27 @@ class Fitter:
                         elif (
                             self.externalCovariance and self.binByBinStatMode == "full"
                         ):
-                            raise NotImplementedError()
+                            nbin, nproc = sbeta.shape
+
+                            res = (
+                                self.data_cov_inv @ (self.nobs - nexp_profile)[:, None]
+                            )
+
+                            # make copies of each element nproc x nproc submatrices
+                            res = tf.broadcast_to(res, [nbin, nproc])
+
+                            # flatten nproc, nbin axes
+                            res = tf.reshape(res, [tf.size(res)])
+                            sbeta = tf.reshape(sbeta, [tf.size(beta0)])
+                            sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
+
+                            beta = tf.linalg.lu_solve(
+                                *self.betaauxlu,
+                                sbeta_m @ res[:, None]
+                                + tf.reshape(beta0, [tf.size(beta0)])[:, None],
+                            )
+                            beta = tf.reshape(beta, (nbin, nproc))
+
                         elif self.binByBinStatMode == "full":
                             beta = tf.linalg.lu_solve(
                                 *self.betaauxlu,
