@@ -6,15 +6,14 @@ from rabbit.physicsmodels.physicsmodel import PhysicsModel
 
 class AngularCoefficients(PhysicsModel):
     """
-    A class to compute ratios of channels, processes, or bins.
-    Optionally the numerator and denominator can be normalized.
+    A class to compute the angular coefficients as A_i = sigma_i / sigma_UL, result is a flat array of A_i and sigma_UL.
 
     Parameters
     ----------
         indata: Input data used for analysis (e.g., histograms or data structures).
         channel: str
             Name of the channel.
-        channel: str
+        process: str
             Name of the process.
         selection: dict, optional
             Dictionary specifying selection criteria. Keys are axis names, and values are slices or conditions.
@@ -32,10 +31,14 @@ class AngularCoefficients(PhysicsModel):
         selection={},
         rebin_axes={},
         sum_axes=[],
+        selection_ul={},
+        rebin_axes_ul={},
+        sum_axes_ul=[],
         helicity_axis="helicitySig",
     ):
         self.key = key
 
+        # sigma_i
         self.num = helpers.Term(
             indata,
             channel,
@@ -43,7 +46,9 @@ class AngularCoefficients(PhysicsModel):
             {helicity_axis: slice(1, None), **selection},
             rebin_axes,
             sum_axes,
-        )  # sigma_i
+        )
+
+        # sigma_UL for Ais
         self.den = helpers.Term(
             indata,
             channel,
@@ -51,7 +56,17 @@ class AngularCoefficients(PhysicsModel):
             {helicity_axis: 0, **selection},
             rebin_axes,
             sum_axes,
-        )  # sigma_UL
+        )
+
+        # sigma_UL to keep in different binning
+        self.sigma_ul = helpers.Term(
+            indata,
+            channel,
+            processes,
+            {helicity_axis: 0, **selection_ul},
+            rebin_axes_ul,
+            sum_axes_ul,
+        )
 
         self.has_data = False
 
@@ -75,23 +90,23 @@ class AngularCoefficients(PhysicsModel):
         self.channel_info = {
             channel: {
                 "axes": channel_axes,
-            }
+            },
+            f"{channel}_sigmaUL": {
+                "axes": self.sigma_ul.channel_axes,
+            },
         }
 
     @classmethod
     def parse_args(cls, indata, *args):
         """
-        parsing the input arguments into the ratio constructor, is has to be called as
+        parsing the input arguments into the AI constructor, it has to be called as
         -m AngularCoefficients
-            <ch > <ch den>
-            <proc_num_0>,<proc_num_1>,... <proc_num_0>,<proc_num_1>,...
-            <axis_num_0>:<slice_num_0>,<axis_num_1>,<slice_num_1>... <axis_den_0>,<slice_den_0>,<axis_den_1>,<slice_den_1>...
+            <ch>
+            <proc_0>,<proc_1>,...
+            <axis_ai_0>:<slice_ai_0>,<axis_ai_1>,<slice_ai_1>... <axis_sigma_UL_0>:<slice_sigma_UL_0>,<axis_sigma_UL_1>:<slice_sigma_UL_1>
 
-        Processes selections are optional. But in case on is given for the numerator, the denominator must be specified as well and vice versa.
-        Use 'None' if you don't want to select any for either numerator xor denominator.
-
-        Axes selections are optional. But in case one is given for the numerator, the denominator must be specified as well and vice versa.
-        Use 'None:None' if you don't want to do any for either numerator xor denominator.
+        Processes selections are optional. Use 'None' if you don't want to select any.
+        Axes selections are optional.
         """
 
         if len(args) > 2 and ":" not in args[1]:
@@ -100,16 +115,23 @@ class AngularCoefficients(PhysicsModel):
             procs = []
 
         # find axis selections
-        if any(a for a in args if ":" in a):
-            sel_args = [a for a in args if ":" in a]
+        axis_selection = {}
+        axes_sum = []
+        axes_rebin = {}
 
+        axis_selection_ul = {}
+        axes_sum_ul = []
+        axes_rebin_ul = {}
+
+        sel_args = [a for a in args if ":" in a]
+        if len(sel_args):
             axis_selection, axes_rebin, axes_sum = helpers.parse_axis_selection(
                 sel_args[0]
             )
-        else:
-            axis_selection = {}
-            axes_sum = []
-            axes_rebin = {}
+        if len(sel_args) > 1:
+            axis_selection_ul, axes_rebin_ul, axes_sum_ul = (
+                helpers.parse_axis_selection(sel_args[1])
+            )
 
         key = " ".join([cls.__name__, *args])
 
@@ -121,6 +143,9 @@ class AngularCoefficients(PhysicsModel):
             axis_selection,
             axes_rebin,
             axes_sum,
+            axis_selection_ul,
+            axes_rebin_ul,
+            axes_sum_ul,
         )
 
     def compute_ais(self, observables, inclusive=False):
@@ -129,7 +154,13 @@ class AngularCoefficients(PhysicsModel):
 
         den = tf.expand_dims(den, axis=self.helicity_index)
 
-        return num / den
+        ai = num / den
+        ai_flat = tf.reshape(ai, [-1])
+
+        sigma_ul = self.sigma_ul.select(observables, inclusive=inclusive)
+        sigma_ul_flat = tf.reshape(sigma_ul, [-1])
+
+        return tf.concat([ai_flat, sigma_ul_flat], axis=0)
 
     def compute_flat(self, params, observables):
         return self.compute_ais(observables, True)
