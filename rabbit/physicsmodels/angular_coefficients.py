@@ -6,7 +6,7 @@ from rabbit.physicsmodels.physicsmodel import PhysicsModel
 
 class AngularCoefficients(PhysicsModel):
     """
-    A class to compute the angular coefficients as A_i = sigma_i / sigma_UL, result is a flat array of A_i and sigma_UL.
+    A class to compute the angular coefficients as A_i = sigma_i / sigma_UL
 
     Parameters
     ----------
@@ -31,9 +31,6 @@ class AngularCoefficients(PhysicsModel):
         selection={},
         rebin_axes={},
         sum_axes=[],
-        selection_ul={},
-        rebin_axes_ul={},
-        sum_axes_ul=[],
         helicity_axis="helicitySig",
     ):
         self.key = key
@@ -47,8 +44,7 @@ class AngularCoefficients(PhysicsModel):
             rebin_axes,
             sum_axes,
         )
-
-        # sigma_UL for Ais
+        # sigma_UL
         self.den = helpers.Term(
             indata,
             channel,
@@ -56,16 +52,6 @@ class AngularCoefficients(PhysicsModel):
             {helicity_axis: 0, **selection},
             rebin_axes,
             sum_axes,
-        )
-
-        # sigma_UL to keep in different binning
-        self.sigma_ul = helpers.Term(
-            indata,
-            channel,
-            processes,
-            {helicity_axis: 0, **selection_ul},
-            rebin_axes_ul,
-            sum_axes_ul,
         )
 
         self.has_data = False
@@ -91,9 +77,6 @@ class AngularCoefficients(PhysicsModel):
             channel: {
                 "axes": channel_axes,
             },
-            f"{channel}_sigmaUL": {
-                "axes": self.sigma_ul.channel_axes,
-            },
         }
 
     @classmethod
@@ -103,7 +86,7 @@ class AngularCoefficients(PhysicsModel):
         -m AngularCoefficients
             <ch>
             <proc_0>,<proc_1>,...
-            <axis_ai_0>:<slice_ai_0>,<axis_ai_1>,<slice_ai_1>... <axis_sigma_UL_0>:<slice_sigma_UL_0>,<axis_sigma_UL_1>:<slice_sigma_UL_1>
+            <axis_ai_0>:<slice_ai_0>,<axis_ai_1>,<slice_ai_1>...
 
         Processes selections are optional. Use 'None' if you don't want to select any.
         Axes selections are optional.
@@ -115,23 +98,15 @@ class AngularCoefficients(PhysicsModel):
             procs = []
 
         # find axis selections
-        axis_selection = {}
-        axes_sum = []
-        axes_rebin = {}
-
-        axis_selection_ul = {}
-        axes_sum_ul = []
-        axes_rebin_ul = {}
-
-        sel_args = [a for a in args if ":" in a]
-        if len(sel_args):
+        if any(a for a in args if ":" in a):
+            sel_args = [a for a in args if ":" in a]
             axis_selection, axes_rebin, axes_sum = helpers.parse_axis_selection(
                 sel_args[0]
             )
-        if len(sel_args) > 1:
-            axis_selection_ul, axes_rebin_ul, axes_sum_ul = (
-                helpers.parse_axis_selection(sel_args[1])
-            )
+        else:
+            axis_selection = {}
+            axes_sum = []
+            axes_rebin = {}
 
         key = " ".join([cls.__name__, *args])
 
@@ -143,33 +118,22 @@ class AngularCoefficients(PhysicsModel):
             axis_selection,
             axes_rebin,
             axes_sum,
-            axis_selection_ul,
-            axes_rebin_ul,
-            axes_sum_ul,
         )
 
     def compute_ais(self, observables, inclusive=False):
         num = self.num.select(observables, inclusive=inclusive)
         den = self.den.select(observables, inclusive=inclusive)
-
         den = tf.expand_dims(den, axis=self.helicity_index)
-
         return num / den
 
-    def compute_ais_ul(self, observables, inclusive=False):
-        ai = self.compute_ais(observables, True)
-        ai_flat = tf.reshape(ai, [-1])
-
-        sigma_ul = self.sigma_ul.select(observables, inclusive=inclusive)
-        sigma_ul_flat = tf.reshape(sigma_ul, [-1])
-
-        return tf.concat([ai_flat, sigma_ul_flat], axis=0)
-
     def compute_flat(self, params, observables):
-        return self.compute_ais_ul(observables, True)
+        exp = self.compute_ais(observables, True)
+        return tf.reshape(exp, [-1])
 
     def compute_flat_per_process(self, params, observables):
-        return self.compute_ais_ul(observables, False)
+        exp = self.compute_ais(observables, False)
+        flat_shape = (-1, exp.shape[-1])
+        return tf.reshape(exp, [-1, flat_shape])
 
 
 class LamTung(AngularCoefficients):

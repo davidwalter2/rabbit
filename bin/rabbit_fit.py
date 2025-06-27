@@ -12,6 +12,7 @@ import numpy as np
 
 from rabbit import fitter, inputdata, io_tools, workspace
 from rabbit.physicsmodels import helpers as ph
+from rabbit.physicsmodels import physicsmodel as pm
 from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
@@ -262,6 +263,11 @@ def make_parser():
         This argument can be called multiple times.
         Custom models can be specified with the full path to the custom model e.g. '-m custom_modesl.MyCustomModel'.
         """,
+    )
+    parser.add_argument(
+        "--compositeModel",
+        action="store_true",
+        help="Make a composite model and compute the covariance matrix across all physics models.",
     )
     parser.add_argument(
         "--doImpacts",
@@ -581,6 +587,11 @@ def main():
     for margs in args.physicsModel:
         model = ph.instance_from_class(margs[0], indata, *margs[1:])
         models.append(model)
+
+    if args.compositeModel:
+        models = [
+            pm.CompositeModel(models),
+        ]
 
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)

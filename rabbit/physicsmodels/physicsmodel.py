@@ -71,6 +71,40 @@ class PhysicsModel:
         return output, variances_output, cov_output
 
 
+class CompositeModel(PhysicsModel):
+    """
+    A composition of different physics models e.g. to compute the covariance across them
+    """
+
+    def __init__(
+        self,
+        models,
+    ):
+        self.key = self.__class__.__name__
+
+        self.channel_info = {}
+
+        self.models = models
+
+        self.ndf_reduction = 0
+        self.has_data = True
+
+        # make a composite model with unique channel names
+        for m in models:
+            for k, c in m.channel_info.items():
+                self.channel_info[f"{m.key}_{k}"] = c
+
+            self.ndf_reduction += m.ndf_reduction
+            if not m.has_data:
+                self.has_data = False
+
+    def compute_flat(self, params, observables=None):
+        exp = tf.concat(
+            [m.compute_flat(params, observables) for m in self.models], axis=0
+        )
+        return exp
+
+
 class Basemodel(PhysicsModel):
     """
     A class to output histograms without any transformation, can be used as base class to inherit custom physics models from.
