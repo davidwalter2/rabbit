@@ -352,7 +352,7 @@ class Workspace:
         for channel, info in model.channel_info.items():
             axes = info["axes"]
 
-            stop = start + np.prod([a.size for a in axes])
+            stop = start + int(np.prod([a.size for a in axes]))
 
             opts = dict(
                 start=start,  # first index in output values for this channel

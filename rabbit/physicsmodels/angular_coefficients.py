@@ -154,7 +154,10 @@ class AngularCoefficients(PhysicsModel):
 
         den = tf.expand_dims(den, axis=self.helicity_index)
 
-        ai = num / den
+        return num / den
+
+    def compute_ais_ul(self, observables, inclusive=False):
+        ai = self.compute_ais(observables, True)
         ai_flat = tf.reshape(ai, [-1])
 
         sigma_ul = self.sigma_ul.select(observables, inclusive=inclusive)
@@ -163,10 +166,10 @@ class AngularCoefficients(PhysicsModel):
         return tf.concat([ai_flat, sigma_ul_flat], axis=0)
 
     def compute_flat(self, params, observables):
-        return self.compute_ais(observables, True)
+        return self.compute_ais_ul(observables, True)
 
     def compute_flat_per_process(self, params, observables):
-        return self.compute_ais(observables, False)
+        return self.compute_ais_ul(observables, False)
 
 
 class LamTung(AngularCoefficients):
@@ -174,9 +177,9 @@ class LamTung(AngularCoefficients):
     def __init__(self, indata, key, channel, *args, **kwargs):
         super().__init__(indata, key, channel, *args, **kwargs)
 
-        self.channel_info[channel]["axes"] = [
-            c for c in self.channel_info[channel]["axes"] if c.name != "ai"
-        ]
+        self.channel_info[channel] = {
+            "axes": [c for c in self.channel_info[channel]["axes"] if c.name != "ai"]
+        }
 
     def compute_ais(self, observables, inclusive=False):
         ais = super().compute_ais(observables, inclusive)
