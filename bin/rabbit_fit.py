@@ -543,10 +543,10 @@ def fit(args, fitter, ws, dofit=True):
 
     if args.scan2D is not None:
         for param_tuple in args.scan2D:
-            x_scan, yscan, nll_values = fitter.nll_scan2D(
+            x_scan, yscan, dnll_values = fitter.nll_scan2D(
                 param_tuple, args.scanRange, args.scanPoints, args.scanRangeUsePrefit
             )
-            ws.add_nll_scan2D_hist(param_tuple, x_scan, yscan, nll_values - nllvalfull)
+            ws.add_nll_scan2D_hist(param_tuple, x_scan, yscan, dnll_values)
 
     if args.contourScan is not None:
         # do likelihood contour scans

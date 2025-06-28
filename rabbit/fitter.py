@@ -1672,13 +1672,13 @@ class Fitter:
             param_offsets *= self.cov[idx, idx].numpy() ** 0.5
 
         nscans = 2 * len(param_offsets) - 1
-        nlls = np.full(nscans, np.nan)
+        dnlls = np.full(nscans, np.nan)
         scan_vals = np.zeros(nscans)
 
         # save delta nll w.r.t. global minimum
-        reduced_nll = self.reduced_nll().numpy()
+        nll_best = self.reduced_nll().numpy()
         # set central point
-        nlls[nscans // 2] = 0
+        dnlls[nscans // 2] = 0
         scan_vals[nscans // 2] = xval[idx].numpy()
         # scan positive side and negative side independently to profit from previous step
         for sign in [-1, 1]:
@@ -1720,15 +1720,15 @@ class Fitter:
                     hessp=scipy_hessp,
                 )
                 if res["success"]:
-                    nlls[nscans // 2 + sign * i] = (
-                        self.reduced_nll().numpy() - reduced_nll
+                    dnlls[nscans // 2 + sign * i] = (
+                        self.reduced_nll().numpy() - nll_best
                     )
                     scan_vals[nscans // 2 + sign * i] = ixval
 
             # reset x to original state
             self.x.assign(xval)
 
-        return scan_vals, nlls
+        return scan_vals, dnlls
 
     def nll_scan2D(self, param_tuple, scan_range, scan_points, use_prefit=False):
 
@@ -1746,8 +1746,9 @@ class Fitter:
             y_scans = dsigs
 
         best_fit = (scan_points + 1) // 2 - 1
-        nlls = np.full((len(x_scans), len(y_scans)), np.nan)
-        nlls[best_fit, best_fit] = self.full_nll().numpy()
+        dnlls = np.full((len(x_scans), len(y_scans)), np.nan)
+        nll_best = self.reduced_nll().numpy()
+        dnlls[best_fit, best_fit] = 0
         # scan in a spiral around the best fit point
         dcol = -1
         drow = 0
@@ -1817,10 +1818,10 @@ class Fitter:
             )
 
             if res["success"]:
-                nlls[ix, iy] = self.full_nll().numpy()
+                dnlls[ix, iy] = self.reduced_nll().numpy() - nll_best
 
         self.x.assign(xval)
-        return x_scans, y_scans, nlls
+        return x_scans, y_scans, dnlls
 
     def contour_scan(self, param, nll_min, cl=1):
 
