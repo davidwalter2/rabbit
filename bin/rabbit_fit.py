@@ -330,13 +330,13 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
     for model in models:
         logger.info(f"Save inclusive histogram for {model.key}")
 
-        if prefit and getattr(model, "skip_prefit", False):
+        if prefit and model.skip_prefit:
             continue
 
-        if not getattr(model, "skip_incusive", False):
+        if not model.skip_incusive:
             exp, aux = fitter.expected_events(
                 model,
-                inclusive=not getattr(model, "need_processes", False),
+                inclusive=True,
                 compute_variance=args.computeHistErrors,
                 compute_cov=args.computeHistCov,
                 compute_chi2=not args.noChi2 and model.has_data,
@@ -357,7 +357,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
             if aux[4] is not None:
                 ws.add_chi2(aux[4], aux[5], prefit, model)
 
-        if args.saveHistsPerProcess and not getattr(model, "skip_per_process", False):
+        if args.saveHistsPerProcess and not model.skip_per_process:
             logger.info(f"Save processes histogram for {model.key}")
 
             exp, aux = fitter.expected_events(
@@ -382,7 +382,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
 
             exp, aux = fitter.expected_events(
                 model,
-                inclusive=getattr(model, "need_processes", True),
+                inclusive=True,
                 compute_variance=False,
                 compute_variations=True,
                 profile=profile,

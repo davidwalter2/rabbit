@@ -175,10 +175,10 @@ class Workspace:
         )
         values_nobs, variances_nobs, cov_nobs = model.get_data(nobs, nobs_cov_inv)
 
+        start = 0
         for channel, info in model.channel_info.items():
             axes = info["axes"]
-            start = info.get("start", None)
-            stop = info.get("stop", None)
+            stop = start + int(np.prod([a.size for a in axes]))
 
             if info.get("masked", False):
                 continue
@@ -212,6 +212,8 @@ class Workspace:
                 label="observed number of events for fit",
                 **opts,
             )
+
+            start = stop
 
         return hists_data_obs, hists_nobs
 
@@ -351,7 +353,6 @@ class Workspace:
         start = 0
         for channel, info in model.channel_info.items():
             axes = info["axes"]
-
             stop = start + int(np.prod([a.size for a in axes]))
 
             opts = dict(
