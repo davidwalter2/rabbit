@@ -1105,7 +1105,7 @@ class Fitter:
                         varbeta = self.indata.sumw2[: self.indata.nbins]
                         sbeta = tf.sqrt(varbeta)
                         abeta = sbeta
-                        abeta = tf.where(varbeta == 0.0, tf.ones_like(abeta), abeta)
+                        abeta = tf.where(varbeta == 0.0, 1.0, abeta)
                         bbeta = varbeta + nexp_profile - sbeta * beta0
                         cbeta = (
                             sbeta * (nexp_profile - self.nobs) - nexp_profile * beta0
@@ -1378,26 +1378,28 @@ class Fitter:
             if self.binByBinStatType == "gamma":
                 kstat = self.kstat
 
-                beta0null = tf.equal(self.beta0, tf.zeros_like(beta0))
-                logbetasafe = tf.where(
-                    beta0null, tf.ones_like(beta0), tf.math.log(beta)
-                )
+                beta0null = tf.equal(beta0, tf.zeros_like(beta0))
+                betasafe = tf.where(beta0null, tf.ones_like(beta), beta)
+                logbeta = tf.math.log(betasafe)
+
                 if full_nll:
                     # constant terms
                     lgammaalpha = tf.math.lgamma(kstat * beta0)
                     alphalntheta = -kstat * beta0 * tf.math.log(kstat)
 
                     lbeta = (
-                        -kstat * beta0 * logbetasafe
+                        -kstat * beta0 * logbeta
                         + kstat * beta
                         + lgammaalpha
                         + alphalntheta
                     )
                 else:
-                    logbeta0safe = tf.where(
-                        beta0null, tf.ones_like(beta0), tf.math.log(beta0)
-                    )
-                    lbeta = -kstat * beta0 * (logbetasafe - logbeta0safe) + kstat * (
+                    # compute offset for Gamma nll improved numerical precision in minimizatoin
+                    # the offset is chosen to give the saturated likelihood
+                    beta0safe = tf.where(beta0null, tf.ones_like(beta0), beta0)
+                    logbeta0 = tf.math.log(beta0safe)
+
+                    lbeta = -kstat * beta0 * (logbeta - logbeta0) + kstat * (
                         beta - beta0
                     )
             elif self.binByBinStatType == "normal":
@@ -1445,10 +1447,8 @@ class Fitter:
                 )
         else:
             nobsnull = tf.equal(self.nobs, tf.zeros_like(self.nobs))
-
             nexpsafe = tf.where(nobsnull, tf.ones_like(self.nobs), nexp)
             lognexp = tf.math.log(nexpsafe)
-
             # final likelihood computation
 
             # poisson term
@@ -1456,13 +1456,12 @@ class Fitter:
                 ldatafac = tf.math.lgamma(self.nobs + 1)
                 ln = tf.reduce_sum(-self.nobs * lognexp + nexp + ldatafac, axis=-1)
             else:
-                # poisson w/o constant factorial part term and with offset to improve numerical precision
-                # nexpnomsafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nexpnom)
-                # lognexpnom = tf.math.log(nexpnomsafe)
-
+                # compute offset for poisson nll improved numerical precision in minimizatoin
+                # the offset is chosen to give the saturated likelihood
                 nobssafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nobs)
                 lognobs = tf.math.log(nobssafe)
 
+                # poisson w/o constant factorial part term and with offset to improve numerical precision
                 ln = tf.reduce_sum(
                     -self.nobs * (lognexp - lognobs) + nexp - self.nobs, axis=-1
                 )

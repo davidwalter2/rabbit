@@ -9,6 +9,7 @@ import time
 
 import h5py
 import numpy as np
+import scipy
 
 from rabbit import fitter, inputdata, io_tools, workspace
 from rabbit.physicsmodels import helpers as ph
@@ -43,6 +44,11 @@ def make_parser():
         action="store_true",
         help="Calculate and print additional info for diagnostics (condition number, edm value)",
     )
+    parser.add_argument(
+        "--fullNll",
+        action="store_true",
+        help="Calculate and store full value of -log(L)",
+    )
     parser.add_argument("filename", help="filename of the main hdf5 input")
     parser.add_argument("-o", "--output", default="./", help="output directory")
     parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
@@ -71,7 +77,11 @@ def make_parser():
         "--toysSystRandomize",
         default="frequentist",
         choices=["frequentist", "bayesian", "none"],
-        help="Type of randomization for systematic uncertainties (including binByBinStat if present).  Options are 'frequentist' which randomizes the contraint minima a.k.a global observables and 'bayesian' which randomizes the actual nuisance parameters used in the pseudodata generation",
+        help="""
+        Type of randomization for systematic uncertainties (including binByBinStat if present).  
+        Options are 'frequentist' which randomizes the contraint minima a.k.a global observables 
+        and 'bayesian' which randomizes the actual nuisance parameters used in the pseudodata generation
+        """,
     )
     parser.add_argument(
         "--toysDataRandomize",
@@ -463,22 +473,33 @@ def fit(args, fitter, ws, dofit=True):
             if args.globalImpacts:
                 ws.add_global_impacts_hists(*fitter.global_impacts_parms())
 
-    nllvalfull = fitter.full_nll().numpy()
     nllvalreduced = fitter.reduced_nll().numpy()
 
     ndfsat = (
         tf.size(fitter.nobs) - fitter.npoi - fitter.indata.nsystnoconstraint
     ).numpy()
 
+    chi2 = 2.0 * nllvalreduced
+    p_val = scipy.stats.chi2.sf(chi2, ndfsat)
+
+    logger.info("Saturated chi2:")
+    logger.info(f"    ndof: {ndfsat}")
+    logger.info(f"    2*deltaNLL: {round(chi2, 2)}")
+    logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
+
     ws.results.update(
         {
-            "nllvalfull": nllvalfull,
             "nllvalreduced": nllvalreduced,
-            "edmval": edmval,
             "ndfsat": ndfsat,
+            "edmval": edmval,
             "postfit_profile": args.externalPostfit is None,
         }
     )
+
+    if args.fullNll:
+        nllvalfull = fitter.full_nll().numpy()
+        logger.info(f"2*deltaNLL(full): {nllvalfull}")
+        ws.results["nllvalfull"] = nllvalfull
 
     ws.add_parms_hist(
         values=fitter.x,
