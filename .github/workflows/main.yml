@@ -185,11 +185,11 @@ jobs:
 
       - name: nominal fit
         run: >- 
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix composite
           -t 0 --unblind '.*' --doImpacts --globalImpacts
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistCov --computeHistImpacts --computeVariations
-          --compositeModel -m Project ch1 a -m Ratio ch0 ch0 sig sig,bkg
+          --compositeModel -m Project ch1 a -m Project ch1 b 
 
       - name: nominal fit blinded
         run: >- 
