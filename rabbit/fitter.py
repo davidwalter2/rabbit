@@ -121,7 +121,13 @@ class Fitter:
         self.x = tf.Variable(xdefault, trainable=True, name="x")
 
         # observed number of events per bin
-        self.nobs = tf.Variable(self.indata.data_obs, trainable=False, name="nobs")
+        self.nobs = tf.Variable(
+            tf.zeros_like(self.indata.data_obs), trainable=False, name="nobs"
+        )
+        self.lognobs = tf.Variable(
+            tf.zeros_like(self.indata.data_obs), trainable=False, name="lognobs"
+        )
+        self.set_nobs(self.indata.data_obs)
         self.data_cov_inv = None
 
         if self.chisqFit:
@@ -148,7 +154,13 @@ class Fitter:
         #  and uncertainty band computations (gradient is allowed to be zero or None and then propagated or skipped only later)
 
         # global observables for mc stat uncertainty
-        self.beta0 = tf.Variable(self._default_beta0(), trainable=False, name="beta0")
+        self.beta0 = tf.Variable(
+            tf.zeros_like(self.indata.sumw), trainable=False, name="beta0"
+        )
+        self.logbeta0 = tf.Variable(
+            tf.zeros_like(self.indata.sumw), trainable=False, name="logbeta0"
+        )
+        self.set_beta0(self._default_beta0())
 
         # nuisance parameters for mc stat uncertainty
         self.beta = tf.Variable(self.beta0, trainable=False, name="beta")
@@ -313,6 +325,20 @@ class Fitter:
 
         return val, jac
 
+    def set_nobs(self, values):
+        self.nobs.assign(values)
+        # compute offset for poisson nll improved numerical precision in minimizatoin
+        # the offset is chosen to give the saturated likelihood
+        nobssafe = tf.where(values == 0.0, 1.0, values)
+        self.lognobs.assign(tf.math.log(nobssafe))
+
+    def set_beta0(self, values):
+        self.beta0.assign(values)
+        # compute offset for Gamma nll improved numerical precision in minimizatoin
+        # the offset is chosen to give the saturated likelihood
+        beta0safe = tf.where(values == 0.0, 1.0, values)
+        self.logbeta0.assign(tf.math.log(beta0safe))
+
     def theta0defaultassign(self):
         self.theta0.assign(tf.zeros([self.indata.nsyst], dtype=self.theta0.dtype))
 
@@ -323,7 +349,7 @@ class Fitter:
             self.x.assign(tf.concat([self.xpoidefault, self.theta0], axis=0))
 
     def beta0defaultassign(self):
-        self.beta0.assign(self._default_beta0())
+        self.set_beta0(self._default_beta0())
 
     def betadefaultassign(self):
         self.beta.assign(self.beta0)
@@ -406,9 +432,9 @@ class Fitter:
                 )
 
                 beta0gen = tf.where(self.kstat == 0.0, 0.0, beta0gen)
-                self.beta0.assign(beta0gen)
+                self.set_beta0(beta0gen)
             elif self.binByBinStatType == "normal":
-                self.beta0.assign(
+                self.set_beta0(
                     tf.random.normal(
                         shape=[],
                         mean=self.beta,
@@ -442,7 +468,7 @@ class Fitter:
                     "Toys with external covariance only possible with data_randomize=normal"
                 )
             else:
-                self.nobs.assign(
+                self.set_nobs(
                     tf.random.poisson(lam=data_nom, shape=[], dtype=self.nobs.dtype)
                 )
         elif data_randomize == "normal":
@@ -451,9 +477,9 @@ class Fitter:
                     loc=data_nom,
                     scale_tril=tf.linalg.cholesky(tf.linalg.inv(self.data_cov_inv)),
                 )
-                self.nobs.assign(pdata.sample())
+                self.set_nobs(pdata.sample())
             else:
-                self.nobs.assign(
+                self.set_nobs(
                     tf.random.normal(
                         mean=data_nom,
                         stddev=tf.sqrt(data_nom),
@@ -462,7 +488,7 @@ class Fitter:
                     )
                 )
         elif data_randomize == "none":
-            self.nobs.assign(data_nom)
+            self.set_nobs(data_nom)
 
         # assign start values for nuisance parameters to constraint minima
         self.xdefaultassign()
@@ -1389,8 +1415,9 @@ class Fitter:
             if self.binByBinStatType == "gamma":
                 kstat = self.kstat
 
-                beta0null = tf.equal(beta0, tf.zeros_like(beta0))
-                betasafe = tf.where(beta0null, tf.ones_like(beta), beta)
+                betasafe = tf.where(
+                    beta0 == 0.0, tf.constant(1.0, dtype=beta.dtype), beta
+                )
                 logbeta = tf.math.log(betasafe)
 
                 if full_nll:
@@ -1405,12 +1432,7 @@ class Fitter:
                         + alphalntheta
                     )
                 else:
-                    # compute offset for Gamma nll improved numerical precision in minimizatoin
-                    # the offset is chosen to give the saturated likelihood
-                    beta0safe = tf.where(beta0null, tf.ones_like(beta0), beta0)
-                    logbeta0 = tf.math.log(beta0safe)
-
-                    lbeta = -kstat * beta0 * (logbeta - logbeta0) + kstat * (
+                    lbeta = -kstat * beta0 * (logbeta - self.logbeta0) + kstat * (
                         beta - beta0
                     )
             elif self.binByBinStatType == "normal":
@@ -1457,24 +1479,19 @@ class Fitter:
                     (nexp - self.nobs) ** 2 / tf.stop_gradient(self.nobs), axis=-1
                 )
         else:
-            nobsnull = tf.equal(self.nobs, tf.zeros_like(self.nobs))
-            nexpsafe = tf.where(nobsnull, tf.ones_like(self.nobs), nexp)
+            nexpsafe = tf.where(
+                self.nobs == 0.0, tf.constant(1.0, dtype=nexp.dtype), nexp
+            )
             lognexp = tf.math.log(nexpsafe)
-            # final likelihood computation
 
             # poisson term
             if full_nll:
                 ldatafac = tf.math.lgamma(self.nobs + 1)
                 ln = tf.reduce_sum(-self.nobs * lognexp + nexp + ldatafac, axis=-1)
             else:
-                # compute offset for poisson nll improved numerical precision in minimizatoin
-                # the offset is chosen to give the saturated likelihood
-                nobssafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nobs)
-                lognobs = tf.math.log(nobssafe)
-
                 # poisson w/o constant factorial part term and with offset to improve numerical precision
                 ln = tf.reduce_sum(
-                    -self.nobs * (lognexp - lognobs) + nexp - self.nobs, axis=-1
+                    -self.nobs * (lognexp - self.lognobs) + nexp - self.nobs, axis=-1
                 )
 
         lc = self._compute_lc(full_nll)

@@ -653,9 +653,9 @@ def main():
             group = "results"
             if ifit == -1:
                 group += "_asimov"
-                ifitter.nobs.assign(ifitter.expected_yield())
+                ifitter.set_nobs(ifitter.expected_yield())
             if ifit == 0:
-                ifitter.nobs.assign(ifitter.indata.data_obs)
+                ifitter.set_nobs(ifitter.indata.data_obs)
 
             elif ifit >= 1:
                 group += f"_toy{ifit}"
