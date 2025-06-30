@@ -588,7 +588,7 @@ def main():
     )
     blinded_fits = [f == 0 or (f > 0 and args.toysDataMode == "observed") for f in fits]
 
-    indata = inputdata.FitInputData(args.filename, args.pseudoData)
+    indata = inputdata.FitInputData(args.filename, args.pseudoData is not None)
     ifitter = fitter.Fitter(indata, args, do_blinding=any(blinded_fits))
 
     # physics models for observables and transformations
@@ -627,6 +627,16 @@ def main():
         fit_time = []
         for i, ifit in enumerate(fits):
             ifitter.defaultassign()
+
+            # if pseudodata in self.pseudodatanames:
+            #     pseudodata_idx = np.where(self.pseudodatanames == pseudodata)[0][0]
+            # else:
+            #     raise Exception(
+            #         "Pseudodata %s not found, available pseudodata sets are %s"
+            #         % (pseudodata, self.pseudodatanames)
+            #     )
+            # print("Run pseudodata fit for index %i: " % (pseudodata_idx))
+            # print(self.pseudodatanames[pseudodata_idx])
 
             group = "results"
             if ifit == -1:
