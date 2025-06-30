@@ -7,7 +7,7 @@ from rabbit.h5pyutils import makesparsetensor, maketensor
 
 
 class FitInputData:
-    def __init__(self, filename, pseudodata=None):
+    def __init__(self, filename, pseudodata=False):
         with h5py.File(filename, mode="r") as f:
 
             # load text arrays from file
@@ -35,22 +35,13 @@ class FitInputData:
                 self.data_cov_inv = None
 
             # load data/pseudodata
-            if pseudodata is not None:
-                if pseudodata in self.pseudodatanames:
-                    pseudodata_idx = np.where(self.pseudodatanames == pseudodata)[0][0]
-                else:
-                    raise Exception(
-                        "Pseudodata %s not found, available pseudodata sets are %s"
-                        % (pseudodata, self.pseudodatanames)
-                    )
-                print("Run pseudodata fit for index %i: " % (pseudodata_idx))
-                print(self.pseudodatanames[pseudodata_idx])
-                hdata_obs = f["hpseudodata"]
+            if pseudodata:
+                print("Initialize pseudodata")
+                hpseudodata_obs = f["hpseudodata"]
 
-                data_obs = maketensor(hdata_obs)
-                self.data_obs = data_obs[:, pseudodata_idx]
-            else:
-                self.data_obs = maketensor(f["hdata_obs"])
+                self.pseudodata_obs = maketensor(hpseudodata_obs)
+
+            self.data_obs = maketensor(f["hdata_obs"])
 
             # start by creating tensors which read in the hdf5 arrays (optimized for memory consumption)
             self.constraintweights = maketensor(f["hconstraintweights"])
