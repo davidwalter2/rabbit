@@ -419,6 +419,7 @@ class Fitter:
 
     def toyassign(
         self,
+        data_values=None,
         syst_randomize="frequentist",
         data_randomize="poisson",
         data_mode="expected",
@@ -434,7 +435,7 @@ class Fitter:
         if data_mode == "expected":
             data_nom = self.expected_yield()
         elif data_mode == "observed":
-            data_nom = self.indata.data_obs
+            data_nom = data_values
 
         if data_randomize == "poisson":
             if self.externalCovariance:

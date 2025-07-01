@@ -35,11 +35,21 @@ class FitInputData:
                 self.data_cov_inv = None
 
             # load data/pseudodata
-            if pseudodata:
+            if pseudodata is not None:
                 print("Initialize pseudodata")
                 hpseudodata_obs = f["hpseudodata"]
 
                 self.pseudodata_obs = maketensor(hpseudodata_obs)
+
+                # if explicit pseudodata sets are requested
+                if len(pseudodata) > 0:
+                    mask = np.isin(self.pseudodatanames, pseudodata)
+                    indices = np.where(mask)[0]
+
+                    self.pseudodata_obs = tf.gather(
+                        self.pseudodata_obs, indices, axis=1
+                    )
+                    self.pseudodatanames = self.pseudodatanames[indices]
 
             self.data_obs = maketensor(f["hdata_obs"])
 

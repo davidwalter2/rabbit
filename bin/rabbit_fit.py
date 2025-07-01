@@ -261,6 +261,7 @@ def make_parser():
         "--pseudoData",
         default=None,
         type=str,
+        nargs="*",
         help="run fit on pseudo data with the given name",
     )
     parser.add_argument(
@@ -588,7 +589,7 @@ def main():
     )
     blinded_fits = [f == 0 or (f > 0 and args.toysDataMode == "observed") for f in fits]
 
-    indata = inputdata.FitInputData(args.filename, args.pseudoData is not None)
+    indata = inputdata.FitInputData(args.filename, args.pseudoData)
     ifitter = fitter.Fitter(indata, args, do_blinding=any(blinded_fits))
 
     # physics models for observables and transformations
@@ -626,64 +627,76 @@ def main():
         postfit_time = []
         fit_time = []
         for i, ifit in enumerate(fits):
-            ifitter.defaultassign()
-
-            # if pseudodata in self.pseudodatanames:
-            #     pseudodata_idx = np.where(self.pseudodatanames == pseudodata)[0][0]
-            # else:
-            #     raise Exception(
-            #         "Pseudodata %s not found, available pseudodata sets are %s"
-            #         % (pseudodata, self.pseudodatanames)
-            #     )
-            # print("Run pseudodata fit for index %i: " % (pseudodata_idx))
-            # print(self.pseudodatanames[pseudodata_idx])
-
             group = "results"
-            if ifit == -1:
-                group += "_asimov"
-                ifitter.nobs.assign(ifitter.expected_yield())
-            if ifit == 0:
-                ifitter.nobs.assign(ifitter.indata.data_obs)
 
-            elif ifit >= 1:
-                group += f"_toy{ifit}"
-                ifitter.toyassign(
-                    syst_randomize=args.toysSystRandomize,
-                    data_randomize=args.toysDataRandomize,
-                    data_mode=args.toysDataMode,
-                    randomize_parameters=args.toysRandomizeParameters,
+            if args.pseudoData is None:
+                datasets = [
+                    ifitter.indata.data_obs,
+                ]
+            else:
+                # shape nobs x npseudodata
+                datasets = indata.pseudodata_obs
+
+            # loop over (pseudo)data sets
+            for j in range(datasets.shape[-1]):
+
+                ifitter.defaultassign()
+                if ifit == -1:
+                    group += "_asimov"
+                    ifitter.nobs.assign(ifitter.expected_yield())
+                else:
+                    import pdb
+
+                    pdb.set_trace()
+                    data_values = datasets[..., j]
+
+                    if ifit == 0:
+                        ifitter.nobs.assign(data_values)
+
+                    elif ifit >= 1:
+                        group += f"_toy{ifit}"
+                        ifitter.toyassign(
+                            data_values,
+                            syst_randomize=args.toysSystRandomize,
+                            data_randomize=args.toysDataRandomize,
+                            data_mode=args.toysDataMode,
+                            randomize_parameters=args.toysRandomizeParameters,
+                        )
+
+                if datasets.shape[-1] > 1:
+                    # in case there are more than 1 pseudodata set, label each one
+                    group += f"_{indata.pseudodatanames[j]}"
+
+                ws.add_parms_hist(
+                    values=ifitter.x,
+                    variances=tf.linalg.diag_part(ifitter.cov),
+                    hist_name="parms_prefit",
                 )
 
-            ws.add_parms_hist(
-                values=ifitter.x,
-                variances=tf.linalg.diag_part(ifitter.cov),
-                hist_name="parms_prefit",
-            )
-
-            if args.saveHists:
-                save_observed_hists(args, models, ifitter, ws)
-                save_hists(args, models, ifitter, ws, prefit=True)
-            prefit_time.append(time.time())
-
-            if not args.prefitOnly:
-                ifitter.set_blinding_offsets(blind=blinded_fits[i])
-                fit(args, ifitter, ws, dofit=ifit >= 0)
-                fit_time.append(time.time())
-
                 if args.saveHists:
-                    save_hists(
-                        args,
-                        models,
-                        ifitter,
-                        ws,
-                        prefit=False,
-                        profile=args.externalPostfit is None,
-                    )
-            else:
-                fit_time.append(time.time())
+                    save_observed_hists(args, models, ifitter, ws)
+                    save_hists(args, models, ifitter, ws, prefit=True)
+                prefit_time.append(time.time())
 
-            ws.dump_and_flush(group)
-            postfit_time.append(time.time())
+                if not args.prefitOnly:
+                    ifitter.set_blinding_offsets(blind=blinded_fits[i])
+                    fit(args, ifitter, ws, dofit=ifit >= 0)
+                    fit_time.append(time.time())
+
+                    if args.saveHists:
+                        save_hists(
+                            args,
+                            models,
+                            ifitter,
+                            ws,
+                            prefit=False,
+                            profile=args.externalPostfit is None,
+                        )
+                else:
+                    fit_time.append(time.time())
+
+                ws.dump_and_flush(group)
+                postfit_time.append(time.time())
 
     end_time = time.time()
     logger.info(f"{end_time - start_time:.2f} seconds total time")
