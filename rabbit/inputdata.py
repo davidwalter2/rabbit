@@ -41,7 +41,7 @@ class FitInputData:
 
                 self.pseudodata_obs = maketensor(hpseudodata_obs)
 
-                # if explicit pseudodata sets are requested
+                # if explicit pseudodata sets are requested, select them (keep all for empty list)
                 if len(pseudodata) > 0:
                     mask = np.isin(self.pseudodatanames, pseudodata)
                     indices = np.where(mask)[0]

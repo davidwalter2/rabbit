@@ -668,25 +668,18 @@ def main():
                 ]
             else:
                 # shape nobs x npseudodata
-                datasets = indata.pseudodata_obs
+                datasets = tf.transpose(indata.pseudodata_obs)
 
             # loop over (pseudo)data sets
-            for j in range(datasets.shape[-1]):
+            for j, data_values in enumerate(datasets):
 
                 ifitter.defaultassign()
                 if ifit == -1:
                     group += "_asimov"
                     ifitter.set_nobs(ifitter.expected_yield())
                 else:
-                    import pdb
-
-                    pdb.set_trace()
-                    data_values = datasets[..., j]
-
                     if ifit == 0:
-                        ifitter.nobs.assign(data_values)
                         ifitter.set_nobs(data_values)
-
                     elif ifit >= 1:
                         group += f"_toy{ifit}"
                         ifitter.toyassign(
@@ -697,7 +690,7 @@ def main():
                             randomize_parameters=args.toysRandomizeParameters,
                         )
 
-                if datasets.shape[-1] > 1:
+                if np.shape(datasets)[0] > 1:
                     # in case there are more than 1 pseudodata set, label each one
                     group += f"_{indata.pseudodatanames[j]}"
 

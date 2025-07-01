@@ -127,7 +127,6 @@ class Fitter:
         self.lognobs = tf.Variable(
             tf.zeros_like(self.indata.data_obs), trainable=False, name="lognobs"
         )
-        self.set_nobs(self.indata.data_obs)
         self.data_cov_inv = None
 
         if self.chisqFit:
@@ -136,12 +135,6 @@ class Fitter:
                     raise RuntimeError("No external covariance found in input data.")
                 # provided covariance
                 self.data_cov_inv = self.indata.data_cov_inv
-            else:
-                # covariance from data stat
-                if tf.reduce_any(self.nobs <= 0).numpy():
-                    raise RuntimeError(
-                        "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
-                    )
 
         # constraint minima for nuisance parameters
         self.theta0 = tf.Variable(
@@ -326,6 +319,12 @@ class Fitter:
         return val, jac
 
     def set_nobs(self, values):
+        if self.chisqFit and not self.externalCovariance:
+            # covariance from data stat
+            if tf.math.reduce_any(values <= 0).numpy():
+                raise RuntimeError(
+                    "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
+                )
         self.nobs.assign(values)
         # compute offset for poisson nll improved numerical precision in minimizatoin
         # the offset is chosen to give the saturated likelihood
