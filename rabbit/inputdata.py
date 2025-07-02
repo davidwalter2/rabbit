@@ -7,7 +7,7 @@ from rabbit.h5pyutils import makesparsetensor, maketensor
 
 
 class FitInputData:
-    def __init__(self, filename, pseudodata=False):
+    def __init__(self, filename, pseudodata=None):
         with h5py.File(filename, mode="r") as f:
 
             # load text arrays from file
