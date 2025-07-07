@@ -328,14 +328,16 @@ class Fitter:
         self.nobs.assign(values)
         # compute offset for poisson nll improved numerical precision in minimizatoin
         # the offset is chosen to give the saturated likelihood
-        nobssafe = tf.where(values == 0.0, 1.0, values)
+        nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
         self.lognobs.assign(tf.math.log(nobssafe))
 
     def set_beta0(self, values):
         self.beta0.assign(values)
         # compute offset for Gamma nll improved numerical precision in minimizatoin
         # the offset is chosen to give the saturated likelihood
-        beta0safe = tf.where(values == 0.0, 1.0, values)
+        beta0safe = tf.where(
+            values == 0.0, tf.constant(1.0, dtype=values.dtype), values
+        )
         self.logbeta0.assign(tf.math.log(beta0safe))
 
     def theta0defaultassign(self):
@@ -430,7 +432,11 @@ class Fitter:
                     / self.kstat
                 )
 
-                beta0gen = tf.where(self.kstat == 0.0, 0.0, beta0gen)
+                beta0gen = tf.where(
+                    self.kstat == 0.0,
+                    tf.constant(0.0, dtype=self.kstat.dtype),
+                    beta0gen,
+                )
                 self.set_beta0(beta0gen)
             elif self.binByBinStatType == "normal":
                 self.set_beta0(
@@ -1142,7 +1148,9 @@ class Fitter:
                         varbeta = self.indata.sumw2[: self.indata.nbins]
                         sbeta = tf.sqrt(varbeta)
                         abeta = sbeta
-                        abeta = tf.where(varbeta == 0.0, 1.0, abeta)
+                        abeta = tf.where(
+                            varbeta == 0.0, tf.constant(1.0, dtype=varbeta.dtype), abeta
+                        )
                         bbeta = varbeta + nexp_profile - sbeta * beta0
                         cbeta = (
                             sbeta * (nexp_profile - self.nobs) - nexp_profile * beta0
