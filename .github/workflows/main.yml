@@ -172,7 +172,7 @@ jobs:
       - name: nominal fit
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/
-          -t 0 --unblind '.*' --doImpacts --globalImpacts
+          -t 0 --unblind --doImpacts --globalImpacts
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistCov --computeHistImpacts --computeVariations
           -m Basemodel
@@ -186,6 +186,14 @@ jobs:
           -m Ratio ch0 ch1 'x:slice(None,None,2),x:sum' 'a:sum,b:sum'
           -m Normratio ch1 ch1 sig sig,bkg 'b:sum' 'b:2'
           -m tests.param_model.Param 'slope_signal' 1 0
+
+      - name: nominal fit
+        run: >- 
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix composite
+          -t 0 --unblind '.*' --doImpacts --globalImpacts
+          --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
+          --computeHistCov --computeHistImpacts --computeVariations
+          --compositeModel -m Project ch1 a -m Project ch1 b 
 
       - name: nominal fit blinded
         run: >- 
@@ -207,7 +215,7 @@ jobs:
       - name: chi2 fit
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix chi2
-          -t 0 --unblind '.*' --chisqFit --externalCovariance --doImpacts --globalImpacts 
+          -t 0 --unblind --chisqFit --externalCovariance --doImpacts --globalImpacts 
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
 

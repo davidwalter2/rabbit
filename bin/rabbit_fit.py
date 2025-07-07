@@ -12,11 +12,20 @@ import numpy as np
 
 from rabbit import fitter, inputdata, io_tools, workspace
 from rabbit.physicsmodels import helpers as ph
+from rabbit.physicsmodels import physicsmodel as pm
 from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
 
 logger = None
+
+
+class OptionalListAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if len(values) == 0:
+            setattr(namespace, self.dest, [".*"])
+        else:
+            setattr(namespace, self.dest, values)
 
 
 def make_parser():
@@ -166,6 +175,12 @@ def make_parser():
         help="use prefit uncertainty to define scan range",
     )
     parser.add_argument(
+        "--prefitOnly",
+        default=False,
+        action="store_true",
+        help="Only compute prefit outputs",
+    )
+    parser.add_argument(
         "--noHessian",
         default=False,
         action="store_true",
@@ -270,6 +285,11 @@ def make_parser():
         """,
     )
     parser.add_argument(
+        "--compositeModel",
+        action="store_true",
+        help="Make a composite model and compute the covariance matrix across all physics models.",
+    )
+    parser.add_argument(
         "--doImpacts",
         default=False,
         action="store_true",
@@ -304,7 +324,11 @@ def make_parser():
         type=str,
         default=[],
         nargs="*",
-        help="Specify list of regex to unblind matching parameters of interest. E.g. use '^signal$' to unblind a parameter named signal or '.*' to unblind all.",
+        action=OptionalListAction,
+        help="""
+        Specify list of regex to unblind matching parameters of interest. 
+        E.g. use '--unblind ^signal$' to unblind a parameter named signal or '--unblind' to unblind all.
+        """,
     )
 
     return parser.parse_args()
@@ -330,13 +354,13 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
     for model in models:
         logger.info(f"Save inclusive histogram for {model.key}")
 
-        if prefit and getattr(model, "skip_prefit", False):
+        if prefit and model.skip_prefit:
             continue
 
-        if not getattr(model, "skip_incusive", False):
+        if not model.skip_incusive:
             exp, aux = fitter.expected_events(
                 model,
-                inclusive=not getattr(model, "need_processes", False),
+                inclusive=True,
                 compute_variance=args.computeHistErrors,
                 compute_cov=args.computeHistCov,
                 compute_chi2=not args.noChi2 and model.has_data,
@@ -357,7 +381,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
             if aux[4] is not None:
                 ws.add_chi2(aux[4], aux[5], prefit, model)
 
-        if args.saveHistsPerProcess and not getattr(model, "skip_per_process", False):
+        if args.saveHistsPerProcess and not model.skip_per_process:
             logger.info(f"Save processes histogram for {model.key}")
 
             exp, aux = fitter.expected_events(
@@ -382,7 +406,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
 
             exp, aux = fitter.expected_events(
                 model,
-                inclusive=getattr(model, "need_processes", True),
+                inclusive=True,
                 compute_variance=False,
                 compute_variations=True,
                 profile=profile,
@@ -599,6 +623,11 @@ def main():
         model = ph.instance_from_class(margs[0], indata, *margs[1:])
         models.append(model)
 
+    if args.compositeModel:
+        models = [
+            pm.CompositeModel(models),
+        ]
+
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)
 
@@ -654,19 +683,22 @@ def main():
                 save_hists(args, models, ifitter, ws, prefit=True)
             prefit_time.append(time.time())
 
-            ifitter.set_blinding_offsets(blind=blinded_fits[i])
-            fit(args, ifitter, ws, dofit=ifit >= 0)
-            fit_time.append(time.time())
+            if not args.prefitOnly:
+                ifitter.set_blinding_offsets(blind=blinded_fits[i])
+                fit(args, ifitter, ws, dofit=ifit >= 0)
+                fit_time.append(time.time())
 
-            if args.saveHists:
-                save_hists(
-                    args,
-                    models,
-                    ifitter,
-                    ws,
-                    prefit=False,
-                    profile=args.externalPostfit is None,
-                )
+                if args.saveHists:
+                    save_hists(
+                        args,
+                        models,
+                        ifitter,
+                        ws,
+                        prefit=False,
+                        profile=args.externalPostfit is None,
+                    )
+            else:
+                fit_time.append(time.time())
 
             ws.dump_and_flush(group)
             postfit_time.append(time.time())
