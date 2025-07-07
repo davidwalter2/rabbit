@@ -45,10 +45,9 @@ class Fitter:
             self.binByBinStat
             and self.binByBinStatMode == "full"
             and self.binByBinStatType != "normal"
-            and not options.chisqFit
         ):
             raise Exception(
-                'bin-by-bin stat only for option "--binByBinStatMode full" with "--chisqFit" and "--binByBinStatMode normal"'
+                'bin-by-bin stat only for option "--binByBinStatMode full" with "--binByBinStatMode normal"'
             )
 
         if options.externalCovariance and not options.chisqFit:
@@ -1223,18 +1222,31 @@ class Fitter:
                         beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal":
                         sbeta = tf.math.sqrt(varbeta)
-                        abeta = sbeta
-                        abeta = tf.where(varbeta == 0.0, tf.ones_like(abeta), abeta)
-                        bbeta = varbeta + nexp_profile - sbeta * beta0
-                        cbeta = (
-                            sbeta * (nexp_profile - self.nobs) - nexp_profile * beta0
-                        )
-                        beta = (
-                            0.5
-                            * (-bbeta + tf.sqrt(bbeta**2 - 4.0 * abeta * cbeta))
-                            / abeta
-                        )
-                        beta = tf.where(varbeta == 0.0, beta0, beta)
+                        if self.binByBinStatMode == "light":
+
+                            abeta = sbeta
+                            abeta = tf.where(varbeta == 0.0, tf.ones_like(abeta), abeta)
+                            bbeta = varbeta + nexp_profile - sbeta * beta0
+                            cbeta = (
+                                sbeta * (nexp_profile - self.nobs)
+                                - nexp_profile * beta0
+                            )
+                            beta = (
+                                0.5
+                                * (-bbeta + tf.sqrt(bbeta**2 - 4.0 * abeta * cbeta))
+                                / abeta
+                            )
+                            beta = tf.where(varbeta == 0.0, beta0, beta)
+                        else:
+                            norm_profile = norm[: self.indata.nbins]
+
+                            qbeta = -self.nobs * tf.reduce_sum(varbeta, axis=-1)
+                            pbeta = tf.reduce_sum(
+                                varbeta - sbeta * beta0 - norm_profile, axis=-1
+                            )
+                            nbeta = -0.5 * pbeta + tf.sqrt(0.25 * pbeta**2 - qbeta)
+
+                            beta = beta0 + (self.nobs / nbeta - 1)[..., None] * sbeta
 
                 if self.indata.nbinsmasked:
                     beta = tf.concat([beta, self.beta0[self.indata.nbins :]], axis=0)
