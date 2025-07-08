@@ -127,7 +127,6 @@ class Fitter:
         self.lognobs = tf.Variable(
             tf.zeros_like(self.indata.data_obs), trainable=False, name="lognobs"
         )
-        self.set_nobs(self.indata.data_obs)
         self.data_cov_inv = None
 
         if self.chisqFit:
@@ -136,12 +135,6 @@ class Fitter:
                     raise RuntimeError("No external covariance found in input data.")
                 # provided covariance
                 self.data_cov_inv = self.indata.data_cov_inv
-            else:
-                # covariance from data stat
-                if tf.reduce_any(self.nobs <= 0).numpy():
-                    raise RuntimeError(
-                        "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
-                    )
 
         # constraint minima for nuisance parameters
         self.theta0 = tf.Variable(
@@ -326,17 +319,25 @@ class Fitter:
         return val, jac
 
     def set_nobs(self, values):
+        if self.chisqFit and not self.externalCovariance:
+            # covariance from data stat
+            if tf.math.reduce_any(values <= 0).numpy():
+                raise RuntimeError(
+                    "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
+                )
         self.nobs.assign(values)
         # compute offset for poisson nll improved numerical precision in minimizatoin
         # the offset is chosen to give the saturated likelihood
-        nobssafe = tf.where(values == 0.0, 1.0, values)
+        nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
         self.lognobs.assign(tf.math.log(nobssafe))
 
     def set_beta0(self, values):
         self.beta0.assign(values)
         # compute offset for Gamma nll improved numerical precision in minimizatoin
         # the offset is chosen to give the saturated likelihood
-        beta0safe = tf.where(values == 0.0, 1.0, values)
+        beta0safe = tf.where(
+            values == 0.0, tf.constant(1.0, dtype=values.dtype), values
+        )
         self.logbeta0.assign(tf.math.log(beta0safe))
 
     def theta0defaultassign(self):
@@ -431,7 +432,11 @@ class Fitter:
                     / self.kstat
                 )
 
-                beta0gen = tf.where(self.kstat == 0.0, 0.0, beta0gen)
+                beta0gen = tf.where(
+                    self.kstat == 0.0,
+                    tf.constant(0.0, dtype=self.kstat.dtype),
+                    beta0gen,
+                )
                 self.set_beta0(beta0gen)
             elif self.binByBinStatType == "normal":
                 self.set_beta0(
@@ -445,6 +450,7 @@ class Fitter:
 
     def toyassign(
         self,
+        data_values=None,
         syst_randomize="frequentist",
         data_randomize="poisson",
         data_mode="expected",
@@ -460,7 +466,7 @@ class Fitter:
         if data_mode == "expected":
             data_nom = self.expected_yield()
         elif data_mode == "observed":
-            data_nom = self.indata.data_obs
+            data_nom = data_values
 
         if data_randomize == "poisson":
             if self.externalCovariance:
@@ -1142,7 +1148,9 @@ class Fitter:
                         varbeta = self.indata.sumw2[: self.indata.nbins]
                         sbeta = tf.sqrt(varbeta)
                         abeta = sbeta
-                        abeta = tf.where(varbeta == 0.0, 1.0, abeta)
+                        abeta = tf.where(
+                            varbeta == 0.0, tf.constant(1.0, dtype=varbeta.dtype), abeta
+                        )
                         bbeta = varbeta + nexp_profile - sbeta * beta0
                         cbeta = (
                             sbeta * (nexp_profile - self.nobs) - nexp_profile * beta0
