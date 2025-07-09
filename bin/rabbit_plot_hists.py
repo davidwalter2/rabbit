@@ -428,7 +428,7 @@ def make_plot(
         if (
             h_data is not None
             and binwnorm is not None
-            and h_data.storage_type != hist.storage.Weight()
+            and h_data.storage_type != hist.storage.Weight
         ):
             # need hist with variances to handle bin width normaliztion
             h_data_tmp = hist.Hist(
@@ -1013,6 +1013,7 @@ def make_plots(
             to_xsc = lambda h: hh.scaleHist(h, 1.0 / (lumi * 1000))
         else:
             to_xsc = lambda h: h
+
         hist_data = to_xsc(hist_data)
         hist_inclusive = to_xsc(hist_inclusive)
         hist_stack = [to_xsc(h) for h in hist_stack]
