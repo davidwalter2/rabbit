@@ -140,7 +140,8 @@ class FitInputData:
             ibin = 0
             for channel, info in self.channel_info.items():
                 axes = info["axes"]
-                shape = tuple([len(a) for a in axes])
+                flow = info["flow"]
+                shape = tuple([a.extent if flow else a.size for a in axes])
                 size = int(np.prod(shape))
 
                 start = ibin

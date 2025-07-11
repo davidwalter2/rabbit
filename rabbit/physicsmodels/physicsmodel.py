@@ -170,6 +170,7 @@ class Channelmodel(PhysicsModel):
         self.channel_info = {
             channel: {
                 "axes": self.term.channel_axes,
+                "flow": channel_info["flow"],
                 "processes": processes if len(processes) else indata.procs,
             }
         }
