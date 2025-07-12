@@ -101,7 +101,7 @@ class Ratio(PhysicsModel):
         self.channel_info = {
             channel: {
                 "axes": hist_axes,
-                "flow": indata.channel_info[channel]["flow"],
+                "flow": indata.channel_info[channel].get("flow", False),
             }
         }
 

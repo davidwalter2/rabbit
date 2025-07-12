@@ -47,7 +47,7 @@ class Project(Channelmodel):
         self.channel_info = {
             channel: {
                 "axes": hist_axes,
-                "flow": info["flow"],
+                "flow": info.get("flow", False),
                 "processes": indata.procs,
             }
         }

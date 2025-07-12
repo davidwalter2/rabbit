@@ -382,7 +382,7 @@ class Workspace:
         start = 0
         for channel, info in model.channel_info.items():
             axes = info["axes"]
-            flow = info["flow"]
+            flow = info.get("flow", False)
             stop = start + int(np.prod([a.extent if flow else a.size for a in axes]))
 
             opts = dict(

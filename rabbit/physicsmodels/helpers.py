@@ -120,7 +120,7 @@ class Term:
 
         self.has_data = not info["masked"] and len(processes) == 0
 
-        flow = info["flow"]
+        flow = info.get("flow", False)
         self.exp_shape = tuple([a.extent if flow else a.size for a in channel_axes])
 
         if processes is not None:
