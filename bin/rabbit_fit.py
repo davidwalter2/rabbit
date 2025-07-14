@@ -203,12 +203,6 @@ def make_parser():
         help="save prefit and postfit histograms",
     )
     parser.add_argument(
-        "--saveHistsForIteration",
-        default=False,
-        action="store_true",
-        help="save prefit and postfit histograms where only the effect of the unconstrained parameters is considered",
-    )
-    parser.add_argument(
         "--saveHistsPerProcess",
         default=False,
         action="store_true",
@@ -706,7 +700,7 @@ def main():
                     hist_name="parms_prefit",
                 )
 
-                if args.saveHists or args.saveHistsForIteration:
+                if args.saveHists:
                     save_observed_hists(args, models, ifitter, ws)
                     save_hists(args, models, ifitter, ws, prefit=True)
                 prefit_time.append(time.time())
@@ -725,44 +719,6 @@ def main():
                             prefit=False,
                             profile=args.externalPostfit is None,
                         )
-                    elif args.saveHistsForIteration:
-                        # save hists where only the effect of the unconstrained parameters is considered, constrained nuisance parameters are set to 0
-                        # this is needed for the iterative linearized unfolding
-
-                        x = ifitter.x[: ifitter.npoi]
-                        theta = ifitter.x[ifitter.npoi :]
-
-                        theta = tf.where(
-                            indata.constraintweights == 0.0,
-                            theta,
-                            0.0,
-                        )
-                        x_tmp = tf.concat([x, theta], axis=0)
-
-                        ifitter.x.assign(x_tmp)
-                        ifitter.betadefaultassign()
-
-                        for model in models:
-                            exp, aux = ifitter.expected_events(
-                                model,
-                                inclusive=True,
-                                compute_variance=False,
-                                compute_cov=False,
-                                compute_chi2=False,
-                                compute_global_impacts=False,
-                                profile=False,
-                            )
-
-                            ws.add_expected_hists(
-                                model,
-                                exp,
-                                var=aux[0],
-                                cov=aux[1],
-                                impacts=aux[2],
-                                impacts_grouped=aux[3],
-                                prefit=False,
-                            )
-
                 else:
                     fit_time.append(time.time())
 
