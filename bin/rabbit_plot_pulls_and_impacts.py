@@ -751,6 +751,11 @@ def parseArgs():
         action="store_true",
         help="Normalize impacts on poi, leading to relative uncertainties.",
     )
+    parser.add_argument(
+        "--relative",
+        action="store_true",
+        help="Relative uncertainty w.r.t. central value of parameter of interest (only for hisograms)",
+    )
     parser.add_argument("--debug", action="store_true", help="Print debug output")
     parser.add_argument(
         "--diffPullAsym",
@@ -874,6 +879,8 @@ def make_plots(
     impact_title=None,
 ):
 
+    df = df.fillna(0)
+
     if args.sort:
         if args.sort.endswith("diff"):
             key = args.sort.replace("_diff", "")
@@ -891,8 +898,6 @@ def make_plots(
             print(
                 f"Trying to sort {args.sort} but not found in dataframe, continue without sorting"
             )
-
-    df = df.fillna(0)
 
     outfile = os.path.join(outdir, outfile)
     extensions = [outfile.split(".")[-1], *args.otherExtensions]
@@ -1018,6 +1023,16 @@ def load_dataframe_hists(
     grouping=None,
     translate_label={},
 ):
+
+    if args.relative:
+        scale = args.scaleImpacts * 1.0 / hist_total.value
+        if fitresult_ref:
+            scale_ref = args.scaleImpacts * 1.0 / hist_total_ref.value
+    else:
+        scale = args.scaleImpacts
+        if fitresult_ref:
+            scale_ref = args.scaleImpacts
+
     df = readHistImpacts(
         fitresult,
         hist_impacts,
@@ -1028,7 +1043,7 @@ def load_dataframe_hists(
         stat=args.stat / 100.0,
         normalize=normalize,
         grouping=grouping,
-        scale=args.scaleImpacts,
+        scale=scale,
     )
 
     if fitresult_ref:
@@ -1042,7 +1057,7 @@ def load_dataframe_hists(
             stat=args.stat / 100.0,
             normalize=normalize,
             grouping=grouping,
-            scale=args.scaleImpacts,
+            scale=scale_ref,
         )
         df = df.merge(df_ref, how="outer", on="label", suffixes=("", "_ref"))
 
@@ -1143,6 +1158,8 @@ def produce_plots_hist(
         asym=asym,
         normalize=normalize,
         fitresult_ref=fitresult_ref,
+        hist_impacts_ref=hist_impacts_ref,
+        hist_total_ref=hist_total_ref,
         grouping=grouping,
         translate_label=translate_label,
     )
@@ -1220,9 +1237,17 @@ def main():
             )
 
         model_key = " ".join(args.physicsModel)
-        channels = fitresult["physics_models"][model_key]["channels"]
+        if model_key in fitresult["physics_models"].keys():
+            channels = fitresult["physics_models"][model_key]["channels"]
+        else:
+            keys = [
+                key
+                for key in fitresult["physics_models"].keys()
+                if key.startswith(model_key)
+            ]
+            channels = fitresult["physics_models"][keys[0]]["channels"]
 
-        for hists in channels.values():
+        for channel, hists in channels.items():
 
             modes = ["ungrouped", "group"] if args.mode == "both" else [args.mode]
             for mode in modes:
@@ -1245,6 +1270,13 @@ def main():
                     meta["meta_info_input"]["channel_info"]["ch0"].get("lumi", 0.001)
                     * 1000
                 )
+
+                if fitresult_ref is not None:
+                    hists_ref = fitresult_ref["physics_models"][model_key]["channels"][
+                        channel
+                    ]
+                    hist_ref = hists_ref[key].get()
+                    hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
 
                 for idxs in itertools.product(
                     *[np.arange(a.size) for a in hist_total.axes]
@@ -1271,8 +1303,8 @@ def main():
                         lumi,
                         group=group,
                         grouping=grouping,
-                        hist_impacts_ref=None,
-                        hist_total_ref=None,
+                        hist_impacts_ref=hist_ref[ibin] if fitresult_ref else None,
+                        hist_total_ref=hist_total_ref[ibin] if fitresult_ref else None,
                         **kwargs,
                     )
     else:

@@ -331,9 +331,19 @@ def parseArgs():
         "--unfoldedXsec", action="store_true", help="Plot unfolded cross sections"
     )
     parser.add_argument(
+        "--noPrefit",
+        action="store_true",
+        help="Don't plot prefit distribution",
+    )
+    parser.add_argument(
         "--noBinWidthNorm",
         action="store_true",
         help="Do not normalize bin yields by bin width",
+    )
+    parser.add_argument(
+        "--upperPanelUncertaintyBand",
+        action="store_true",
+        help="Plot an uncertainty band in the upper panel around the prediction",
     )
 
     args = parser.parse_args()
@@ -592,7 +602,7 @@ def make_plot(
                 zorder=2,
                 flow="none",
             )
-    if args.unfoldedXsec or len(h_stack) == 0:
+    if (args.unfoldedXsec or len(h_stack) == 0) and not args.noPrefit:
         hep.histplot(
             h_inclusive,
             yerr=False,
@@ -748,8 +758,21 @@ def make_plot(
                     hatch=hatchstyle,
                     edgecolor="k",
                     linewidth=0.0,
-                    label=label_unc,
+                    label=label_unc if not args.upperPanelUncertaintyBand else None,
                 )
+                if args.upperPanelUncertaintyBand:
+                    ax1.fill_between(
+                        edges,
+                        np.append((nom + std), ((nom + std))[-1]),
+                        np.append((nom - std), ((nom - std))[-1]),
+                        step="post",
+                        facecolor=facecolor,
+                        zorder=0,
+                        hatch=hatchstyle,
+                        edgecolor="k",
+                        linewidth=0.0,
+                        label=label_unc,
+                    )
             else:
                 ax2.fill_between(
                     edges,
@@ -761,9 +784,21 @@ def make_plot(
                     hatch=hatchstyle,
                     edgecolor="k",
                     linewidth=0.0,
-                    label=label_unc,
+                    label=label_unc if not args.upperPanelUncertaintyBand else None,
                 )
-
+                if args.upperPanelUncertaintyBand:
+                    ax1.fill_between(
+                        edges,
+                        np.append((nom + std), ((nom + std))[-1]),
+                        np.append((nom - std), ((nom - std))[-1]),
+                        step="post",
+                        facecolor=facecolor,
+                        zorder=0,
+                        hatch=hatchstyle,
+                        edgecolor="k",
+                        linewidth=0.0,
+                        label=label_unc,
+                    )
         if (
             args.showVariations in ["lower", "both"]
             and hup is not None
@@ -1292,7 +1327,7 @@ def main():
                     1.0
                     if any(
                         instance_key.startswith(x)
-                        for x in ["Basemodel", "Project", "Norm"]
+                        for x in ["Basemodel", "Project", "Select", "Norm"]
                     )
                     and not args.noBinWidthNorm
                     else None

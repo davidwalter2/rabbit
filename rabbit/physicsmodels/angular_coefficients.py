@@ -76,6 +76,7 @@ class AngularCoefficients(PhysicsModel):
         self.channel_info = {
             channel: {
                 "axes": channel_axes,
+                "flow": indata.channel_info[channel].get("flow", False),
             },
         }
 
@@ -142,7 +143,8 @@ class LamTung(AngularCoefficients):
         super().__init__(indata, key, channel, *args, **kwargs)
 
         self.channel_info[channel] = {
-            "axes": [c for c in self.channel_info[channel]["axes"] if c.name != "ai"]
+            "axes": [c for c in self.channel_info[channel]["axes"] if c.name != "ai"],
+            "flow": self.channel_info[channel].get("flow", False),
         }
 
     def compute_ais(self, observables, inclusive=False):
