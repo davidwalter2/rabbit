@@ -277,17 +277,17 @@ class DatacardConverter:
                 prange = (float(lo), float(hi))
 
             for c in channels:
-                writer.add_lnN_systematic(name, processes, c, 1.01, constrained=False)
+                writer.add_norm_systematic(name, processes, c, 1.01, constrained=False)
 
-        def add_lnN_syst(writer, name, process, channel, effect):
+        def add_norm_syst(writer, name, process, channel, effect):
             # Parse the effect (could be asymmetric like 0.9/1.1)
             if "/" in effect:
                 down, up = effect.split("/")
-                writer.add_lnN_systematic(
+                writer.add_norm_systematic(
                     name, process, channel, [(float(up), float(down))]
                 )
             else:
-                writer.add_lnN_systematic(name, process, channel, float(effect))
+                writer.add_norm_systematic(name, process, channel, float(effect))
 
         logger.info("loop over systematic variations")
         for syst in tqdm(self.parser.systematics, desc="Processing"):
@@ -321,7 +321,7 @@ class DatacardConverter:
 
                         if hist_up is None and hist_down is None:
                             # 'syst?' case
-                            add_lnN_syst(
+                            add_norm_syst(
                                 writer, syst["name"], process_name, bin_name, effect
                             )
                         else:
@@ -341,7 +341,7 @@ class DatacardConverter:
 
                 for (bin_name, process_name), effect in syst["effects"].items():
                     if effect not in ["-", "0"]:
-                        add_lnN_syst(
+                        add_norm_syst(
                             writer, syst["name"], process_name, bin_name, effect
                         )
 
