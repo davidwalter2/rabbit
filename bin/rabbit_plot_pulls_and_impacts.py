@@ -1028,6 +1028,10 @@ def load_dataframe_hists(
         scale = args.scaleImpacts * 1.0 / hist_total.value
         if fitresult_ref:
             scale_ref = args.scaleImpacts * 1.0 / hist_total_ref.value
+    else:
+        scale = args.scaleImpacts
+        if fitresult_ref:
+            scale_ref = args.scaleImpacts
 
     df = readHistImpacts(
         fitresult,
@@ -1053,7 +1057,7 @@ def load_dataframe_hists(
             stat=args.stat / 100.0,
             normalize=normalize,
             grouping=grouping,
-            scale=scale,
+            scale=scale_ref,
         )
         df = df.merge(df_ref, how="outer", on="label", suffixes=("", "_ref"))
 
