@@ -9,14 +9,24 @@ import time
 
 import h5py
 import numpy as np
+import scipy
 
 from rabbit import fitter, inputdata, io_tools, workspace
 from rabbit.physicsmodels import helpers as ph
+from rabbit.physicsmodels import physicsmodel as pm
 from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
 
 logger = None
+
+
+class OptionalListAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if len(values) == 0:
+            setattr(namespace, self.dest, [".*"])
+        else:
+            setattr(namespace, self.dest, values)
 
 
 def make_parser():
@@ -42,6 +52,11 @@ def make_parser():
         "--diagnostics",
         action="store_true",
         help="Calculate and print additional info for diagnostics (condition number, edm value)",
+    )
+    parser.add_argument(
+        "--fullNll",
+        action="store_true",
+        help="Calculate and store full value of -log(L)",
     )
     parser.add_argument("filename", help="filename of the main hdf5 input")
     parser.add_argument("-o", "--output", default="./", help="output directory")
@@ -71,7 +86,11 @@ def make_parser():
         "--toysSystRandomize",
         default="frequentist",
         choices=["frequentist", "bayesian", "none"],
-        help="Type of randomization for systematic uncertainties (including binByBinStat if present).  Options are 'frequentist' which randomizes the contraint minima a.k.a global observables and 'bayesian' which randomizes the actual nuisance parameters used in the pseudodata generation",
+        help="""
+        Type of randomization for systematic uncertainties (including binByBinStat if present).  
+        Options are 'frequentist' which randomizes the contraint minima a.k.a global observables 
+        and 'bayesian' which randomizes the actual nuisance parameters used in the pseudodata generation
+        """,
     )
     parser.add_argument(
         "--toysDataRandomize",
@@ -166,6 +185,12 @@ def make_parser():
         help="use prefit uncertainty to define scan range",
     )
     parser.add_argument(
+        "--prefitOnly",
+        default=False,
+        action="store_true",
+        help="Only compute prefit outputs",
+    )
+    parser.add_argument(
         "--noHessian",
         default=False,
         action="store_true",
@@ -247,6 +272,7 @@ def make_parser():
         "--pseudoData",
         default=None,
         type=str,
+        nargs="*",
         help="run fit on pseudo data with the given name",
     )
     parser.add_argument(
@@ -262,6 +288,11 @@ def make_parser():
         This argument can be called multiple times.
         Custom models can be specified with the full path to the custom model e.g. '-m custom_modesl.MyCustomModel'.
         """,
+    )
+    parser.add_argument(
+        "--compositeModel",
+        action="store_true",
+        help="Make a composite model and compute the covariance matrix across all physics models.",
     )
     parser.add_argument(
         "--doImpacts",
@@ -298,7 +329,11 @@ def make_parser():
         type=str,
         default=[],
         nargs="*",
-        help="Specify list of regex to unblind matching parameters of interest. E.g. use '^signal$' to unblind a parameter named signal or '.*' to unblind all.",
+        action=OptionalListAction,
+        help="""
+        Specify list of regex to unblind matching parameters of interest. 
+        E.g. use '--unblind ^signal$' to unblind a parameter named signal or '--unblind' to unblind all.
+        """,
     )
 
     return parser.parse_args()
@@ -324,13 +359,13 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
     for model in models:
         logger.info(f"Save inclusive histogram for {model.key}")
 
-        if prefit and getattr(model, "skip_prefit", False):
+        if prefit and model.skip_prefit:
             continue
 
-        if not getattr(model, "skip_incusive", False):
+        if not model.skip_incusive:
             exp, aux = fitter.expected_events(
                 model,
-                inclusive=not getattr(model, "need_processes", False),
+                inclusive=True,
                 compute_variance=args.computeHistErrors,
                 compute_cov=args.computeHistCov,
                 compute_chi2=not args.noChi2 and model.has_data,
@@ -351,7 +386,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
             if aux[4] is not None:
                 ws.add_chi2(aux[4], aux[5], prefit, model)
 
-        if args.saveHistsPerProcess and not getattr(model, "skip_per_process", False):
+        if args.saveHistsPerProcess and not model.skip_per_process:
             logger.info(f"Save processes histogram for {model.key}")
 
             exp, aux = fitter.expected_events(
@@ -376,7 +411,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
 
             exp, aux = fitter.expected_events(
                 model,
-                inclusive=getattr(model, "need_processes", True),
+                inclusive=True,
                 compute_variance=False,
                 compute_variations=True,
                 profile=profile,
@@ -463,21 +498,33 @@ def fit(args, fitter, ws, dofit=True):
             if args.globalImpacts:
                 ws.add_global_impacts_hists(*fitter.global_impacts_parms())
 
-    nllvalfull = fitter.full_nll().numpy()
-    satnllvalfull, ndfsat = fitter.saturated_nll()
+    nllvalreduced = fitter.reduced_nll().numpy()
 
-    satnllvalfull = satnllvalfull.numpy()
-    ndfsat = ndfsat.numpy()
+    ndfsat = (
+        tf.size(fitter.nobs) - fitter.npoi - fitter.indata.nsystnoconstraint
+    ).numpy()
+
+    chi2 = 2.0 * nllvalreduced
+    p_val = scipy.stats.chi2.sf(chi2, ndfsat)
+
+    logger.info("Saturated chi2:")
+    logger.info(f"    ndof: {ndfsat}")
+    logger.info(f"    2*deltaNLL: {round(chi2, 2)}")
+    logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
 
     ws.results.update(
         {
-            "nllvalfull": nllvalfull,
-            "edmval": edmval,
-            "satnllvalfull": satnllvalfull,
+            "nllvalreduced": nllvalreduced,
             "ndfsat": ndfsat,
+            "edmval": edmval,
             "postfit_profile": args.externalPostfit is None,
         }
     )
+
+    if args.fullNll:
+        nllvalfull = fitter.full_nll().numpy()
+        logger.info(f"2*deltaNLL(full): {nllvalfull}")
+        ws.results["nllvalfull"] = nllvalfull
 
     ws.add_parms_hist(
         values=fitter.x,
@@ -503,10 +550,10 @@ def fit(args, fitter, ws, dofit=True):
 
     if args.scan2D is not None:
         for param_tuple in args.scan2D:
-            x_scan, yscan, nll_values = fitter.nll_scan2D(
+            x_scan, yscan, dnll_values = fitter.nll_scan2D(
                 param_tuple, args.scanRange, args.scanPoints, args.scanRangeUsePrefit
             )
-            ws.add_nll_scan2D_hist(param_tuple, x_scan, yscan, nll_values - nllvalfull)
+            ws.add_nll_scan2D_hist(param_tuple, x_scan, yscan, dnll_values)
 
     if args.contourScan is not None:
         # do likelihood contour scans
@@ -582,6 +629,11 @@ def main():
         model = ph.instance_from_class(margs[0], indata, *margs[1:])
         models.append(model)
 
+    if args.compositeModel:
+        models = [
+            pm.CompositeModel(models),
+        ]
+
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)
 
@@ -608,51 +660,70 @@ def main():
         postfit_time = []
         fit_time = []
         for i, ifit in enumerate(fits):
-            ifitter.defaultassign()
-
             group = "results"
-            if ifit == -1:
-                group += "_asimov"
-                ifitter.nobs.assign(ifitter.expected_yield())
-            if ifit == 0:
-                ifitter.nobs.assign(ifitter.indata.data_obs)
 
-            elif ifit >= 1:
-                group += f"_toy{ifit}"
-                ifitter.toyassign(
-                    syst_randomize=args.toysSystRandomize,
-                    data_randomize=args.toysDataRandomize,
-                    data_mode=args.toysDataMode,
-                    randomize_parameters=args.toysRandomizeParameters,
+            if args.pseudoData is None:
+                datasets = [
+                    ifitter.indata.data_obs,
+                ]
+            else:
+                # shape nobs x npseudodata
+                datasets = tf.transpose(indata.pseudodata_obs)
+
+            # loop over (pseudo)data sets
+            for j, data_values in enumerate(datasets):
+
+                ifitter.defaultassign()
+                if ifit == -1:
+                    group += "_asimov"
+                    ifitter.set_nobs(ifitter.expected_yield())
+                else:
+                    if ifit == 0:
+                        ifitter.set_nobs(data_values)
+                    elif ifit >= 1:
+                        group += f"_toy{ifit}"
+                        ifitter.toyassign(
+                            data_values,
+                            syst_randomize=args.toysSystRandomize,
+                            data_randomize=args.toysDataRandomize,
+                            data_mode=args.toysDataMode,
+                            randomize_parameters=args.toysRandomizeParameters,
+                        )
+
+                if np.shape(datasets)[0] > 1:
+                    # in case there are more than 1 pseudodata set, label each one
+                    group += f"_{indata.pseudodatanames[j]}"
+
+                ws.add_parms_hist(
+                    values=ifitter.x,
+                    variances=tf.linalg.diag_part(ifitter.cov),
+                    hist_name="parms_prefit",
                 )
 
-            ws.add_parms_hist(
-                values=ifitter.x,
-                variances=tf.linalg.diag_part(ifitter.cov),
-                hist_name="parms_prefit",
-            )
+                if args.saveHists:
+                    save_observed_hists(args, models, ifitter, ws)
+                    save_hists(args, models, ifitter, ws, prefit=True)
+                prefit_time.append(time.time())
 
-            if args.saveHists:
-                save_observed_hists(args, models, ifitter, ws)
-                save_hists(args, models, ifitter, ws, prefit=True)
-            prefit_time.append(time.time())
+                if not args.prefitOnly:
+                    ifitter.set_blinding_offsets(blind=blinded_fits[i])
+                    fit(args, ifitter, ws, dofit=ifit >= 0)
+                    fit_time.append(time.time())
 
-            ifitter.set_blinding_offsets(blind=blinded_fits[i])
-            fit(args, ifitter, ws, dofit=ifit >= 0)
-            fit_time.append(time.time())
+                    if args.saveHists:
+                        save_hists(
+                            args,
+                            models,
+                            ifitter,
+                            ws,
+                            prefit=False,
+                            profile=args.externalPostfit is None,
+                        )
+                else:
+                    fit_time.append(time.time())
 
-            if args.saveHists:
-                save_hists(
-                    args,
-                    models,
-                    ifitter,
-                    ws,
-                    prefit=False,
-                    profile=args.externalPostfit is None,
-                )
-
-            ws.dump_and_flush(group)
-            postfit_time.append(time.time())
+                ws.dump_and_flush(group)
+                postfit_time.append(time.time())
 
     end_time = time.time()
     logger.info(f"{end_time - start_time:.2f} seconds total time")

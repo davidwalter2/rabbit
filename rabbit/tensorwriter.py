@@ -69,16 +69,16 @@ class TensorWriter:
         self.dtype = "float64"
         self.chunkSize = 4 * 1024**2
 
-    def get_flat_values(self, h):
+    def get_flat_values(self, h, flow=False):
         if hasattr(h, "values"):
-            values = h.values()
+            values = h.values(flow=flow)
         else:
             values = h
         return values.flatten().astype(self.dtype)
 
-    def get_flat_variances(self, h):
+    def get_flat_variances(self, h, flow=False):
         if hasattr(h, "values"):
-            variances = h.variances()
+            variances = h.variances(flow=flow)
         else:
             variances = h
         return variances.flatten().astype(self.dtype)
@@ -124,8 +124,9 @@ class TensorWriter:
             self.dict_logkavg_indices[channel][name] = {}
             self.dict_logkhalfdiff_indices[channel][name] = {}
 
-        norm = self.get_flat_values(h)
-        sumw2 = self.get_flat_variances(h if variances is None else variances)
+        flow = self.channels[channel]["flow"]
+        norm = self.get_flat_values(h, flow)
+        sumw2 = self.get_flat_variances(h if variances is None else variances, flow)
 
         if not self.allow_negative_expectation:
             norm = np.maximum(norm, 0.0)
@@ -141,17 +142,21 @@ class TensorWriter:
         self.dict_norm[channel][name] = norm
         self.dict_sumw2[channel] += sumw2
 
-    def add_channel(self, axes, name=None, masked=False):
+    def add_channel(self, axes, name=None, masked=False, flow=False):
+        if flow and masked is False:
+            raise NotImplementedError(
+                "Keeping underflow/overflow is currently only supported for masked channels"
+            )
         if name is None:
             name = f"ch{len(self.channels)}"
         logger.debug(f"Add new channel {name}")
-        ibins = np.prod([len(a) for a in axes])
+        ibins = np.prod([a.extent if flow else a.size for a in axes])
         self.nbinschan[name] = ibins
         self.dict_norm[name] = {}
         self.dict_sumw2[name] = np.zeros(ibins)
 
         # add masked channels last and not masked channels first
-        this_channel = {"axes": [a for a in axes], "masked": masked}
+        this_channel = {"axes": [a for a in axes], "masked": masked, "flow": flow}
         if masked:
             self.channels[name] = this_channel
         else:
@@ -248,7 +253,7 @@ class TensorWriter:
 
         return logkavg_proc, var_name_out
 
-    def add_lnN_systematic(
+    def add_norm_systematic(
         self,
         name,
         process,
@@ -341,12 +346,14 @@ class TensorWriter:
 
         systematic_type = "normal" if add_to_data_covariance else self.systematic_type
 
-        if isinstance(h, (list, tuple, np.ndarray)):
+        flow = self.channels[channel]["flow"]
+
+        if isinstance(h, (list, tuple)):
             self._check_hist_and_channel(h[0], channel)
             self._check_hist_and_channel(h[1], channel)
 
-            syst_up = self.get_flat_values(h[0])
-            syst_down = self.get_flat_values(h[1])
+            syst_up = self.get_flat_values(h[0], flow=flow)
+            syst_down = self.get_flat_values(h[1], flow=flow)
 
             logkup_proc = self.get_logk(
                 syst_up, norm, kfactor, systematic_type=systematic_type
@@ -367,7 +374,7 @@ class TensorWriter:
             )
         elif mirror:
             self._check_hist_and_channel(h, channel)
-            syst = self.get_flat_values(h)
+            syst = self.get_flat_values(h, flow=flow)
             logkavg_proc = self.get_logk(
                 syst, norm, kfactor, systematic_type=systematic_type
             )
