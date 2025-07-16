@@ -202,13 +202,13 @@ if not args.skipMaskedChannels:
 
 # systematic uncertainties
 
-writer.add_lnN_systematic("norm", ["sig", "bkg", "bkg_2"], "ch0", 1.02)
-writer.add_lnN_systematic("norm", ["sig", "bkg"], "ch1", [1.02, 1.03])
+writer.add_norm_systematic("norm", ["sig", "bkg", "bkg_2"], "ch0", 1.02)
+writer.add_norm_systematic("norm", ["sig", "bkg"], "ch1", [1.02, 1.03])
 
-writer.add_lnN_systematic("bkg_norm", "bkg", "ch0", 1.05)
-writer.add_lnN_systematic("bkg_norm", "bkg", "ch1", 1.05)
+writer.add_norm_systematic("bkg_norm", "bkg", "ch0", 1.05)
+writer.add_norm_systematic("bkg_norm", "bkg", "ch1", 1.05)
 
-writer.add_lnN_systematic("bkg_2_norm", "bkg_2", "ch0", 1.1)
+writer.add_norm_systematic("bkg_2_norm", "bkg_2", "ch0", 1.1)
 
 # shape systematics for channel ch0
 

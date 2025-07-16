@@ -253,7 +253,7 @@ class TensorWriter:
 
         return logkavg_proc, var_name_out
 
-    def add_lnN_systematic(
+    def add_norm_systematic(
         self,
         name,
         process,
