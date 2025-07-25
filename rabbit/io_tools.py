@@ -6,18 +6,23 @@ from wums import ioutils  # isort: skip
 
 def get_fitresult(fitresult_filename, result=None, meta=False):
     if isinstance(fitresult_filename, str):
-        h5file = h5py.File(fitresult_filename, mode="r")
+        try:
+            h5file = h5py.File(fitresult_filename, mode="r")
+        except:
+            return None
     else:
         h5file = fitresult_filename
     key = "results"
     if result is not None:
         key = f"{key}_{result}"
     elif key not in h5file.keys():  # fallback in case only asimov was fit
-        key = f"{key}_asimov"
+        key = f"{key}_asimov"  
         if key not in h5file.keys():
-            raise ValueError(
-                f"'{key}' not in h5file, available keys are {h5file.keys()}"
-            )
+            return None
+
+        #     raise ValueError(
+        #         f"'{key}' not in h5file, available keys are {h5file.keys()}"
+        #     )        
 
     h5results = ioutils.pickle_load_h5py(h5file[key])
     if meta:

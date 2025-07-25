@@ -1,11 +1,15 @@
 import hashlib
 import re
+import time
 
 import numpy as np
 import scipy
 import tensorflow as tf
 import tensorflow_probability as tfp
 from wums import logging
+
+from rabbit.minimizer.exact import _minimize_trust_exact, IterativeSubproblem
+from rabbit.minimizer.function import ScalarFunction
 
 from rabbit import tfhelpers as tfh
 
@@ -18,7 +22,7 @@ class FitterCallback:
         self.xval = xv
 
     def __call__(self, intermediate_result):
-        logger.debug(f"Iteration {self.iiter}: loss value {intermediate_result.fun}")
+        print(f"Iteration {self.iiter}: loss value {intermediate_result.fun}")
         if np.isnan(intermediate_result.fun):
             raise ValueError(f"Loss value is NaN at iteration {self.iiter}")
         self.xval = intermediate_result.x
@@ -27,6 +31,18 @@ class FitterCallback:
 
 class Fitter:
     def __init__(self, indata, options, do_blinding=False):
+        self.n_grad = 0
+        self.n_hvp = 0
+
+        self.time_grad = 0
+        self.time_hvp = 0
+        self.time_grad_copy_1 = 0
+        self.time_grad_copy_2 = 0
+        self.time_hvp_copy_1 = 0
+        self.time_hvp_copy_2 = 0
+
+        self.useTFMinimizer = options.useTFMinimizer
+
         self.indata = indata
         self.binByBinStat = not options.noBinByBinStat
         self.systgroupsfull = self.indata.systgroups.tolist()
@@ -271,15 +287,15 @@ class Fitter:
                 np.zeros(self.indata.nsyst, dtype=np.float64)
             )
 
-    def get_blinded_theta(self):
-        theta = self.x[self.npoi :]
+    def get_blinded_theta(self, xval):
+        theta = xval[self.npoi :]
         if self.do_blinding:
             return theta + self._blinding_offsets_theta
         else:
             return theta
 
-    def get_blinded_poi(self):
-        xpoi = self.x[: self.npoi]
+    def get_blinded_poi(self, xval):
+        xpoi = xval[: self.npoi]
         if self.allowNegativePOI:
             poi = xpoi
         else:
@@ -994,11 +1010,11 @@ class Fitter:
 
         return expvars
 
-    def _compute_yields_noBBB(self, compute_norm=False, full=True):
+    def _compute_yields_noBBB(self, xval, compute_norm=False, full=True):
         # compute_norm: compute yields for each process, otherwise inclusive
         # full: compute yields inclduing masked channels
-        poi = self.get_blinded_poi()
-        theta = self.get_blinded_theta()
+        poi = self.get_blinded_poi(xval)
+        theta = self.get_blinded_theta(xval)
 
         rnorm = tf.concat(
             [poi, tf.ones([self.indata.nproc - poi.shape[0]], dtype=self.indata.dtype)],
@@ -1092,8 +1108,8 @@ class Fitter:
 
         return nexpcentral, normcentral
 
-    def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
-        nexp, norm = self._compute_yields_noBBB(compute_norm, full=full)
+    def _compute_yields_with_beta(self, xval, profile=True, compute_norm=False, full=True):
+        nexp, norm = self._compute_yields_noBBB(xval, compute_norm, full=full)
 
         if self.binByBinStat:
             if profile:
@@ -1195,12 +1211,13 @@ class Fitter:
         return nexp, norm, beta
 
     @tf.function
-    def _profile_beta(self):
-        nexp, norm, beta = self._compute_yields_with_beta(full=False)
+    def _profile_beta(self, xval):
+        nexp, norm, beta = self._compute_yields_with_beta(xval, full=False)
         self.beta.assign(beta)
 
-    def _compute_yields(self, inclusive=True, profile=True, full=True):
+    def _compute_yields(self, xval, inclusive=True, profile=True, full=True):
         nexpcentral, normcentral, beta = self._compute_yields_with_beta(
+            xval,
             profile=profile,
             compute_norm=not inclusive,
             full=full,
@@ -1392,24 +1409,24 @@ class Fitter:
 
     @tf.function
     def expected_yield(self, profile=False, full=False):
-        return self._compute_yields(inclusive=True, profile=profile, full=full)
+        return self._compute_yields(self.x, inclusive=True, profile=profile, full=full)
 
     @tf.function
     def _expected_yield_noBBB(self, full=False):
-        res, _ = self._compute_yields_noBBB(full=full)
+        res, _ = self._compute_yields_noBBB(self.x, full=full)
         return res
 
     @tf.function
     def full_nll(self):
-        return self._compute_nll(full_nll=True)
+        return self._compute_nll(self.x, full_nll=True)
 
     @tf.function
     def reduced_nll(self):
-        return self._compute_nll(full_nll=False)
+        return self._compute_nll(self.x, full_nll=False)
 
-    def _compute_lc(self, full_nll=False):
+    def _compute_lc(self, xval, full_nll=False):
         # constraints
-        theta = self.get_blinded_theta()
+        theta = self.get_blinded_theta(xval)
         lc = self.indata.constraintweights * 0.5 * tf.square(theta - self.theta0)
         if full_nll:
             # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
@@ -1460,8 +1477,9 @@ class Fitter:
 
         return None
 
-    def _compute_nll_components(self, profile=True, full_nll=False):
+    def _compute_nll_components(self, xval, profile=True, full_nll=False):
         nexpfullcentral, _, beta = self._compute_yields_with_beta(
+            xval,
             profile=profile,
             compute_norm=False,
             full=False,
@@ -1502,15 +1520,15 @@ class Fitter:
                     -self.nobs * (lognexp - self.lognobs) + nexp - self.nobs, axis=-1
                 )
 
-        lc = self._compute_lc(full_nll)
+        lc = self._compute_lc(xval, full_nll)
 
         lbeta = self._compute_lbeta(beta, full_nll)
 
         return ln, lc, lbeta, beta
 
-    def _compute_nll(self, profile=True, full_nll=False):
+    def _compute_nll(self, xval, profile=True, full_nll=False):
         ln, lc, lbeta, beta = self._compute_nll_components(
-            profile=profile, full_nll=full_nll
+            xval, profile=profile, full_nll=full_nll
         )
         l = ln + lc
 
@@ -1519,80 +1537,80 @@ class Fitter:
 
         return l
 
-    def _compute_loss(self, profile=True):
-        l = self._compute_nll(profile=profile)
+    def _compute_loss(self, xval, profile=True):
+        l = self._compute_nll(xval, profile=profile)
         return l
 
     @tf.function
     def loss_val(self):
-        val = self._compute_loss()
+        val = self._compute_loss(self.x)
         return val
 
     @tf.function
     def loss_val_grad(self):
         with tf.GradientTape() as t:
-            val = self._compute_loss()
+            val = self._compute_loss(self.x)
         grad = t.gradient(val, self.x)
 
         return val, grad
 
-    # FIXME in principle this version of the function is preferred
-    # but seems to introduce some small numerical non-reproducibility
-    @tf.function
-    def loss_val_grad_hessp_fwdrev(self, p):
-        p = tf.stop_gradient(p)
-        with tf.autodiff.ForwardAccumulator(self.x, p) as acc:
-            with tf.GradientTape() as grad_tape:
-                val = self._compute_loss()
-            grad = grad_tape.gradient(val, self.x)
-        hessp = acc.jvp(grad)
+    # # FIXME in principle this version of the function is preferred
+    # # but seems to introduce some small numerical non-reproducibility
+    # @tf.function
+    # def loss_val_grad_hessp_fwdrev(self, p):
+    #     p = tf.stop_gradient(p)
+    #     with tf.autodiff.ForwardAccumulator(self.x, p) as acc:
+    #         with tf.GradientTape() as grad_tape:
+    #             val = self._compute_loss()
+    #         grad = grad_tape.gradient(val, self.x)
+    #     hessp = acc.jvp(grad)
 
-        return val, grad, hessp
+    #     return val, grad, hessp
 
-    @tf.function
-    def loss_val_grad_hessp_revrev(self, p):
-        p = tf.stop_gradient(p)
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                val = self._compute_loss()
-            grad = t1.gradient(val, self.x)
-        hessp = t2.gradient(grad, self.x, output_gradients=p)
+    # @tf.function
+    # def loss_val_grad_hessp_revrev(self, p):
+    #     p = tf.stop_gradient(p)
+    #     with tf.GradientTape() as t2:
+    #         with tf.GradientTape() as t1:
+    #             val = self._compute_loss()
+    #         grad = t1.gradient(val, self.x)
+    #     hessp = t2.gradient(grad, self.x, output_gradients=p)
 
-        return val, grad, hessp
+    #     return val, grad, hessp
 
-    loss_val_grad_hessp = loss_val_grad_hessp_revrev
+    # loss_val_grad_hessp = loss_val_grad_hessp_revrev
 
     @tf.function
     def loss_val_grad_hess(self, profile=True):
         with tf.GradientTape() as t2:
             with tf.GradientTape() as t1:
-                val = self._compute_loss(profile=profile)
+                val = self._compute_loss(self.x, profile=profile)
             grad = t1.gradient(val, self.x)
         hess = t2.jacobian(grad, self.x)
 
         return val, grad, hess
 
-    @tf.function
-    def loss_val_valfull_grad_hess(self, profile=True):
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                val, valfull = self._compute_nll(profile=profile)
-            grad = t1.gradient(val, self.x)
-        hess = t2.jacobian(grad, self.x)
+    # @tf.function
+    # def loss_val_valfull_grad_hess(self, profile=True):
+    #     with tf.GradientTape() as t2:
+    #         with tf.GradientTape() as t1:
+    #             val, valfull = self._compute_nll(profile=profile)
+    #         grad = t1.gradient(val, self.x)
+    #     hess = t2.jacobian(grad, self.x)
 
-        return val, valfull, grad, hess
+    #     return val, valfull, grad, hess
 
-    @tf.function
-    def loss_val_grad_hess_beta(self, profile=True):
-        with tf.GradientTape() as t2:
-            t2.watch(self.ubeta)
-            with tf.GradientTape() as t1:
-                t1.watch(self.ubeta)
-                val = self._compute_loss(profile=profile)
-            grad = t1.gradient(val, self.ubeta)
-        hess = t2.jacobian(grad, self.ubeta)
+    # @tf.function
+    # def loss_val_grad_hess_beta(self, profile=True):
+    #     with tf.GradientTape() as t2:
+    #         t2.watch(self.ubeta)
+    #         with tf.GradientTape() as t1:
+    #             t1.watch(self.ubeta)
+    #             val = self._compute_loss(profile=profile)
+    #         grad = t1.gradient(val, self.ubeta)
+    #     hess = t2.jacobian(grad, self.ubeta)
 
-        return val, grad, hess
+    #     return val, grad, hess
 
     def minimize(self):
         if self.is_linear:
@@ -1618,29 +1636,99 @@ class Fitter:
             del chol
 
             self.x.assign_add(dx)
-        else:
+        elif self.useTFMinimizer:
 
+            # def tf_loss(xval):
+            #     # self.x.assign()
+            #     return self._compute_loss(xval, profile=True)
+
+            # hessp = IterativeSubproblem.hess_prod
+            # sf = ScalarFunction(tf_loss, self.x.shape, hessp=hessp, hess=not hessp)
+            # closure = sf.closure
+
+            # subproblem = IterativeSubproblem(
+            #     self.x, closure,
+            # )
+            # trust_radius = 1.0
+            # step, hits_boundary = subproblem.solve(trust_radius)
+            start = time.time()
+
+            self.time_hvp, self.n_hvp = _minimize_trust_exact(self._compute_loss, self.x)
+            
+            self.time_minimizer = time.time() - start
+
+
+            # import pdb
+            # pdb.set_trace()
+
+        else:
             def scipy_loss(xval):
+                _0 = time.time()
+
+                self.n_grad = self.n_grad + 1
                 self.x.assign(xval)
+
+                _1 = time.time()
+                self.time_hvp_copy_1 += _1 - _0
+
                 val, grad = self.loss_val_grad()
-                # print(f"Gradient: {grad}")
-                return val.__array__(), grad.__array__()
+
+                _2 = time.time()
+                self.time_grad += _2 - _1
+
+                # print(f"Call grad")
+                val_ = val.__array__()
+                grad_ = grad.__array__()
+
+                self.time_grad_copy_2 += time.time() - _2
+
+                return val_, grad_
 
             def scipy_hessp(xval, pval):
+                _0 = time.time()
+
+                self.n_hvp = self.n_hvp + 1
+                # print(f"Call hvp")
                 self.x.assign(xval)
                 p = tf.convert_to_tensor(pval)
+
+                _1 = time.time()
+                self.time_hvp_copy_1 += _1 - _0
+
                 val, grad, hessp = self.loss_val_grad_hessp(p)
-                return hessp.__array__()
+
+                _2 = time.time()
+                self.time_hvp += _2 - _1
+
+                hessp_ = hessp.__array__()
+
+                self.time_hvp_copy_2 += time.time() - _2
+
+                return hessp_
 
             def scipy_hess(xval):
+                _0 = time.time()
+                self.n_hvp = self.n_hvp + 1
                 self.x.assign(xval)
+
+                _1 = time.time()
+                self.time_hvp_copy_1 += _1 - _0
+
                 val, grad, hess = self.loss_val_grad_hess()
+
+                _2 = time.time()
+                self.time_hvp += _2 - _1
+
                 if self.diagnostics:
                     cond_number = tfh.cond_number(hess)
                     logger.info(f"  - Condition number: {cond_number}")
                     edmval = tfh.edmval(grad, hess)
                     logger.info(f"  - edmval: {edmval}")
-                return hess.__array__()
+                hess_ = hess.__array__()
+
+                self.time_hvp_copy_2 += time.time() - _2
+
+                return hess_
 
             xval = self.x.numpy()
             callback = FitterCallback(xval)
@@ -1656,6 +1744,7 @@ class Fitter:
             else:
                 info_minimize = dict()
 
+            start = time.time()
             try:
                 res = scipy.optimize.minimize(
                     scipy_loss,
@@ -1677,11 +1766,13 @@ class Fitter:
 
             self.x.assign(xval)
 
+            self.time_minimizer = time.time() - start
+
         # force profiling of beta with final parameter values
         # TODO avoid the extra calculation and jitting if possible since the relevant calculation
         # usually would have been done during the minimization
         if self.binByBinStat:
-            self._profile_beta()
+            self._profile_beta(self.x)
 
     def nll_scan(self, param, scan_range, scan_points, use_prefit=False):
         # make a likelihood scan for a single parameter
