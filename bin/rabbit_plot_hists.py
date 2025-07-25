@@ -345,7 +345,12 @@ def parseArgs():
         action="store_true",
         help="Plot an uncertainty band in the upper panel around the prediction",
     )
-
+    parser.add_argument(
+        "--uncertaintyLabel",
+        type=str,
+        default="Model unc.",
+        help="Label for uncertainty shown in the (ratio) plot",
+    )
     args = parser.parse_args()
 
     return args
@@ -745,7 +750,9 @@ def make_plot(
             hatchstyle = None
             facecolor = "silver"
             # label_unc = "Pred. unc."
-            label_unc = "Model unc." if not args.unfoldedXsec else "Prefit unc."
+            label_unc = (
+                args.uncertaintyLabel if not args.unfoldedXsec else "Prefit unc."
+            )
 
             if diff:
                 ax2.fill_between(
