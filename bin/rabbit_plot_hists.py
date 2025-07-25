@@ -331,9 +331,19 @@ def parseArgs():
         "--unfoldedXsec", action="store_true", help="Plot unfolded cross sections"
     )
     parser.add_argument(
+        "--noPrefit",
+        action="store_true",
+        help="Don't plot prefit distribution",
+    )
+    parser.add_argument(
         "--noBinWidthNorm",
         action="store_true",
         help="Do not normalize bin yields by bin width",
+    )
+    parser.add_argument(
+        "--upperPanelUncertaintyBand",
+        action="store_true",
+        help="Plot an uncertainty band in the upper panel around the prediction",
     )
     parser.add_argument(
         "--uncertaintyLabel",
@@ -435,7 +445,7 @@ def make_plot(
         if (
             h_data is not None
             and binwnorm is not None
-            and h_data.storage_type != hist.storage.Weight()
+            and h_data.storage_type != hist.storage.Weight
         ):
             # need hist with variances to handle bin width normaliztion
             h_data_tmp = hist.Hist(
@@ -599,7 +609,7 @@ def make_plot(
                 zorder=2,
                 flow="none",
             )
-    if args.unfoldedXsec or len(h_stack) == 0:
+    if (args.unfoldedXsec or len(h_stack) == 0) and not args.noPrefit:
         hep.histplot(
             h_inclusive,
             yerr=False,
@@ -764,8 +774,21 @@ def make_plot(
                     hatch=hatchstyle,
                     edgecolor="k",
                     linewidth=0.0,
-                    label=label_unc,
+                    label=label_unc if not args.upperPanelUncertaintyBand else None,
                 )
+                if args.upperPanelUncertaintyBand:
+                    ax1.fill_between(
+                        edges,
+                        np.append((nom + std), ((nom + std))[-1]),
+                        np.append((nom - std), ((nom - std))[-1]),
+                        step="post",
+                        facecolor=facecolor,
+                        zorder=0,
+                        hatch=hatchstyle,
+                        edgecolor="k",
+                        linewidth=0.0,
+                        label=label_unc,
+                    )
             else:
                 ax2.fill_between(
                     edges,
@@ -777,8 +800,21 @@ def make_plot(
                     hatch=hatchstyle,
                     edgecolor="k",
                     linewidth=0.0,
-                    label=label_unc,
+                    label=label_unc if not args.upperPanelUncertaintyBand else None,
                 )
+                if args.upperPanelUncertaintyBand:
+                    ax1.fill_between(
+                        edges,
+                        np.append((nom + std), ((nom + std))[-1]),
+                        np.append((nom - std), ((nom - std))[-1]),
+                        step="post",
+                        facecolor=facecolor,
+                        zorder=0,
+                        hatch=hatchstyle,
+                        edgecolor="k",
+                        linewidth=0.0,
+                        label=label_unc,
+                    )
 
         if (
             args.showVariations in ["lower", "both"]
@@ -1029,6 +1065,7 @@ def make_plots(
             to_xsc = lambda h: hh.scaleHist(h, 1.0 / (lumi * 1000))
         else:
             to_xsc = lambda h: h
+
         hist_data = to_xsc(hist_data)
         hist_inclusive = to_xsc(hist_inclusive)
         hist_stack = [to_xsc(h) for h in hist_stack]
@@ -1180,9 +1217,7 @@ def get_chi2(result, no_chi2=True, fittype="postfit"):
     ndf_key = f"ndf_prefit" if fittype == "prefit" else "ndf"
     if not no_chi2 and fittype == "postfit" and result.get("postfit_profile", False):
         # use saturated likelihood test if relevant
-        nllvalfull = result["nllvalfull"]
-        satnllvalfull = result["satnllvalfull"]
-        chi2 = 2.0 * (nllvalfull - satnllvalfull)
+        chi2 = 2.0 * result["nllvalreduced"]
         ndf = result["ndfsat"]
         return chi2, ndf, True
     elif not no_chi2 and chi2_key in result:
@@ -1309,7 +1344,7 @@ def main():
                     1.0
                     if any(
                         instance_key.startswith(x)
-                        for x in ["Basemodel", "Project", "Norm"]
+                        for x in ["Basemodel", "Project", "Select", "Norm"]
                     )
                     and not args.noBinWidthNorm
                     else None
