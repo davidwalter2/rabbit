@@ -472,9 +472,13 @@ def fit(args, fitter, ws, dofit=True):
 
         if not args.noHessian:
 
+            start_time_edm = time.time()
+
             val, grad, hess = fitter.loss_val_grad_hess()
 
             edmval, cov = edmval_cov(grad, hess)
+
+            ws.results["time_edm"] = time.time() - start_time_edm
 
             logger.info(f"edmval: {edmval}")
 
@@ -721,6 +725,22 @@ def main():
                         )
                 else:
                     fit_time.append(time.time())
+
+                ws.results.update(
+                    {
+                        "time_init": init_time - start_time,
+                        "time_total": time.time() - start_time,
+                        "n_grad": ifitter.n_grad,
+                        "time_grad": ifitter.time_grad,
+                        "time_grad_copy_on": ifitter.time_grad_copy_1,
+                        "time_grad_copy_off": ifitter.time_grad_copy_2,
+                        "n_hvp": ifitter.n_hvp,
+                        "time_hvp": ifitter.time_hvp,
+                        "time_minimizer": ifitter.time_minimizer,
+                        "time_hvp_copy_on": ifitter.time_hvp_copy_1,
+                        "time_hvp_copy_off": ifitter.time_hvp_copy_2,
+                    }
+                )
 
                 ws.dump_and_flush(group)
                 postfit_time.append(time.time())

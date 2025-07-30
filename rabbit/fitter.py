@@ -1,5 +1,6 @@
 import hashlib
 import re
+import time
 from functools import partial
 from typing import NamedTuple
 
@@ -424,6 +425,16 @@ class FitterCallback:
 
 class Fitter:
     def __init__(self, indata, options, do_blinding=False):
+        self.n_grad = 0
+        self.n_hvp = 0
+
+        self.time_grad = 0
+        self.time_hvp = 0
+        self.time_grad_copy_1 = 0
+        self.time_grad_copy_2 = 0
+        self.time_hvp_copy_1 = 0
+        self.time_hvp_copy_2 = 0
+
         self.indata = indata
         self.binByBinStat = not options.noBinByBinStat
         self.systgroupsfull = self.indata.systgroups.tolist()
@@ -625,6 +636,13 @@ class Fitter:
             }
         )
 
+        leaves = jax.tree_util.tree_leaves(self.params)
+        if all(isinstance(x, jax.Array) for x in leaves):
+            logger.debug("All leaves are jax.Array")
+        else:
+            found = [x for x in leaves if isinstance(x, jax.Array)]
+            logger.warning(f"Some leaves found that are not jax.Array: {found}")
+
     def init_blinding_values(self, unblind_parameter_expressions=[]):
         # Find parameters that match any regex
         compiled_expressions = [
@@ -686,11 +704,13 @@ class Fitter:
         if not self.do_blinding:
             return
         if blind:
-            self._blinding_offsets_poi = self._blinding_values_poi
-            self._blinding_offsets_theta = self._blinding_values_theta
+            self._blinding_offsets_poi = jnp.array(self._blinding_values_poi)
+            self._blinding_offsets_theta = jnp.array(self._blinding_values_theta)
         else:
-            self._blinding_offsets_poi = np.ones(self.npoi, dtype=np.float64)
-            self._blinding_offsets_theta = np.zeros(self.indata.nsyst, dtype=np.float64)
+            self._blinding_offsets_poi = jnp.ones(self.npoi, dtype=np.float64)
+            self._blinding_offsets_theta = jnp.zeros(
+                self.indata.nsyst, dtype=np.float64
+            )
 
     def _default_beta0(self):
         if self.binByBinStatType == "gamma":
@@ -1625,20 +1645,65 @@ class Fitter:
 
             self.x.assign_add(dx)
         else:
+            start = time.time()
 
             def scipy_loss(xval):
-                val, grad = loss_val_grad(self.params, xval, self.static_params)
+                _0 = time.time()
+
+                self.n_grad = self.n_grad + 1
+                x = jnp.array(xval)
+
+                _1 = time.time()
+                self.time_hvp_copy_1 += _1 - _0
+
+                val, grad = loss_val_grad(self.params, x, self.static_params)
+
+                _2 = time.time()
+                self.time_grad += _2 - _1
+
+                val, grad = np.array(val), np.array(grad)
+
+                self.time_grad_copy_2 += time.time() - _2
+
                 # logger.debug(f"val = {val}")
                 # logger.debug(f"grad = {grad}")
-                return np.array(val), np.array(grad)
+                return val, grad
 
             def scipy_hessp(xval, pval):
-                hvp = loss_hessp(self.params, xval, pval, self.static_params)
+                _0 = time.time()
+
+                self.n_hvp = self.n_hvp + 1
+                x = jnp.array(xval)
+                p = jnp.array(pval)
+
+                _1 = time.time()
+                self.time_hvp_copy_1 += _1 - _0
+
+                hvp = loss_hessp(self.params, x, p, self.static_params)
+
+                _2 = time.time()
+                self.time_hvp += _2 - _1
+
+                hvp = np.array(hvp)
+
+                self.time_hvp_copy_2 += time.time() - _2
+
                 # logger.debug(f"hvp = {hvp}")
-                return np.array(hvp)
+                return hvp
 
             def scipy_hess(xval):
-                hess_val = loss_hess(self.params, xval, self.static_params)
+                _0 = time.time()
+                self.n_hvp = self.n_hvp + 1
+                x = jnp.array(xval)
+
+                _1 = time.time()
+                self.time_hvp_copy_1 += _1 - _0
+
+                hess = loss_hess(self.params, x, self.static_params)
+
+                _2 = time.time()
+                self.time_hvp += _2 - _1
+
                 if self.diagnostics:
                     raise NotImplementedError()
                     # # Compute condition number
@@ -1648,7 +1713,11 @@ class Fitter:
                     # # Compute edmval
                     # edmval = 0.5 * jnp.dot(grad, linalg.solve(hess, grad))
                     # print(f"  - edmval: {edmval}")
-                return np.array(hess_val)
+
+                hess = np.array(hess)
+                self.time_hvp_copy_2 += time.time() - _2
+
+                return hess
 
             xval = self.x
             callback = FitterCallback(xval)
@@ -1683,6 +1752,8 @@ class Fitter:
                 xval = res["x"]
                 logger.debug(res)
             self.x = xval
+
+            self.time_minimizer = time.time() - start
 
         # force profiling of beta with final parameter values
         # TODO avoid the extra calculation and jitting if possible since the relevant calculation
