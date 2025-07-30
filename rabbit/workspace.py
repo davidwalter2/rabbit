@@ -182,7 +182,14 @@ class Workspace:
             if variances is not None:
                 variances = variances[start:stop]
 
-        h = self.hist(name, axes, values, variances, label, flow=flow)
+        h = self.hist(
+            name,
+            axes,
+            np.asarray(values),
+            np.asarray(variances) if variances is not None else None,
+            label,
+            flow=flow,
+        )
         self.dump_hist(h, model_key, channel)
 
     def add_value(self, value, name, *args, **kwargs):

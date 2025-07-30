@@ -14,7 +14,12 @@ from wums import logging
 
 from rabbit import jaxhelpers as jh
 
+# from jax import tree_util, device_put, devices
+
+
 logger = logging.child_logger(__name__)
+
+# gpu = devices("gpu")[0]
 
 
 # container for static objects
@@ -47,7 +52,7 @@ def _compute_yields_noBBB(params, xval, cfg, compute_norm, full):
     # dtype = params["dtype"]
 
     rnorm = jnp.concat(
-        [poi, jnp.ones([nproc - poi.shape[0]], dtype=jnp.float64)],
+        [poi, jnp.ones([nproc - npoi])],
         axis=0,
     )
 
@@ -347,6 +352,12 @@ def _compute_loss(params, xval, cfg):
 
 
 @partial(jax.jit, static_argnames=["cfg"])
+def profile_beta(params, xval, cfg):
+    nexp, norm, beta = _compute_yields_with_beta(params, xval, cfg)
+    return beta
+
+
+@partial(jax.jit, static_argnames=["cfg"])
 def loss_val_grad(params, x, cfg):
     return jax.value_and_grad(_compute_loss, argnums=1)(params, x, cfg)
 
@@ -363,16 +374,16 @@ def loss_hessp(params, xval, pval, cfg):
 
 
 @partial(jax.jit, static_argnames=["cfg"])
-def loss_val_grad_hessp(params, x, p, cfg):
+def loss_val_grad_hessp(params, xval, pval, cfg):
     # Function to compute scalar-valued loss
-    def loss_fn(x_):
-        return _compute_loss(params, x_, cfg)
+    def grad_fn(x):
+        return jax.grad(_compute_loss, argnums=1)(params, x, cfg)
 
-    # Compute loss and gradient using reverse-mode
-    val, grad = jax.value_and_grad(loss_fn)(x)
+    val = _compute_loss(params, xval, cfg)
+    grad = grad_fn(xval)
 
     # Compute Hessian-vector product using forward-over-reverse
-    _, hessp = jax.jvp(jax.grad(loss_fn), (x,), (p,))
+    _, hessp = jax.jvp(grad_fn, (xval,), (pval,))
 
     return val, grad, hessp
 
@@ -384,14 +395,12 @@ def loss_hess(params, x, cfg):
 
 @partial(jax.jit, static_argnames=["cfg"])
 def loss_val_grad_hess(params, xval, cfg):
-    def loss_fn(x):
-        return _compute_loss(params, x, cfg)
+    def grad_fn(x):
+        return jax.grad(_compute_loss, argnums=1)(params, x, cfg)
 
-    # Compute value and gradient efficiently
-    val, grad = jax.value_and_grad(loss_fn)(xval)
-
-    # Compute hessian separately (only once needed)
-    hess = jax.hessian(loss_fn)(xval)
+    val = _compute_loss(params, xval, cfg)
+    grad = grad_fn(xval)
+    hess = jax.jacfwd(grad_fn)(xval)
 
     return val, grad, hess
 
@@ -434,6 +443,9 @@ class Fitter:
         self.time_grad_copy_2 = 0
         self.time_hvp_copy_1 = 0
         self.time_hvp_copy_2 = 0
+        self.time_minimizer = 0
+
+        self.params = {}
 
         self.indata = indata
         self.binByBinStat = not options.noBinByBinStat
@@ -504,6 +516,9 @@ class Fitter:
             )
             self.init_blinding_values(options.unblind)
 
+            self.params["blinding_offsets_theta"] = self._blinding_offsets_theta
+            self.params["blinding_offsets_poi"] = self._blinding_offsets_poi
+
         self.parms = np.concatenate([self.pois, self.indata.systs])
 
         self.allowNegativePOI = options.allowNegativePOI
@@ -569,21 +584,21 @@ class Fitter:
             systematic_type=self.indata.systematic_type,
         )
 
-        self.params = {
-            "constraintweights": self.indata.constraintweights,
-            "sumw": self.indata.sumw,
-            "sumw2": self.indata.sumw2,
-            "logk": self.indata.logk,
-            "norm": self.indata.norm,
-            "blinding_offsets_theta": self._blinding_offsets_theta,
-            "blinding_offsets_poi": self._blinding_offsets_poi,
-            "data_cov_inv": self.data_cov_inv,
-            "theta0": self.theta0,
-            "beta0": self.beta0,
-            "beta": self.beta,
-            "ubeta": self.ubeta,
-            "logbeta0": self.logbeta0,
-        }
+        self.params.update(
+            {
+                "constraintweights": self.indata.constraintweights,
+                "sumw": self.indata.sumw,
+                "sumw2": self.indata.sumw2,
+                "logk": self.indata.logk,
+                "norm": self.indata.norm,
+                "data_cov_inv": self.data_cov_inv,
+                "theta0": self.theta0,
+                "beta0": self.beta0,
+                "beta": self.beta,
+                "ubeta": self.ubeta,
+                "logbeta0": self.logbeta0,
+            }
+        )
 
         if self.binByBinStat:
             if jnp.any(self.indata.sumw2 < 0.0):
@@ -635,6 +650,8 @@ class Fitter:
                 "logbeta0": self.logbeta0,
             }
         )
+
+        # tree_util.tree_map(lambda x: device_put(x, device=gpu), self.params)
 
         leaves = jax.tree_util.tree_leaves(self.params)
         if all(isinstance(x, jax.Array) for x in leaves):
@@ -1400,13 +1417,6 @@ class Fitter:
 
         return expvars
 
-    # @jax.jit
-    def _profile_beta(self, xval):
-        nexp, norm, beta = _compute_yields_with_beta(
-            self.params, xval, self.static_params
-        )
-        self.beta = beta
-
     def _compute_yields(self, xval, inclusive=True, profile=True, full=True):
         nexpcentral, normcentral, beta = _compute_yields_with_beta(
             self.params,
@@ -1618,6 +1628,8 @@ class Fitter:
         return reduced_nll(self.params, self.x, self.static_params)
 
     def loss_val_grad_hess(self):
+        # device_put(self.x, device=gpu)
+        # print(jax.device_get(self.x).device)
         return loss_val_grad_hess(self.params, self.x, self.static_params)
 
     def minimize(self):
@@ -1652,6 +1664,7 @@ class Fitter:
 
                 self.n_grad = self.n_grad + 1
                 x = jnp.array(xval)
+                # device_put(x, device=gpu)
 
                 _1 = time.time()
                 self.time_hvp_copy_1 += _1 - _0
@@ -1675,6 +1688,8 @@ class Fitter:
                 self.n_hvp = self.n_hvp + 1
                 x = jnp.array(xval)
                 p = jnp.array(pval)
+                # device_put(x, device=gpu)
+                # device_put(p, device=gpu)
 
                 _1 = time.time()
                 self.time_hvp_copy_1 += _1 - _0
@@ -1695,6 +1710,7 @@ class Fitter:
                 _0 = time.time()
                 self.n_hvp = self.n_hvp + 1
                 x = jnp.array(xval)
+                # device_put(x, device=gpu)
 
                 _1 = time.time()
                 self.time_hvp_copy_1 += _1 - _0
@@ -1751,6 +1767,9 @@ class Fitter:
             else:
                 xval = res["x"]
                 logger.debug(res)
+            xval = jnp.array(xval)
+            # device_put(xval, device=gpu)
+
             self.x = xval
 
             self.time_minimizer = time.time() - start
@@ -1759,7 +1778,7 @@ class Fitter:
         # TODO avoid the extra calculation and jitting if possible since the relevant calculation
         # usually would have been done during the minimization
         if self.binByBinStat:
-            self._profile_beta(xval)
+            self.beta = profile_beta(self.params, xval, self.static_params)
 
     def nll_scan(self, param, scan_range, scan_points, use_prefit=False):
         # make a likelihood scan for a single parameter
@@ -1805,7 +1824,7 @@ class Fitter:
                         0  # Ensure the perturbation does not affect frozen parameter
                     )
                     p = jnp.convert_to_tensor(pval)
-                    val, grad, hessp = loss_val_grad_hessp(p)
+                    hessp = loss_hessp(p)
                     hessp = hessp
                     # TODO: worth testing modifying the loss/grad/hess functions to imply 1
                     # for the corresponding hessian element instead of 0,
@@ -1898,7 +1917,7 @@ class Fitter:
                 pval[idx0] = 0
                 pval[idx1] = 0
                 p = jnp.convert_to_tensor(pval)
-                val, grad, hessp = self.loss_val_grad_hessp(p)
+                hessp = self.loss_hessp(p)
                 hessp = hessp
                 hessp[idx0] = 0
                 hessp[idx1] = 0
@@ -1932,7 +1951,7 @@ class Fitter:
         # def scipy_hessp(xval, pval):
         #     self.x = xval)
         #     p = jnp.convert_to_tensor(pval)
-        #     val, grad, hessp = self.loss_val_grad_hessp(p)
+        #     hessp = self.loss_hessp(p)
         #     # print("scipy_hessp", val)
         #     return hessp
 
