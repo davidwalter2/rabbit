@@ -687,6 +687,8 @@ def main():
                             data_mode=args.toysDataMode,
                             randomize_parameters=args.toysRandomizeParameters,
                         )
+                # update likelihood parameters
+                ifitter.update_params()
 
                 if np.shape(datasets)[0] > 1:
                     # in case there are more than 1 pseudodata set, label each one

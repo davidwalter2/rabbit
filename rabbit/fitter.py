@@ -32,17 +32,8 @@ class Config(NamedTuple):
     binByBinStatType: str
     do_blinding: bool
     systematic_type: str
-    # blinding_offsets_theta: jnp.ndarray
-    # blinding_offsets_poi: jnp.ndarray
-    # sumw: jnp.ndarray
-    # sumw2: jnp.ndarray
-    # logk: jnp.ndarray
-    # norm: jnp.ndarray
-    # constraintweights: jnp.ndarray
 
 
-# @partial(jax.jit, static_argnames=["compute_norm", "full", "symmetric_tensor"])
-# @jax.jit
 def _compute_yields_noBBB(params, xval, cfg, compute_norm, full):
     # compute_norm: compute yields for each process, otherwise inclusive
     # full: compute yields inclduing masked channels
@@ -97,13 +88,13 @@ def _compute_yields_noBBB(params, xval, cfg, compute_norm, full):
             [nbins * nproc, 2 * nsyst],
         )
 
-    logsnorm = jnp.matmul(mlogk, mthetaalpha)
+    logsnorm = mlogk @ mthetaalpha
     logsnorm = jnp.reshape(logsnorm, [nbins, nproc])
 
     if cfg.systematic_type == "log_normal":
         snorm = jnp.exp(logsnorm)
         snormnorm = snorm * norm
-        nexpcentral = jnp.matmul(snormnorm, mrnorm)
+        nexpcentral = snormnorm @ mrnorm
         nexpcentral = jnp.squeeze(nexpcentral, -1)
         if compute_norm:
             normcentral = ernorm * snormnorm
@@ -114,8 +105,6 @@ def _compute_yields_noBBB(params, xval, cfg, compute_norm, full):
     return nexpcentral, normcentral
 
 
-# @partial(jax.jit, static_argnames=["binByBinStat", "binByBinStatType", "chisqFit", "externalCovariance", "profile", "compute_norm", "full"])
-# @jax.jit
 def _compute_yields_with_beta(
     params, xval, cfg, profile=True, compute_norm=False, full=True
 ):
@@ -128,16 +117,15 @@ def _compute_yields_with_beta(
     )
 
     if cfg.binByBinStat:
-        nbins = cfg.nbins
-        nobs = params["nobs"]
-        beta0 = params["beta0"]
 
         if profile:
             # analytic solution for profiled barlow-beeston lite parameters for each combination
             # of likelihood and uncertainty form
 
+            nbins = cfg.nbins
             nexp_profile = nexp[:nbins]
-            beta0 = beta0[:nbins]
+            nobs = params["nobs"]
+            beta0 = params["beta0"][:nbins]
             # denominator in Gaussian likelihood is treated as a constant when computing
             # global impacts for example
             nobs0 = jax.lax.stop_gradient(nobs)
@@ -160,14 +148,17 @@ def _compute_yields_with_beta(
                     varbeta = params["sumw2"][:nbins]
                     sbeta = jnp.sqrt(varbeta)
                     if cfg.externalCovariance:
-                        sbeta_m = jnp.linalg.LinearOperatorDiag(sbeta)
-                        beta = jnp.scipy.linalg.lu_solve(
-                            *params["betaauxlu"],
-                            sbeta_m
-                            @ params["data_cov_inv"]
-                            @ ((nobs - nexp_profile)[:, None])
-                            + beta0[:, None],
+
+                        P, L, U = params["betaauxlu"]
+                        rhs = (
+                            sbeta[:, None]
+                            * (params["data_cov_inv"] @ (nobs - nexp_profile)[:, None])
+                            + beta0[:, None]
                         )
+                        rhs_perm = P @ rhs
+                        y = jax.scipy.linalg.solve_triangular(L, rhs_perm, lower=True)
+                        beta = jax.scipy.linalg.solve_triangular(U, y, lower=False)
+
                         beta = jnp.squeeze(beta, axis=-1)
                     else:
                         beta = (sbeta * (nobs - nexp_profile) + nobs0 * beta0) / (
@@ -195,12 +186,12 @@ def _compute_yields_with_beta(
                     beta = jnp.where(varbeta == 0.0, beta0, beta)
 
             if cfg.nbinsmasked:
-                beta = jnp.concat([beta, beta0[nbins:]], axis=0)
+                beta = jnp.concat([beta, params["beta0"][nbins:]], axis=0)
         else:
             beta = params["beta"]
 
         # Add dummy tensor to allow convenient differentiation by beta even when profiling
-        beta = params["beta"] + params["ubeta"]
+        beta = beta + params["ubeta"]
 
         betasel = beta[: nexp.shape[0]]
 
@@ -223,7 +214,6 @@ def _compute_yields_with_beta(
     return nexp, norm, beta
 
 
-# @partial(jax.jit, static_argnames=["npoi", "do_blinding"])
 def get_blinded_theta(params, xval, cfg):
     theta = xval[cfg.npoi :]
     if cfg.do_blinding:
@@ -232,7 +222,6 @@ def get_blinded_theta(params, xval, cfg):
         return theta
 
 
-# @partial(jax.jit, static_argnames=["npoi", "do_blinding", "allowNegativePOI"])
 def get_blinded_poi(params, xval, cfg):
     xpoi = xval[: cfg.npoi]
     if cfg.allowNegativePOI:
@@ -245,8 +234,6 @@ def get_blinded_poi(params, xval, cfg):
         return poi
 
 
-# @partial(jax.jit, static_argnames=["full_nll"])
-# @jax.jit
 def _compute_lc(params, xval, cfg, full_nll):
     # constraints
     npoi = cfg.npoi
@@ -259,11 +246,7 @@ def _compute_lc(params, xval, cfg, full_nll):
     return jnp.sum(lc)
 
 
-# @partial(jax.jit, static_argnames=["full_nll", "binByBinStat", "binByBinStatType"])
-# @jax.jit
-def _compute_lbeta(
-    params, beta, cfg, full_nll
-):  # , full_nll, binByBinStat, binByBinStatType):
+def _compute_lbeta(params, beta, cfg, full_nll):
     if cfg.binByBinStat:
         beta0 = params["beta0"]
         if cfg.binByBinStatType == "gamma":
@@ -302,11 +285,7 @@ def _compute_lbeta(
     return 0.0
 
 
-# @partial(jax.jit, static_argnames=["full_nll", "chisqFit", "externalCovariance"])
-# @jax.jit
-def _compute_nll_components(
-    params, xval, cfg, full_nll, profile, compute_norm, full
-):  # , full_nll, chisqFit, externalCovariance):
+def _compute_nll_components(params, xval, cfg, full_nll, profile, compute_norm, full):
     nexpfullcentral, _, beta = _compute_yields_with_beta(
         params, xval, cfg, profile, compute_norm, full
     )
@@ -319,13 +298,7 @@ def _compute_nll_components(
         if cfg.externalCovariance:
             # Solve the system without inverting
             residual = jnp.reshape(nobs - nexp, [-1, 1])  # chi2 residual
-            ln = 0.5 * jnp.sum(
-                jnp.matmul(
-                    residual,
-                    jnp.matmul(params["data_cov_inv"], residual),
-                    transpose_a=True,
-                )
-            )
+            ln = 0.5 * jnp.sum(residual.T @ params["data_cov_inv"] @ residual)
         else:
             # stop_gradient needed in denominator here because it should be considered
             # constant when evaluating global impacts from observed data
@@ -411,15 +384,13 @@ def hess(params, x, cfg):
 @partial(jax.jit, static_argnames=["cfg"])
 def loss_val_grad_hess(params, xval, cfg):
     def loss_fn(x):
-        val = _compute_loss(params, x, cfg)
-        return val
+        return _compute_loss(params, x, cfg)
 
-    val = loss_fn(xval)
-    grad_fn = jax.grad(loss_fn)
-    hess_fn = jax.hessian(loss_fn)
+    # Compute value and gradient efficiently
+    val, grad = jax.value_and_grad(loss_fn)(xval)
 
-    grad = grad_fn(xval)
-    hess = hess_fn(xval)
+    # Compute hessian separately (only once needed)
+    hess = jax.hessian(loss_fn)(xval)
 
     return val, grad, hess
 
@@ -569,7 +540,7 @@ class Fitter:
         # dummy tensor to allow differentiation
         self.ubeta = jnp.zeros_like(self.beta)
 
-        # static objects that don't change once instanciated
+        # static objects that affect control flow and that don't change once instanciated
         self.static_params = Config(
             nsyst=self.indata.nsyst,
             nproc=self.indata.nproc,
@@ -585,35 +556,22 @@ class Fitter:
             binByBinStatType=self.binByBinStatType,
             do_blinding=self.do_blinding,
             systematic_type=self.indata.systematic_type,
-            # blinding_offsets_theta= self._blinding_offsets_theta,
-            # blinding_offsets_poi= self._blinding_offsets_poi,
-            # sumw= self.indata.sumw,
-            # sumw2= self.indata.sumw2,
-            # logk= self.indata.logk,
-            # norm= self.indata.norm,
-            # constraintweights= self.indata.constraintweights,
         )
 
         self.params = {
-            "nobs": self.nobs,
-            "lognobs": self.lognobs,
-            "data_cov_inv": self.data_cov_inv,
-            "profile": True,
-            "full_nll": False,  # compute full nll value
-            "compute_norm": False,  # compute by prediction processes
-            "full": False,  # compute also masked channels
-            "theta0": self.theta0,
             "constraintweights": self.indata.constraintweights,
             "sumw": self.indata.sumw,
             "sumw2": self.indata.sumw2,
+            "logk": self.indata.logk,
+            "norm": self.indata.norm,
+            "blinding_offsets_theta": self._blinding_offsets_theta,
+            "blinding_offsets_poi": self._blinding_offsets_poi,
+            "data_cov_inv": self.data_cov_inv,
+            "theta0": self.theta0,
             "beta0": self.beta0,
             "beta": self.beta,
             "ubeta": self.ubeta,
             "logbeta0": self.logbeta0,
-            "blinding_offsets_theta": self._blinding_offsets_theta,
-            "blinding_offsets_poi": self._blinding_offsets_poi,
-            "logk": self.indata.logk,
-            "norm": self.indata.norm,
         }
 
         if self.binByBinStat:
@@ -632,11 +590,11 @@ class Fitter:
                 # calculation of profiled beta values
                 varbeta = self.indata.sumw2[: self.indata.nbins]
                 sbeta = jnp.sqrt(varbeta)
-                sbeta_m = jnp.linalg.LinearOperatorDiag(sbeta)
-                self.params["betaauxlu"] = jnp.scipy.linalg.lu(
-                    sbeta_m @ self.data_cov_inv @ sbeta_m
-                    + jnp.eye(self.data_cov_inv.shape[0], dtype=self.data_cov_inv.dtype)
+                A = sbeta[:, None] * self.data_cov_inv * sbeta[None, :] + jnp.eye(
+                    self.data_cov_inv.shape[0], dtype=self.data_cov_inv.dtype
                 )
+                P, L, U = jax.scipy.linalg.lu(A)
+                self.params["betaauxlu"] = (P, L, U)
 
         self.nexpnom = self.expected_yield()
         # parameter covariance matrix
@@ -651,6 +609,20 @@ class Fitter:
             and self.indata.symmetric_tensor
             and self.indata.systematic_type == "normal"
             and ((not self.binByBinStat) or self.binByBinStatType == "normal")
+        )
+
+    def update_params(self):
+        self.params.update(
+            {
+                "nobs": self.nobs,
+                "lognobs": self.lognobs,
+                "data_cov_inv": self.data_cov_inv,
+                "theta0": self.theta0,
+                "beta0": self.beta0,
+                "beta": self.beta,
+                "ubeta": self.ubeta,
+                "logbeta0": self.logbeta0,
+            }
         )
 
     def init_blinding_values(self, unblind_parameter_expressions=[]):
@@ -1052,7 +1024,7 @@ class Fitter:
             d2lcdx2_diag = t2.gradient(dlcdx, self.x)
 
         # sc is the cholesky decomposition of d2lcdx2
-        sc = jnp.linalg.LinearOperatorDiag(jnp.sqrt(d2lcdx2_diag), is_self_adjoint=True)
+        sc = jnp.diag(jnp.sqrt(d2lcdx2_diag), is_self_adjoint=True)
 
         impacts_x0 = sc @ cov_dexpdx
         impacts_theta0 = impacts_x0[self.npoi :]
@@ -1067,9 +1039,7 @@ class Fitter:
 
         if self.binByBinStat:
             # this the cholesky decomposition of pd2lbetadbeta2
-            sbeta = jnp.linalg.LinearOperatorDiag(
-                jnp.sqrt(pd2lbetadbeta2_diag), is_self_adjoint=True
-            )
+            sbeta = jnp.diag(jnp.sqrt(pd2lbetadbeta2_diag), is_self_adjoint=True)
 
             impacts_beta0 = sbeta @ dbetadx @ cov_dexpdx
 
@@ -1127,9 +1097,7 @@ class Fitter:
         else:
             # pd2ldbeta2 is diagonal, so we can use gradient instead of jacobian
             pd2ldbeta2_diag = t2.gradient(pdldbeta, self.ubeta)
-            pd2ldbeta2 = jnp.linalg.LinearOperatorDiag(
-                pd2ldbeta2_diag, is_self_adjoint=True
-            )
+            pd2ldbeta2 = jnp.diag(pd2ldbeta2_diag, is_self_adjoint=True)
         return pd2ldbeta2
 
     def _dxdvars(self):
@@ -1306,9 +1274,7 @@ class Fitter:
                 )
 
             # sc is the cholesky decomposition of d2lcdx2
-            sc = jnp.linalg.LinearOperatorDiag(
-                jnp.sqrt(d2lcdx2_diag), is_self_adjoint=True
-            )
+            sc = jnp.diag(jnp.sqrt(d2lcdx2_diag), is_self_adjoint=True)
 
             impacts_x0 = sc @ jnp.matmul(self.cov, dexpdx, transpose_b=True)
             impacts_theta0 = impacts_x0[self.npoi :]
@@ -1323,9 +1289,7 @@ class Fitter:
 
             if self.binByBinStat:
                 # this the cholesky decomposition of pd2lbetadbeta2
-                sbeta = jnp.linalg.LinearOperatorDiag(
-                    jnp.sqrt(pd2lbetadbeta2_diag), is_self_adjoint=True
-                )
+                sbeta = jnp.diag(jnp.sqrt(pd2lbetadbeta2_diag), is_self_adjoint=True)
 
                 impacts_beta0 = jnp.zeros(
                     shape=(*self.beta.shape, *expvar_flat.shape), dtype=expvar.dtype
@@ -1423,9 +1387,14 @@ class Fitter:
         )
         self.beta = beta
 
-    def _compute_yields(self, xval, inclusive=True):
+    def _compute_yields(self, xval, inclusive=True, profile=True, full=True):
         nexpcentral, normcentral, beta = _compute_yields_with_beta(
-            self.params, xval, self.static_params
+            self.params,
+            xval,
+            self.static_params,
+            profile=profile,
+            compute_norm=not inclusive,
+            full=full,
         )
         if inclusive:
             return nexpcentral
@@ -1615,7 +1584,7 @@ class Fitter:
         return exp, aux
 
     def expected_yield(self, profile=False, full=False):
-        return self._compute_yields(self.x, inclusive=True)
+        return self._compute_yields(self.x, inclusive=True, profile=profile, full=full)
 
     @jax.jit
     def _expected_yield_noBBB(self, xval, full=False):
@@ -1659,13 +1628,13 @@ class Fitter:
 
             def scipy_loss(xval):
                 val, grad = loss_val_grad(self.params, xval, self.static_params)
-                logger.debug(f"val = {val}")
-                logger.debug(f"grad = {grad}")
+                # logger.debug(f"val = {val}")
+                # logger.debug(f"grad = {grad}")
                 return np.array(val), np.array(grad)
 
             def scipy_hessp(xval, pval):
                 hvp = hessp(self.params, xval, pval, self.static_params)
-                logger.debug(f"hvp = {hvp}")
+                # logger.debug(f"hvp = {hvp}")
                 return np.array(hvp)
 
             def scipy_hess(xval):
