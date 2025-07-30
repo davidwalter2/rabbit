@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
-import tensorflow as tf
+import jax
+import jax.numpy as jnp
 
-tf.config.experimental.enable_op_determinism()
+jax.config.update("jax_enable_x64", True)
 
 import argparse
 import time
@@ -12,9 +13,9 @@ import numpy as np
 import scipy
 
 from rabbit import fitter, inputdata, io_tools, workspace
+from rabbit.jaxhelpers import edmval_cov
 from rabbit.physicsmodels import helpers as ph
 from rabbit.physicsmodels import physicsmodel as pm
-from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
 
@@ -406,8 +407,8 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
 
         if args.computeVariations:
             if prefit:
-                cov_prefit = fitter.cov.numpy()
-                fitter.cov.assign(fitter.prefit_covariance(unconstrained_err=1.0))
+                cov_prefit = fitter.cov
+                fitter.cov = fitter.prefit_covariance(unconstrained_err=1.0)
 
             exp, aux = fitter.expected_events(
                 model,
@@ -426,7 +427,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
             )
 
             if prefit:
-                fitter.cov.assign(tf.constant(cov_prefit))
+                fitter.cov = cov_prefit
 
 
 def fit(args, fitter, ws, dofit=True):
@@ -450,8 +451,8 @@ def fit(args, fitter, ws, dofit=True):
                 parms_ext = np.array(h_parms_ext.axes["parms"])
                 cov_ext = h5results_ext["cov"].get().values()
 
-        xvals = fitter.x.numpy()
-        covval = fitter.cov.numpy()
+        xvals = fitter.x
+        covval = fitter.cov
         parms = fitter.parms.astype(str)
 
         # Find common elements with their matching indices
@@ -461,8 +462,8 @@ def fit(args, fitter, ws, dofit=True):
         xvals[idxs] = x_ext[idxs_ext]
         covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
 
-        fitter.x.assign(xvals)
-        fitter.cov.assign(tf.constant(covval))
+        fitter.x = xvals
+        fitter.cov = covval
     else:
         if dofit:
             fitter.minimize()
@@ -477,7 +478,7 @@ def fit(args, fitter, ws, dofit=True):
 
             logger.info(f"edmval: {edmval}")
 
-            fitter.cov.assign(cov)
+            fitter.cov = cov
 
             del cov
 
@@ -498,11 +499,9 @@ def fit(args, fitter, ws, dofit=True):
             if args.globalImpacts:
                 ws.add_global_impacts_hists(*fitter.global_impacts_parms())
 
-    nllvalreduced = fitter.reduced_nll().numpy()
+    nllvalreduced = fitter.reduced_nll()
 
-    ndfsat = (
-        tf.size(fitter.nobs) - fitter.npoi - fitter.indata.nsystnoconstraint
-    ).numpy()
+    ndfsat = len(fitter.nobs) - fitter.npoi - fitter.indata.nsystnoconstraint
 
     chi2 = 2.0 * nllvalreduced
     p_val = scipy.stats.chi2.sf(chi2, ndfsat)
@@ -522,13 +521,13 @@ def fit(args, fitter, ws, dofit=True):
     )
 
     if args.fullNll:
-        nllvalfull = fitter.full_nll().numpy()
+        nllvalfull = fitter.full_nll()
         logger.info(f"2*deltaNLL(full): {nllvalfull}")
         ws.results["nllvalfull"] = nllvalfull
 
     ws.add_parms_hist(
         values=fitter.x,
-        variances=tf.linalg.diag_part(fitter.cov) if not args.noHessian else None,
+        variances=jnp.diagonal(fitter.cov) if not args.noHessian else None,
         hist_name="parms",
     )
 
@@ -557,7 +556,7 @@ def fit(args, fitter, ws, dofit=True):
 
     if args.contourScan is not None:
         # do likelihood contour scans
-        nllvalreduced = fitter.reduced_nll().numpy()
+        nllvalreduced = fitter.reduced_nll()
 
         parms = (
             np.array(fitter.parms).astype(str)
@@ -581,7 +580,7 @@ def fit(args, fitter, ws, dofit=True):
         )
 
         # do likelihood contour scans in 2D
-        nllvalreduced = fitter.reduced_nll().numpy()
+        nllvalreduced = fitter.reduced_nll()
 
         contours = np.zeros(
             (len(args.contourScan2D), len(args.contourLevels), 2, args.scanPoints)
@@ -603,7 +602,7 @@ def main():
     args = make_parser()
 
     if args.eager:
-        tf.config.run_functions_eagerly(True)
+        jax.config.update("jax_disable_jit", True)
 
     if args.noHessian and args.doImpacts:
         raise Exception('option "--noHessian" only works without "--doImpacts"')
@@ -635,7 +634,6 @@ def main():
         ]
 
     np.random.seed(args.seed)
-    tf.random.set_seed(args.seed)
 
     # pass meta data into output file
     meta = {
@@ -668,7 +666,7 @@ def main():
                 ]
             else:
                 # shape nobs x npseudodata
-                datasets = tf.transpose(indata.pseudodata_obs)
+                datasets = jnp.transpose(indata.pseudodata_obs)
 
             # loop over (pseudo)data sets
             for j, data_values in enumerate(datasets):
@@ -696,7 +694,7 @@ def main():
 
                 ws.add_parms_hist(
                     values=ifitter.x,
-                    variances=tf.linalg.diag_part(ifitter.cov),
+                    variances=jnp.diagonal(ifitter.cov),
                     hist_name="parms_prefit",
                 )
 

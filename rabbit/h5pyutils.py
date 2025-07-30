@@ -1,33 +1,25 @@
 import math
 
+import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf
 
 
 def maketensor(h5dset):
-    if "original_shape" in h5dset.attrs:
-        shape = h5dset.attrs["original_shape"]
-    else:
-        shape = h5dset.shape
+    # Determine the intended shape
+    shape = h5dset.attrs.get("original_shape", h5dset.shape)
 
+    # Handle empty tensors
     if h5dset.size == 0:
-        return tf.zeros(shape, h5dset.dtype)
+        return jnp.zeros(shape, dtype=h5dset.dtype)
 
-    # read directly from hdf5 dataset to the underlying buffer of a tensor
-    # this requires that the tensor is located on the CPU, so force the device
-    with tf.device(tf.config.list_logical_devices("CPU")[0]):
-        atensor = tf.zeros(h5dset.shape, h5dset.dtype)
-        # zero tensors have a special flag set, using the identity clears this implicitly
-        atensor = tf.identity(atensor)
+    # Load from HDF5 directly into a NumPy array
+    data_np = h5dset[...]
 
-    # read into the underlying array
-    h5dset.read_direct(atensor.__array__())
+    # Reshape if the dataset was flattened
+    data_np = data_np.reshape(shape)
 
-    # the reshape operation is needed in case the hdf5 dataset was flattened
-    # this also triggers a copy of the tensor to the default device (e.g. GPU)
-    # if needed (ie if not the default CPU device)
-    atensor = tf.reshape(atensor, shape)
-    return atensor
+    # Convert to JAX array
+    return jnp.array(data_np)
 
 
 def makesparsetensor(h5group):
@@ -35,7 +27,7 @@ def makesparsetensor(h5group):
     values = maketensor(h5group["values"])
     dense_shape = h5group.attrs["dense_shape"]
 
-    return tf.sparse.SparseTensor(indices, values, dense_shape)
+    return jnp.sparse.SparseTensor(indices, values, dense_shape)
 
 
 def writeFlatInChunks(arr, h5group, outname, maxChunkBytes=1024**2):

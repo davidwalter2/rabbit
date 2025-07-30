@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 from wums import boostHistHelpers as hh
 
-from rabbit import tfhelpers
+from rabbit import jaxhelpers
 
 # dictionary with class name and the corresponding filename where it is defined
 baseline_models = {
@@ -204,7 +204,7 @@ class Term:
 
         if len(self.segment_ids):
             for i, s in self.segment_ids.items():
-                values = tfhelpers.segment_sum_along_axis(
+                values = jaxhelpers.segment_sum_along_axis(
                     values, s, i, num_segments=self.num_segments[i]
                 )
 

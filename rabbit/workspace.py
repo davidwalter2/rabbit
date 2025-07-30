@@ -2,8 +2,8 @@ import os
 
 import h5py
 import hist
+import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf
 
 from wums import ioutils  # isort: skip
 
@@ -137,25 +137,25 @@ class Workspace:
                 len(a) if isinstance(a, hist.axis.StrCategory) else a.extent
                 for a in h.axes
             ]
-            values = tf.reshape(values, shape)
+            values = jnp.reshape(values, shape)
             if variances is not None:
-                variances = tf.reshape(variances, shape)
+                variances = jnp.reshape(variances, shape)
 
             shape = []
             for i, a in enumerate(h.axes):
                 if isinstance(a, hist.axis.StrCategory):
                     new_shape = list(values.shape)
                     new_shape[i] = 1
-                    ones_slice = tf.ones(new_shape, dtype=values.dtype)
-                    values = tf.concat([values, ones_slice], axis=i)
+                    ones_slice = jnp.ones(new_shape, dtype=values.dtype)
+                    values = jnp.concat([values, ones_slice], axis=i)
                     if variances is not None:
-                        variances = tf.concat([variances, ones_slice], axis=i)
+                        variances = jnp.concat([variances, ones_slice], axis=i)
                 shape.append(a.extent)
         else:
             shape = h.shape
-            values = tf.reshape(values, shape)
+            values = jnp.reshape(values, shape)
             if variances is not None:
-                variances = tf.reshape(variances, shape)
+                variances = jnp.reshape(variances, shape)
 
         h.values(flow=flow)[...] = memoryview(values)
         if variances is not None:

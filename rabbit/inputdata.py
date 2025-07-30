@@ -1,7 +1,8 @@
 import h5py
 import hist
+import jax
+import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf
 
 from rabbit.h5pyutils import makesparsetensor, maketensor
 
@@ -46,9 +47,7 @@ class FitInputData:
                     mask = np.isin(self.pseudodatanames, pseudodata)
                     indices = np.where(mask)[0]
 
-                    self.pseudodata_obs = tf.gather(
-                        self.pseudodata_obs, indices, axis=1
-                    )
+                    self.pseudodata_obs = jnp.take(self.pseudodata_obs, indices, axis=1)
                     self.pseudodatanames = self.pseudodatanames[indices]
 
             self.data_obs = maketensor(f["hdata_obs"])
@@ -134,7 +133,7 @@ class FitInputData:
                 self.sumw = self.expected_events_nominal()
                 self.sumw2 = self.sumw**2 / kstat
 
-                self.sumw2 = tf.where(kstat == 0.0, self.sumw, self.sumw2)
+                self.sumw2 = jnp.where(kstat == 0.0, self.sumw, self.sumw2)
 
             # compute indices for channels
             ibin = 0
@@ -157,16 +156,16 @@ class FitInputData:
 
             self.axis_procs = hist.axis.StrCategory(self.procs, name="processes")
 
-    @tf.function
+    @jax.jit
     def expected_events_nominal(self):
-        rnorm = tf.ones(self.nproc, dtype=self.dtype)
-        mrnorm = tf.expand_dims(rnorm, -1)
+        rnorm = jnp.ones(self.nproc, dtype=self.dtype)
+        mrnorm = jnp.expand_dims(rnorm, -1)
 
         if self.sparse:
-            nexpfullcentral = tf.sparse.sparse_dense_matmul(self.norm, mrnorm)
-            nexpfullcentral = tf.squeeze(nexpfullcentral, -1)
+            nexpfullcentral = jnp.sparse.sparse_dense_matmul(self.norm, mrnorm)
+            nexpfullcentral = jnp.squeeze(nexpfullcentral, -1)
         else:
-            nexpfullcentral = tf.matmul(self.norm, mrnorm)
-            nexpfullcentral = tf.squeeze(nexpfullcentral, -1)
+            nexpfullcentral = jnp.matmul(self.norm, mrnorm)
+            nexpfullcentral = jnp.squeeze(nexpfullcentral, -1)
 
         return nexpfullcentral
