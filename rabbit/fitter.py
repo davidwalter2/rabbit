@@ -351,7 +351,7 @@ def loss_val_grad(params, x, cfg):
 
 
 @partial(jax.jit, static_argnames=["cfg"])
-def hessp(params, xval, pval, cfg):
+def loss_hessp(params, xval, pval, cfg):
     # Compute Hessian-vector product using forward-mode AD
     def grad_fn(x):
         return jax.grad(_compute_loss, argnums=1)(params, x, cfg)
@@ -377,7 +377,7 @@ def loss_val_grad_hessp(params, x, p, cfg):
 
 
 @partial(jax.jit, static_argnames=["cfg"])
-def hess(params, x, cfg):
+def loss_hess(params, x, cfg):
     return jax.hessian(_compute_loss, argnums=1)(params, x, cfg)
 
 
@@ -1633,12 +1633,12 @@ class Fitter:
                 return np.array(val), np.array(grad)
 
             def scipy_hessp(xval, pval):
-                hvp = hessp(self.params, xval, pval, self.static_params)
+                hvp = loss_hessp(self.params, xval, pval, self.static_params)
                 # logger.debug(f"hvp = {hvp}")
                 return np.array(hvp)
 
             def scipy_hess(xval):
-                hess = self.hess(self.params, xval, self.static_params)
+                hess_val = loss_hess(self.params, xval, self.static_params)
                 if self.diagnostics:
                     raise NotImplementedError()
                     # # Compute condition number
@@ -1648,7 +1648,7 @@ class Fitter:
                     # # Compute edmval
                     # edmval = 0.5 * jnp.dot(grad, linalg.solve(hess, grad))
                     # print(f"  - edmval: {edmval}")
-                return np.array(hess)
+                return np.array(hess_val)
 
             xval = self.x
             callback = FitterCallback(xval)
