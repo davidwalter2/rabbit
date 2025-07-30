@@ -1323,7 +1323,10 @@ def main():
                     continue
                 logger.info(f"Make plot for {instance_key} in channel {channel}")
 
-                info = channel_info.get(channel, {})
+                if instance_key == "CompositeModel":
+                    info = channel_info.get(" ".join(channel.split(" ")[-1:]), {})
+                else:
+                    info = channel_info.get(channel, {})
 
                 suffix = f"{channel}_{instance_key}"
                 for sign, rpl in [
@@ -1344,7 +1347,13 @@ def main():
                     1.0
                     if any(
                         instance_key.startswith(x)
-                        for x in ["Basemodel", "Project", "Select", "Norm"]
+                        for x in [
+                            "Basemodel",
+                            "Project",
+                            "Select",
+                            "Norm",
+                            "CompositeModel",
+                        ]
                     )
                     and not args.noBinWidthNorm
                     else None
