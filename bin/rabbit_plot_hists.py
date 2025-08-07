@@ -513,7 +513,9 @@ def make_plot(
         )
         ax2 = ratio_axes[-1]
     else:
-        fig, ax1 = plot_tools.figure(h_inclusive, xlabel, ylabel, args.ylim, logy=args.logy)
+        fig, ax1 = plot_tools.figure(
+            h_inclusive, xlabel, ylabel, args.ylim, logy=args.logy
+        )
 
     for (
         h,
@@ -922,7 +924,9 @@ def make_plot(
             )
 
     if ratio or diff:
-        plot_tools.fix_axes(ax1, ax2, fig, yscale=args.yscale, noSci=args.noSciy, logy=args.logy)
+        plot_tools.fix_axes(
+            ax1, ax2, fig, yscale=args.yscale, noSci=args.noSciy, logy=args.logy
+        )
     else:
         plot_tools.fix_axes(ax1, yscale=args.yscale, logy=args.logy)
 
