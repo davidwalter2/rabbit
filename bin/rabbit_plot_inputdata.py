@@ -10,6 +10,7 @@ import mplhep as hep
 import numpy as np
 from wums import boostHistHelpers as hh
 from wums import logging, output_tools, plot_tools
+from wremnants.datasets.datagroups import Datagroups
 
 from rabbit import debugdata, inputdata
 
@@ -239,7 +240,12 @@ def parseArgs():
         default=None,
         help="Use a custom figure width, otherwise chosen automatic",
     )
-
+    parser.add_argument(
+        "--procFilters",
+        type=str,
+        nargs="*",
+        help="Filter to plot (default no filter, only specify if you want a subset",
+    )
     args = parser.parse_args()
 
     return args
@@ -548,9 +554,8 @@ def make_plot(
             plot_tools.wrap_text(
                 text,
                 ax1,
-                # 0.05,
-                *args.extraTextLoc,
-                # 0.96 - i * 0.08,
+                0.05,
+                0.96 - i * 0.08,
                 ha="left",
                 text_size="small",
             )
@@ -593,6 +598,18 @@ def make_plot(
             analysis_meta_info={"setupRabbit": indata.metadata["meta_info"]},
             args=args,
         )
+        
+        logname = f"{outdir}/{outfile}.log"
+        
+        
+        with open(logname, "a") as logf:
+            logf.write("\n")
+            logf.write("-------------------------------------------- \n")
+            logf.write("process: # of events\n")
+            for i in range(len(hists_proc)):
+                v = str(round(np.average(hists_proc[i].project("time").values())))
+                logf.write(f"{labels[i]}: {v}\n")
+         
 
 
 def main():
@@ -752,7 +769,83 @@ def main():
                 procs=procs,
                 **info,
             )
+        # import pdb
+        # pdb.set_tr.ce()
+    
 
+    # def collapseSyst(h):
+    #     if type(h.axes[-1]) == hist.axis.StrCategory:
+    #         return h[..., 0]
+    #     for ax in ["systIdx", "tensor_axis_0", "vars", "pdfVar"]:
+    #         if ax in h.axes.name:
+    #             return h[{ax: 0}].copy()
+    #     return h
+    
+    
+    # groups = Datagroups(
+    #     args.infile,
+    #     filterGroups=args.procFilters,
+    #     excludeGroups=None if args.procFilters else ["QCD"],
+    # )
+  
+    # datasets = groups.getNames()
+
+    # exclude = ["Data"]
+    # unstack = exclude[:]
+    # if args.noData:
+    #     unstack.remove("Data")    
+            
+      
+    # prednames = list(
+    #     reversed(
+    #         groups.getNames(
+    #             [d for d in datasets if d not in exclude], exclude=False, match_exact=True
+    #         )
+    #     )
+    # )
+    
+    # select = (
+    # {}
+    # if args.channel == "all"
+    # else {"charge": -1.0j if args.channel == "minus" else 1.0j}
+    # )
+    
+    # for h in args.hists:
+    #     if any(
+    #         x in h.split("-")
+    #         for x in ["pt", "ptll", "mll", "ptW", "ptVgen", "ptVGen", "ptWgen", "ptZgen"]
+    #         ):
+    #     # in case of variable bin width normalize to unit (which is GeV for all of these...)
+    #         binwnorm = 1.0
+    #         ylabel = r"$Events\,/\,GeV$"
+    #     else:
+    #         binwnorm = None
+    #         ylabel = r"$Events\,/\,bin$"
+
+    #     sp = h.split("-")
+    
+    #     base_action = lambda x: collapseSyst(x[select])
+    #     action = lambda x: hh.unrolledHist(base_action(x), binwnorm=binwnorm, obs=sp)
+    
+    #     stack_yields = groups.make_yields_df(
+    #     args.baseName, prednames, norm_proc="Data", action=base_action
+    #     )
+    #     unstacked_yields = groups.make_yields_df(
+    #         args.baseName, unstack, norm_proc="Data", action=base_action
+    #     )
+    #     # outfile = args.outpath
+    #     output_tools.write_index_and_log(
+    #         args.outpath,
+    #         "test", ## was outfile
+    #         analysis_meta_info={
+    #             "Stacked processes": stack_yields,
+    #             "Unstacked processes": unstacked_yields,
+    #             "AnalysisOutput": groups.getMetaInfo(),
+    #         },
+    #         args=args,
+    #     )
+
+    
     if output_tools.is_eosuser_path(args.outpath) and args.eoscp:
         output_tools.copy_to_eos(outdir, args.outpath)
 
