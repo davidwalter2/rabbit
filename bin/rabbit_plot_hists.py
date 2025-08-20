@@ -191,6 +191,8 @@ def parseArgs():
     parser.add_argument(
         "--normToData", action="store_true", help="Normalize MC to data"
     )
+    parser.add_argument("--noStack", action="store_true", help="Don't stack processes")
+    parser.add_argument("--density", action="store_true", help="Density")
     parser.add_argument(
         "--prefit", action="store_true", help="Make prefit plot, else postfit"
     )
@@ -395,7 +397,9 @@ def make_plot(
     if len(axes_names) == 0:
         axes_names = ["yield"]
 
-    if any(x.startswith("pt") or x.startswith("mll") for x in axes_names):
+    if args.density:
+        ylabel = "Density"
+    elif any(x.startswith("pt") or x.startswith("mll") for x in axes_names):
         # in case of variable bin width normalize to unit
         ylabel = (
             r"$Events\,/\,GeV$" if not args.unfoldedXsec else r"$d\sigma (pb\,/\,GeV)$"
@@ -436,7 +440,12 @@ def make_plot(
     }
 
     histtype_data = "errorbar"
-    histtype_mc = "fill" if not args.unfoldedXsec else "errorbar"
+    if args.unfoldedXsec:
+        histtype_mc = "errorbar"
+    elif args.noStack:
+        histtype_mc = "step"
+    else:
+        histtype_mc = "fill"
 
     if len(h_inclusive.axes) > 1:
         if args.invertAxes:
@@ -530,8 +539,8 @@ def make_plot(
             histtype=histtype_mc,
             color=c,
             label=getattr(config, "process_labels", {}).get(l, l),
-            density=False,
-            binwnorm=binwnorm,
+            density=args.density,
+            binwnorm=binwnorm if not args.density else None,
             ax=ax1,
             zorder=1,
             flow="none",
@@ -544,9 +553,9 @@ def make_plot(
             yerr=False,
             histtype=histtype_mc,
             color=colors,
-            stack=True,
-            density=False,
-            binwnorm=binwnorm,
+            stack=not args.noStack,
+            density=args.density,
+            binwnorm=binwnorm if not args.density else None,
             ax=ax1,
             zorder=1,
             flow="none",
@@ -1331,7 +1340,10 @@ def main():
                     continue
                 logger.info(f"Make plot for {instance_key} in channel {channel}")
 
-                info = channel_info.get(channel, {})
+                if instance_key == "CompositeModel":
+                    info = channel_info.get(" ".join(channel.split(" ")[-1:]), {})
+                else:
+                    info = channel_info.get(channel, {})
 
                 suffix = f"{channel}_{instance_key}"
                 for sign, rpl in [
@@ -1352,7 +1364,13 @@ def main():
                     1.0
                     if any(
                         instance_key.startswith(x)
-                        for x in ["Basemodel", "Project", "Select", "Norm"]
+                        for x in [
+                            "Basemodel",
+                            "Project",
+                            "Select",
+                            "Norm",
+                            "CompositeModel",
+                        ]
                     )
                     and not args.noBinWidthNorm
                     else None
