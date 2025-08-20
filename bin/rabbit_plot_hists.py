@@ -403,8 +403,8 @@ def make_plot(
     varColors=None,
     is_normalized=False,
     binwnorm=1.0,
-    counts=True,
     h_inclusive_alt=None,
+    counts=True,
 ):
     ratio = not args.noLowerPanel and h_data is not None
     diff = not args.noLowerPanel and args.diff and h_data is not None
@@ -1312,7 +1312,7 @@ def make_plots(
             varLabels=varLabels,
             varColors=varColors,
             binwnorm=binwnorm,
-            h_inclusive_alt=h_inclusive_alt,
+            h_inclusive_alt=hist_inclusive_alt,
             *opts,
             **kwopts,
         )
