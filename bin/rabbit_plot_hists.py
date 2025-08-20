@@ -491,7 +491,7 @@ def make_plot(
             h_data = hh.unrolledHist(h_data, binwnorm=binwnorm, obs=axes_names)
 
         h_inclusive = hh.unrolledHist(h_inclusive, binwnorm=binwnorm, obs=axes_names)
-        if h_inclusive_alt:
+        if h_inclusive_alt is not None:
             h_inclusive_alt = hh.unrolledHist(
                 h_inclusive_alt, binwnorm=binwnorm, obs=axes_names
             )
@@ -809,7 +809,7 @@ def make_plot(
                     ax=ax2,
                     flow="none",
                 )
-            if h_inclusive_alt:
+            if h_inclusive_alt is not None:
                 hep.histplot(
                     h3,
                     histtype="errorbar",
@@ -1116,14 +1116,15 @@ def make_plots(
             hist_data = None
 
         hist_inclusive = result[f"hist_{fittype}_inclusive"].get()
-        hist_inclusive_alt = None
-        if resFromExtFile is not None:
-            hist_inclusive_alt = resFromExtFile[f"hist_{fittype}_inclusive"].get()
         if f"hist_{fittype}" in result.keys():
             hist_stack = result[f"hist_{fittype}"].get()
             hist_stack = [hist_stack[{"processes": p}] for p in procs]
         else:
             hist_stack = []
+
+    hist_inclusive_alt = None
+    if resFromExtFile is not None:
+        hist_inclusive_alt = resFromExtFile[f"hist_{fittype}_inclusive"].get()
 
     axes = [a for a in hist_inclusive.axes]
 
@@ -1166,6 +1167,8 @@ def make_plots(
 
         hist_data = to_xsc(hist_data)
         hist_inclusive = to_xsc(hist_inclusive)
+        if hist_inclusive_alt is not None:
+            hist_inclusive_alt = to_xsc(hist_inclusive_alt)
         hist_stack = [to_xsc(h) for h in hist_stack]
         if hist_data_stat is not None:
             hist_data_stat = to_xsc(hist_data_stat)
