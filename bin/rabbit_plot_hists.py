@@ -275,14 +275,14 @@ def parseArgs():
         help="Plot vertical lines for makro bin edges in unrolled plots, specify bin boundaries to plot lines, if empty plot for all",
     )
     parser.add_argument(
+        "--noExtraText", action="store_true", help="Suppress extra text"
+    )
+    parser.add_argument(
         "--extraTextLoc",
         type=float,
         nargs="*",
         default=None,
         help="Location in (x,y) for additional text, aligned to upper left",
-    )
-    parser.add_argument(
-        "--noExtraText", action="store_true", help="Suppress extra text"
     )
     parser.add_argument(
         "--varNames", type=str, nargs="*", default=None, help="Name of variation hist"
