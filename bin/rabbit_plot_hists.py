@@ -1360,7 +1360,6 @@ def main():
     fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
     fitresult_alt = None
     if args.addVarFromExternalFile is not None:
-        # fitresult_alt = rabbit.io_tools.get_fitresult("/scratch/ciprianm/CombineStudies/testEfficiencies/Wlike_withAndWithoutSF/noSF/ZMassWLike_eta_pt_charge/fitresults.hdf5", args.result)
         fitresult_alt = rabbit.io_tools.get_fitresult(
             args.addVarFromExternalFile[0], args.result
         )
