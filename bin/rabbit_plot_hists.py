@@ -356,6 +356,22 @@ def parseArgs():
         default=None,
         help="Label for uncertainty shown in the (ratio) plot",
     )
+    parser.add_argument(
+        "--addVarFromExternalFile",
+        type=str,
+        default=None,
+        nargs=3,
+        help="""
+        To overlay the inclusive histogram taken from this external file.
+        Pass file name followed by histogram color and legend text
+        """,
+    )
+    parser.add_argument(
+        "--colorVarFromExtFile",
+        type=str,
+        default=None,
+        help="To overlay the inclusive histogram taken from this external file",
+    )
     args = parser.parse_args()
 
     return args
@@ -387,6 +403,7 @@ def make_plot(
     varColors=None,
     is_normalized=False,
     binwnorm=1.0,
+    h_inclusive_alt=None,
     counts=True,
 ):
     ratio = not args.noLowerPanel and h_data is not None
@@ -432,7 +449,10 @@ def make_plot(
                     np.sum(h.project(*axes_names).values()),
                     np.sum(h.project(*axes_names).variances()) ** 0.5,
                 )
-                for k, h in zip([args.dataName, "Inclusive"], [h_data, h_inclusive])
+                for k, h in zip(
+                    [args.dataName, "Inclusive", "Incl_ext_file"],
+                    [h_data, h_inclusive, h_inclusive_alt],
+                )
                 if h is not None
             ],
             columns=["Process", "Yield", "Uncertainty"],
@@ -471,6 +491,10 @@ def make_plot(
             h_data = hh.unrolledHist(h_data, binwnorm=binwnorm, obs=axes_names)
 
         h_inclusive = hh.unrolledHist(h_inclusive, binwnorm=binwnorm, obs=axes_names)
+        if h_inclusive_alt is not None:
+            h_inclusive_alt = hh.unrolledHist(
+                h_inclusive_alt, binwnorm=binwnorm, obs=axes_names
+            )
         h_stack = [
             hh.unrolledHist(h, binwnorm=binwnorm, obs=axes_names) for h in h_stack
         ]
@@ -489,6 +513,9 @@ def make_plot(
         scale = h_data.values().sum() / h_inclusive.values().sum()
         h_stack = [hh.scaleHist(h, scale) for h in h_stack]
         h_inclusive = hh.scaleHist(h_inclusive, scale)
+        if h_inclusive_alt is not None:
+            scale_alt = h_data.values().sum() / h_inclusive_alt.values().sum()
+            h_inclusive_alt = hh.scaleHist(h_inclusive_alt, scale_alt)
 
     xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel)
 
@@ -558,6 +585,20 @@ def make_plot(
             binwnorm=binwnorm if not args.density else None,
             ax=ax1,
             zorder=1,
+            flow="none",
+        )
+
+    if h_inclusive_alt is not None:
+        hep.histplot(
+            h_inclusive_alt,
+            histtype="step",
+            color=[args.addVarFromExternalFile[1]],
+            linestyle="-",
+            yerr=False,
+            linewidth=2,
+            label=[args.addVarFromExternalFile[2]],
+            binwnorm=binwnorm,
+            ax=ax1,
             flow="none",
         )
 
@@ -706,6 +747,13 @@ def make_plot(
                 h2_stat = hh.divideHists(
                     h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
                 )
+            if h_inclusive_alt is not None:
+                h3 = hh.addHists(h_data, h_inclusive_alt, scale2=-1)
+                if h_data_stat is not None:
+                    h3_stat = hh.divideHists(
+                        h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                    )
+
         else:
             h1 = hh.divideHists(
                 h_inclusive,
@@ -720,6 +768,14 @@ def make_plot(
                 h2_stat = hh.divideHists(
                     h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
                 )
+            if h_inclusive_alt is not None:
+                h3 = hh.divideHists(
+                    h_data, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                )
+                if h_data_stat is not None:
+                    h3_stat = hh.divideHists(
+                        h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                    )
 
         hep.histplot(
             h1,
@@ -753,6 +809,27 @@ def make_plot(
                     ax=ax2,
                     flow="none",
                 )
+            if h_inclusive_alt is not None:
+                hep.histplot(
+                    h3,
+                    histtype="errorbar",
+                    color=args.addVarFromExternalFile[1],
+                    yerr=True if counts else h2.variances() ** 0.5,
+                    linewidth=2,
+                    ax=ax2,
+                    flow="none",
+                )
+                if h_data_stat is not None:
+                    hep.histplot(
+                        h3_stat,
+                        histtype="errorbar",
+                        color=args.addVarFromExternalFile[1],
+                        yerr=True if counts else h2.variances() ** 0.5,
+                        linewidth=2,
+                        capsize=2,
+                        ax=ax2,
+                        flow="none",
+                    )
 
         # for uncertaity bands
         edges = h_inclusive.axes[0].edges
@@ -1018,6 +1095,7 @@ def make_plots(
     varLabels=None,
     varColors=None,
     binwnorm=None,
+    resFromExtFile=None,
     *opts,
     **kwopts,
 ):
@@ -1043,6 +1121,10 @@ def make_plots(
             hist_stack = [hist_stack[{"processes": p}] for p in procs]
         else:
             hist_stack = []
+
+    hist_inclusive_alt = None
+    if resFromExtFile is not None:
+        hist_inclusive_alt = resFromExtFile[f"hist_{fittype}_inclusive"].get()
 
     axes = [a for a in hist_inclusive.axes]
 
@@ -1085,6 +1167,8 @@ def make_plots(
 
         hist_data = to_xsc(hist_data)
         hist_inclusive = to_xsc(hist_inclusive)
+        if hist_inclusive_alt is not None:
+            hist_inclusive_alt = to_xsc(hist_inclusive_alt)
         hist_stack = [to_xsc(h) for h in hist_stack]
         if hist_data_stat is not None:
             hist_data_stat = to_xsc(hist_data_stat)
@@ -1126,6 +1210,9 @@ def make_plots(
             }
 
             h_inclusive = hist_inclusive[idxs]
+            h_inclusive_alt = None
+            if hist_inclusive_alt is not None:
+                h_inclusive_alt = hist_inclusive_alt[idxs]
             h_stack = [h[idxs] for h in hist_stack]
 
             if hist_data is not None:
@@ -1200,6 +1287,7 @@ def make_plots(
                 varLabels=varLabels,
                 varColors=varColors,
                 binwnorm=binwnorm,
+                h_inclusive_alt=h_inclusive_alt,
                 *opts,
                 **kwopts,
             )
@@ -1224,6 +1312,7 @@ def make_plots(
             varLabels=varLabels,
             varColors=varColors,
             binwnorm=binwnorm,
+            h_inclusive_alt=hist_inclusive_alt,
             *opts,
             **kwopts,
         )
@@ -1272,6 +1361,11 @@ def main():
 
     # load .hdf5 file first, must exist in combinetf and rabbit
     fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
+    fitresult_alt = None
+    if args.addVarFromExternalFile is not None:
+        fitresult_alt = rabbit.io_tools.get_fitresult(
+            args.addVarFromExternalFile[0], args.result
+        )
 
     plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
 
@@ -1378,6 +1472,14 @@ def main():
 
                 opts["counts"] = counts
 
+                result_alt = (
+                    None
+                    if fitresult_alt is None
+                    else fitresult_alt["physics_models"][instance_key]["channels"][
+                        channel
+                    ]
+                )
+
                 make_plots(
                     result,
                     outdir,
@@ -1388,6 +1490,7 @@ def main():
                     lumi=info.get("lumi", None),
                     is_normalized=is_normalized,
                     binwnorm=binwnorm,
+                    resFromExtFile=result_alt,
                     **opts,
                 )
 
