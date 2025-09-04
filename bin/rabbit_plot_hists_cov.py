@@ -111,7 +111,11 @@ def parseArgs():
         """,
     )
     parser.add_argument(
-        "--params", type=str, nargs="*", default=None, help="Plot parameter matrix, specify list of parameter names to include in the matrix, leave free to plot all parameters"
+        "--params",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Plot parameter matrix, specify list of parameter names to include in the matrix, leave free to plot all parameters",
     )
     parser.add_argument(
         "--prefit", action="store_true", help="Make prefit plot, else postfit"
@@ -148,7 +152,7 @@ def plot_matrix(
     suffix=None,
     ticklabels=None,
 ):
-    
+
     if not isinstance(matrix, np.ndarray):
         matrix = matrix.values()
 
@@ -174,7 +178,7 @@ def plot_matrix(
         vmin=-1 if args.correlation else None,
         vmax=1 if args.correlation else None,
         xticklabels=ticklabels,
-        yticklabels=ticklabels
+        yticklabels=ticklabels,
     )
 
     if ticklabels is None:
@@ -247,7 +251,7 @@ def main():
 
     if args.params is not None:
         h_cov = fitresult["cov"].get()
-        axes=h_cov.axes.name
+        axes = h_cov.axes.name
 
         if len(args.params) > 0:
             h_param = fitresult["parms"].get()
@@ -262,7 +266,7 @@ def main():
 
             h_cov = h_cov.values()[np.ix_(indices, indices)]
 
-            ticklabels = [config.systematics_labels.get(p,p) for p in params[indices]]
+            ticklabels = [config.systematics_labels.get(p, p) for p in params[indices]]
         else:
             ticklabels = None
 
@@ -274,9 +278,8 @@ def main():
             config=config,
             meta=meta,
             suffix="params",
-            ticklabels=ticklabels
+            ticklabels=ticklabels,
         )
-
 
     hist_cov_key = f"hist_{'prefit' if args.prefit else 'postfit'}_inclusive_cov"
 
