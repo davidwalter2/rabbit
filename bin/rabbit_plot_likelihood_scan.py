@@ -118,7 +118,7 @@ def plot_scan(
     config={},
 ):
 
-    xlabel = config.systematics_labels.get(param, param)
+    xlabel = config.get("systematics_labels", {}).get(param, param)
 
     x = np.array(h_scan.axes["scan"]).astype(float)
     y = h_scan.values() * 2
