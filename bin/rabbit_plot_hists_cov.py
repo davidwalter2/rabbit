@@ -166,6 +166,21 @@ def plot_matrix(
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
+    opts = dict()
+    if ticklabels is not None:
+        opts.update(
+            dict(
+                xticklabels=ticklabels,
+                yticklabels=ticklabels,
+            )
+        )
+    else:
+        xlabel = plot_tools.get_axis_label(config, axes, args.xlabel, is_bin=True)
+        ylabel = plot_tools.get_axis_label(config, axes, args.ylabel, is_bin=True)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+
     sns.heatmap(
         matrix,
         cmap=cmap,
@@ -175,18 +190,8 @@ def plot_matrix(
         cbar=True,
         linewidths=0.5,
         ax=ax,
-        vmin=-1 if args.correlation else None,
-        vmax=1 if args.correlation else None,
-        xticklabels=ticklabels,
-        yticklabels=ticklabels,
+        **opts,
     )
-
-    if ticklabels is None:
-        xlabel = plot_tools.get_axis_label(config, axes, args.xlabel, is_bin=True)
-        ylabel = plot_tools.get_axis_label(config, axes, args.ylabel, is_bin=True)
-
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
 
     plot_tools.add_decor(
         ax,
