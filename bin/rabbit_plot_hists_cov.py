@@ -271,7 +271,9 @@ def main():
 
             h_cov = h_cov.values()[np.ix_(indices, indices)]
 
-            ticklabels = [config.systematics_labels.get(p, p) for p in params[indices]]
+            ticklabels = [
+                config.get("systematics_labels", {}).get(p, p) for p in params[indices]
+            ]
         else:
             ticklabels = None
 
