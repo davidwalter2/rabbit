@@ -4,6 +4,7 @@ import argparse
 import os
 
 import matplotlib.pyplot as plt
+import mplhep as hep
 import numpy as np
 from scipy.stats import chi2
 
@@ -12,7 +13,7 @@ from rabbit import io_tools
 from wums import output_tools, plot_tools  # isort: skip
 
 
-plt.rcParams.update({"font.size": 14})
+hep.style.use(hep.style.ROOT)
 
 
 def writeOutput(fig, outfile, extensions=[], postfix=None, args=None, meta_info=None):
