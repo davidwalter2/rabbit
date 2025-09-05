@@ -127,6 +127,20 @@ def make_parser():
         help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
     )
     parser.add_argument(
+        "--asymptoticLimits",
+        nargs="+",
+        default=[],
+        type=str,
+        help="Compute asymptotic upper limit based on CLs at specified parameters",
+    )
+    parser.add_argument(
+        "--cls",
+        nargs="+",
+        default=[0.05],
+        type=float,
+        help="Confidence level for asymptotic upper limit, multiple are possible",
+    )
+    parser.add_argument(
         "--contourScan",
         default=None,
         type=str,
@@ -135,9 +149,7 @@ def make_parser():
     )
     parser.add_argument(
         "--contourLevels",
-        default=[
-            1.0,
-        ],
+        default=[1.0, 2.0],
         type=float,
         nargs="+",
         help="Confidence level in standard deviations for contour scans (1 = 1 sigma = 68%)",
@@ -534,6 +546,58 @@ def fit(args, fitter, ws, dofit=True):
     if not args.noHessian:
         ws.add_cov_hist(fitter.cov)
 
+    # asymptotic limits (CLs)
+    if args.asymptoticLimits is not None:
+        # axes for output histogram: params, cls, clb
+        limits_shape = [len(args.asymptoticLimits), len(args.cls)]
+        if dofit:
+            clb_list = None
+        else:
+            clb_list = np.array([0.025, 0.16, 0.5, 0.84, 0.975])
+            limits_shape.append(len(clb_list))
+
+        limits = np.full(limits_shape, np.nan)
+        for i, param in enumerate(args.asymptoticLimits):
+            if param not in fitter.indata.signals.astype(str):
+                raise RuntimeError(
+                    f"Can not compute asymptotic limits for parameter {param}, no such signal process found, signal processe are: {fitter.indata.signals.astype(str)}"
+                )
+
+            for j, cls in enumerate(args.cls):
+                nllvalreduced = fitter.reduced_nll().numpy()
+                logger.info(
+                    f" -- AsymptoticLimits ( CLs={round(cls*100,1):4.1f}% ) -- "
+                )
+                if dofit:
+                    # TODO: verify that this is indeed correct
+                    q = scipy.stats.norm.ppf(1 - cls / 2, loc=0, scale=1) ** 2
+                    logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {q}")
+                    r = fitter.contour_scan(param, nllvalreduced, q, signs=[1])[0]
+                    logger.info(f"Observed Limit: {param} < {r}")
+                    limits[i, j] = r
+                else:
+                    # now we need to find the the values for mu where q_{mu,A} = -2ln(L)
+                    for k, clb in enumerate(clb_list):
+                        clsb = cls * clb
+                        qmuA = (
+                            scipy.stats.norm.ppf(clb, loc=0, scale=1)
+                            + scipy.stats.norm.ppf(1 - clsb, loc=0, scale=1)
+                        ) ** 2
+                        logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmuA}")
+                        r = fitter.contour_scan(param, nllvalreduced, qmuA, signs=[1])[
+                            0
+                        ]
+                        logger.info(f"Expected {round(clb*100,1):4.1f}%: {param} < {r}")
+                        limits[i, j, k] = r
+
+        ws.add_limits_hist(
+            limits,
+            args.asymptoticLimits,
+            args.cls,
+            clb_list,
+        )
+
+    # Likelihood scans
     if args.scan is not None:
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
 
@@ -554,8 +618,8 @@ def fit(args, fitter, ws, dofit=True):
             )
             ws.add_nll_scan2D_hist(param_tuple, x_scan, yscan, dnll_values)
 
+    # Likelihood contour scans
     if args.contourScan is not None:
-        # do likelihood contour scans
         nllvalreduced = fitter.reduced_nll().numpy()
 
         parms = (
@@ -569,7 +633,9 @@ def fit(args, fitter, ws, dofit=True):
             for j, cl in enumerate(args.contourLevels):
 
                 # find confidence interval
-                contour = fitter.contour_scan(param, nllvalreduced, cl)
+                contour = fitter.contour_scan(
+                    param, nllvalreduced, cl**2, return_all_params=True
+                )
                 contours[i, j, ...] = contour
 
         ws.add_contour_scan_hist(parms, contours, args.contourLevels)
