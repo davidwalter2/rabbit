@@ -77,11 +77,22 @@ class Fitter:
 
         if options.POIMode == "mu":
             self.npoi = self.indata.nsignals
-            poidefault = options.expectSignal * tf.ones(
+            poidefault = options.POIDefault * tf.ones(
                 [self.npoi], dtype=self.indata.dtype
             )
             for signal in self.indata.signals:
                 self.pois.append(signal)
+
+            if options.expectSignal is not None:
+                indices = []
+                updates = []
+                for signal, value in options.expectSignal:
+                    idx = self.pois.index(signal.encode())
+                    indices.append([idx])
+                    updates.append(float(value))
+
+                poidefault = tf.tensor_scatter_nd_update(poidefault, indices, updates)
+
         elif options.POIMode == "none":
             self.npoi = 0
             poidefault = tf.zeros([], dtype=self.indata.dtype)

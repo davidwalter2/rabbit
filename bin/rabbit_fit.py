@@ -115,9 +115,10 @@ def make_parser():
     )
     parser.add_argument(
         "--expectSignal",
-        default=1.0,
-        type=float,
-        help="rate multiplier for signal expectation (used for fit starting values and for toys)",
+        default=None,
+        nargs=2,
+        action="append",
+        help="Sepcify tuple with signal name and rate multiplier for signal expectation (used for fit starting values and for toys). E.g. '--expectSignal BSM 0.0 --expectSignal SM 1.0'",
     )
     parser.add_argument("--POIMode", default="mu", help="mode for POI's")
     parser.add_argument(
@@ -126,6 +127,7 @@ def make_parser():
         action="store_true",
         help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
     )
+    parser.add_argument("--POIDefault", default=1.0, type=float, help="mode for POI's")
     parser.add_argument(
         "--asymptoticLimits",
         nargs="+",
