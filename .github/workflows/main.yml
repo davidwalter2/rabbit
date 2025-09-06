@@ -392,12 +392,12 @@ jobs:
       - name: plot 1D likelihood scan
         run: >-
           rabbit_plot_likelihood_scan.py $RABBIT_OUTDIR/fitresults_scans.hdf5 -o $WEB_DIR/$PLOT_DIR 
-          --title Rabbit --subtitle Preliminary --params sig slope_signal
+          --title Rabbit --subtitle Preliminary --params sig slope_signal --titlePos 0
 
       - name: plot 2D likelihood scan
         run: >-
           rabbit_plot_likelihood_scan2D.py $RABBIT_OUTDIR/fitresults_scans.hdf5 -o $WEB_DIR/$PLOT_DIR 
-          --title Rabbit --subtitle Preliminary --params sig slope_signal
+          --title Rabbit --subtitle Preliminary --params sig slope_signal --titlePos 0 --legPos 'lower right'
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
