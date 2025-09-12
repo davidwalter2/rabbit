@@ -126,11 +126,11 @@ jobs:
     
       - name: symmetrizations
         run: >- 
-          python tests/symmetrizations.py -o -o $WEB_DIR/$PLOT_DIR/symmetrizations/ --titlePos 0
+          python tests/symmetrizations.py -o $WEB_DIR/$PLOT_DIR/symmetrizations/ --titlePos 0
 
       - name: symmetrizations with fluctations
         run: >- 
-          python tests/symmetrizations.py -o -o $WEB_DIR/$PLOT_DIR/symmetrizations/ --titlePos 0 --fluctuate
+          python tests/symmetrizations.py -o $WEB_DIR/$PLOT_DIR/symmetrizations/ --titlePos 0 --fluctuate
 
   make-tensor:
     runs-on: [self-hosted, linux, x64]
@@ -394,7 +394,7 @@ jobs:
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
-    needs: [setenv, plotting, likelihoodscans]
+    needs: [setenv, symmerizations, plotting, likelihoodscans]
     if: always() 
     steps:
       - env:
