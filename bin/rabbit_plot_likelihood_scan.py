@@ -84,6 +84,12 @@ def parseArgs():
         help="Parameters to plot the likelihood scan",
     )
     parser.add_argument(
+        "--combine",
+        type=str,
+        default=None,
+        help="Provide a root file with likelihood scan result from combine",
+    )
+    parser.add_argument(
         "--title",
         default="Rabbit",
         type=str,
@@ -116,6 +122,7 @@ def plot_scan(
     titlePos=0,
     ylabel=r"$-2\,\Delta \log L$",
     config={},
+    combine=None,
 ):
 
     xlabel = config.get("systematics_labels", {}).get(param, param)
@@ -156,6 +163,9 @@ def plot_scan(
         label="Likelihood scan",
         markeredgewidth=2,
     )
+
+    if combine is not None:
+        ax.plot(*combine, marker="o", color="orange", label="Combine")
 
     if h_contours is not None:
         for i, cl in enumerate(h_contours.axes["confidence_level"]):
@@ -215,6 +225,17 @@ def main():
 
     parms = h_params.axes["parms"] if len(args.params) == 0 else args.params
 
+    if args.combine is not None:
+        import uproot
+
+        with uproot.open(args.combine) as tfile:
+            vals = tfile["limit"]["r"].array()
+            nlls = tfile["limit"]["deltaNLL"].array()
+
+            order = np.argsort(vals)
+            vals = vals[order]
+            nlls = nlls[order] * 2  # -2ln(L)
+
     for param in parms:
         p = h_params[{"parms": param}]
         param_value = p.value
@@ -236,6 +257,7 @@ def main():
             subtitle=args.subtitle,
             titlePos=args.titlePos,
             config=config,
+            combine=(vals, nlls) if args.combine is not None else None,
         )
         os.makedirs(args.outpath, exist_ok=True)
         outfile = os.path.join(args.outpath, f"nll_scan_{param}")
