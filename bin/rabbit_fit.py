@@ -549,6 +549,9 @@ def fit(args, fitter, ws, dofit=True):
         ws.add_cov_hist(fitter.cov)
 
     # asymptotic limits (CLs)
+    #  see:
+    #  - combine tutorial https://indico.cern.ch/event/976099/contributions/4138520/
+    #  - paper: https://arxiv.org/abs/1007.1727
     if args.asymptoticLimits is not None:
         # axes for output histogram: params, cls, clb
         limits_shape = [len(args.asymptoticLimits), len(args.cls)]
@@ -565,13 +568,32 @@ def fit(args, fitter, ws, dofit=True):
                     f"Can not compute asymptotic limits for parameter {param}, no such signal process found, signal processe are: {fitter.indata.signals.astype(str)}"
                 )
 
+            # best fit
+            idx = np.where(fitter.parms.astype(str) == param)[0][0]
+            xval = tf.identity(fitter.x)
+            xbest = fitter.get_blinded_poi()[idx]
+            xerr = fitter.cov[idx, idx] ** 0.5
+
+            if not args.allowNegativePOI:
+                xerr = 2 * xerr * xbest**0.5
+
+            logger.debug(f"Best fit {param} = {xbest} +/- {xerr}")
+
+            # this is the denominator of q
+            nllvalreduced = fitter.reduced_nll().numpy()
+
+            if xbest < 0:
+                # need modified test statistic q~ = [0 for mu < mu^, q for mu < mu^ and mu^ > 0, q0 for mu^<0]
+                raise NotImplementedError(
+                    "Need modified test statistic here or run without '--allowNegativePOI'"
+                )
+
             for j, cls in enumerate(args.cls):
-                nllvalreduced = fitter.reduced_nll().numpy()
                 logger.info(
                     f" -- AsymptoticLimits ( CLs={round(cls*100,1):4.1f}% ) -- "
                 )
                 if dofit:
-                    # TODO: verify that this is indeed correct
+                    # TODO: this is not correct, we need to take into account CLb (from the asimov)
                     q = scipy.stats.norm.ppf(1 - cls / 2, loc=0, scale=1) ** 2
                     logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {q}")
                     r = fitter.contour_scan(param, nllvalreduced, q, signs=[1])[0]
