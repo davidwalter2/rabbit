@@ -215,7 +215,7 @@ def main():
             title=f"{round((1-float(cls)) * 100)}% CL upper limits",
         )
 
-        to_join = ["limits", args.postfix, f"CLs{str(cls).replace(".","p")}"]
+        to_join = ["limits", args.postfix, f"CLs{str(cls).replace('.','p')}"]
         outfile = "_".join(filter(lambda x: x, to_join))
         if args.subtitle == "Preliminary":
             outfile += "_preliminary"
