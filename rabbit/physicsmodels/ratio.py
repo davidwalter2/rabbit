@@ -93,14 +93,17 @@ class Ratio(PhysicsModel):
 
         if num_channel == den_channel:
             channel = num_channel
+            flow = indata.channel_info[channel].get("flow", False)
         else:
             channel = f"{num_channel}_{den_channel}"
+            flow = False
 
         self.has_processes = False  # The result has no process axis
 
         self.channel_info = {
             channel: {
                 "axes": hist_axes,
+                "flow": flow,
             }
         }
 

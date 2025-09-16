@@ -103,7 +103,7 @@ class CompositeModel(PhysicsModel):
         # make a composite model with unique channel names
         for m in models:
             for k, c in m.channel_info.items():
-                self.channel_info[f"{m.key}_{k}"] = c
+                self.channel_info[f"{m.key} {k}"] = c
 
             self.ndf_reduction += m.ndf_reduction
             # if any of the submodels does not process data, the composite model also does not
@@ -170,11 +170,12 @@ class Channelmodel(PhysicsModel):
         self.channel_info = {
             channel: {
                 "axes": self.term.channel_axes,
+                "flow": channel_info.get("flow", False),
                 "processes": processes if len(processes) else indata.procs,
             }
         }
 
-        self.has_data = not channel_info["masked"]
+        self.has_data = not channel_info.get("masked", False)
 
     def compute(self, params, observables):
         return observables
@@ -215,7 +216,7 @@ class Select(Channelmodel):
     def parse_args(cls, indata, channel, *args):
         """
         parsing the input arguments into the ratio constructor, is has to be called as
-        -m BaseModelChannel <ch num>
+        -m Select <ch num>
             <proc_0>,<proc_1>,...
             <axis_0>:<selection_0>,<axis_1>,<selection_1>...
 

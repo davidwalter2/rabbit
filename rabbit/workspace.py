@@ -124,14 +124,42 @@ class Workspace:
         h = ioutils.H5PickleProxy(hist)
         self.dump_obj(h, name, *args, **kwargs)
 
-    def hist(self, name, axes, values, variances=None, label=None):
+    def hist(self, name, axes, values, variances=None, label=None, flow=False):
         storage_type = (
             hist.storage.Weight() if variances is not None else hist.storage.Double()
         )
         h = hist.Hist(*axes, storage=storage_type, name=name, label=label)
-        h.values()[...] = memoryview(tf.reshape(values, h.shape))
+
+        if flow:
+            # StrCategory always has flow bin but we don't have values associated
+            # We first reshape without the flow for StrCategory and then add a slice of ones
+            shape = [
+                len(a) if isinstance(a, hist.axis.StrCategory) else a.extent
+                for a in h.axes
+            ]
+            values = tf.reshape(values, shape)
+            if variances is not None:
+                variances = tf.reshape(variances, shape)
+
+            shape = []
+            for i, a in enumerate(h.axes):
+                if isinstance(a, hist.axis.StrCategory):
+                    new_shape = list(values.shape)
+                    new_shape[i] = 1
+                    ones_slice = tf.ones(new_shape, dtype=values.dtype)
+                    values = tf.concat([values, ones_slice], axis=i)
+                    if variances is not None:
+                        variances = tf.concat([variances, ones_slice], axis=i)
+                shape.append(a.extent)
+        else:
+            shape = h.shape
+            values = tf.reshape(values, shape)
+            if variances is not None:
+                variances = tf.reshape(variances, shape)
+
+        h.values(flow=flow)[...] = memoryview(values)
         if variances is not None:
-            h.variances()[...] = memoryview(tf.reshape(variances, h.shape))
+            h.variances(flow=flow)[...] = memoryview(variances)
         return h
 
     def add_hist(
@@ -145,6 +173,7 @@ class Workspace:
         label=None,
         channel=None,
         model_key=None,
+        flow=False,
     ):
         if not isinstance(axes, (list, tuple, np.ndarray)):
             axes = [axes]
@@ -153,7 +182,7 @@ class Workspace:
             if variances is not None:
                 variances = variances[start:stop]
 
-        h = self.hist(name, axes, values, variances, label)
+        h = self.hist(name, axes, values, variances, label, flow=flow)
         self.dump_hist(h, model_key, channel)
 
     def add_value(self, value, name, *args, **kwargs):
@@ -353,7 +382,8 @@ class Workspace:
         start = 0
         for channel, info in model.channel_info.items():
             axes = info["axes"]
-            stop = start + int(np.prod([a.size for a in axes]))
+            flow = info.get("flow", False)
+            stop = start + int(np.prod([a.extent if flow else a.size for a in axes]))
 
             opts = dict(
                 start=start,  # first index in output values for this channel
@@ -361,6 +391,7 @@ class Workspace:
                 label=label,
                 model_key=model.key,
                 channel=channel,
+                flow=flow,
             )
 
             hist_axes = [a for a in axes]

@@ -118,9 +118,10 @@ class Term:
 
         channel_axes_names = [a.name for a in channel_axes]
 
-        self.has_data = not info["masked"] and len(processes) == 0
+        self.has_data = not info.get("masked", False) and len(processes) == 0
 
-        self.exp_shape = tuple([len(a) for a in channel_axes])
+        flow = info.get("flow", False)
+        self.exp_shape = tuple([a.extent if flow else a.size for a in channel_axes])
 
         if processes is not None:
             if any(p not in indata.procs.astype(str) for p in processes):

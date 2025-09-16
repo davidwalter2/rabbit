@@ -751,6 +751,11 @@ def parseArgs():
         action="store_true",
         help="Normalize impacts on poi, leading to relative uncertainties.",
     )
+    parser.add_argument(
+        "--relative",
+        action="store_true",
+        help="Relative uncertainty w.r.t. central value of parameter of interest (only for hisograms)",
+    )
     parser.add_argument("--debug", action="store_true", help="Print debug output")
     parser.add_argument(
         "--diffPullAsym",
@@ -874,6 +879,8 @@ def make_plots(
     impact_title=None,
 ):
 
+    df = df.fillna(0)
+
     if args.sort:
         if args.sort.endswith("diff"):
             key = args.sort.replace("_diff", "")
@@ -891,8 +898,6 @@ def make_plots(
             print(
                 f"Trying to sort {args.sort} but not found in dataframe, continue without sorting"
             )
-
-    df = df.fillna(0)
 
     outfile = os.path.join(outdir, outfile)
     extensions = [outfile.split(".")[-1], *args.otherExtensions]
@@ -1018,6 +1023,16 @@ def load_dataframe_hists(
     grouping=None,
     translate_label={},
 ):
+
+    if args.relative:
+        scale = args.scaleImpacts * 1.0 / hist_total.value
+        if fitresult_ref:
+            scale_ref = args.scaleImpacts * 1.0 / hist_total_ref.value
+    else:
+        scale = args.scaleImpacts
+        if fitresult_ref:
+            scale_ref = args.scaleImpacts
+
     df = readHistImpacts(
         fitresult,
         hist_impacts,
@@ -1028,7 +1043,7 @@ def load_dataframe_hists(
         stat=args.stat / 100.0,
         normalize=normalize,
         grouping=grouping,
-        scale=args.scaleImpacts,
+        scale=scale,
     )
 
     if fitresult_ref:
@@ -1042,7 +1057,7 @@ def load_dataframe_hists(
             stat=args.stat / 100.0,
             normalize=normalize,
             grouping=grouping,
-            scale=args.scaleImpacts,
+            scale=scale_ref,
         )
         df = df.merge(df_ref, how="outer", on="label", suffixes=("", "_ref"))
 
@@ -1143,6 +1158,8 @@ def produce_plots_hist(
         asym=asym,
         normalize=normalize,
         fitresult_ref=fitresult_ref,
+        hist_impacts_ref=hist_impacts_ref,
+        hist_total_ref=hist_total_ref,
         grouping=grouping,
         translate_label=translate_label,
     )
@@ -1197,106 +1214,124 @@ def main():
     if args.noImpacts:
         # do one pulls plot, ungrouped
         produce_plots_parms(args, fitresult, outdir, outfile="pulls.html", **kwargs)
-        exit()
+    else:
+        kwargs.update(dict(normalize=args.normalize, impact_title=args.impactTitle))
 
-    kwargs.update(dict(normalize=args.normalize, impact_title=args.impactTitle))
+        impacts_name = "impacts"
+        if args.globalImpacts:
+            impacts_name = f"global_{impacts_name}"
 
-    impacts_name = "impacts"
-    if args.globalImpacts:
-        impacts_name = f"global_{impacts_name}"
+        grouping = None
+        if args.grouping is not None:
+            grouping = getattr(config, "nuisance_grouping", {}).get(args.grouping, None)
 
-    grouping = None
-    if args.grouping is not None:
-        grouping = getattr(config, "nuisance_grouping", {}).get(args.grouping, None)
-
-    if args.physicsModel is not None:
-        if args.asymImpacts:
-            raise NotImplementedError(
-                "Asymetric impacts on observables is not yet implemented"
-            )
-        if not args.globalImpacts:
-            raise NotImplementedError(
-                "Only global impacts on observables is implemented (use --globalImpacts)"
-            )
-
-        model_key = " ".join(args.physicsModel)
-        channels = fitresult["physics_models"][model_key]["channels"]
-
-        for hists in channels.values():
-
-            modes = ["ungrouped", "group"] if args.mode == "both" else [args.mode]
-            for mode in modes:
-                group = mode == "group"
-
-                key = "hist_postfit_inclusive_global_impacts"
-                if group:
-                    key += "_grouped"
-
-                hist_total = hists["hist_postfit_inclusive"].get()
-
-                hist = hists[key].get()
-
-                # TODO: implement ref
-                # hist_ref
-                # hist_total_ref
-
-                # lumi in pb-1
-                lumi = (
-                    meta["meta_info_input"]["channel_info"]["ch0"].get("lumi", 0.001)
-                    * 1000
+        if args.physicsModel is not None:
+            if args.asymImpacts:
+                raise NotImplementedError(
+                    "Asymetric impacts on observables is not yet implemented"
+                )
+            if not args.globalImpacts:
+                raise NotImplementedError(
+                    "Only global impacts on observables is implemented (use --globalImpacts)"
                 )
 
-                for idxs in itertools.product(
-                    *[np.arange(a.size) for a in hist_total.axes]
-                ):
-                    ibin = {a: i for a, i in zip(hist_total.axes.name, idxs)}
-                    print(f"Now at {ibin}")
+            model_key = " ".join(args.physicsModel)
+            if model_key in fitresult["physics_models"].keys():
+                channels = fitresult["physics_models"][model_key]["channels"]
+            else:
+                keys = [
+                    key
+                    for key in fitresult["physics_models"].keys()
+                    if key.startswith(model_key)
+                ]
+                channels = fitresult["physics_models"][keys[0]]["channels"]
 
-                    ibin_str = "_".join([f"{a}{i}" for a, i in ibin.items()])
+            for channel, hists in channels.items():
+
+                modes = ["ungrouped", "group"] if args.mode == "both" else [args.mode]
+                for mode in modes:
+                    group = mode == "group"
+
+                    key = "hist_postfit_inclusive_global_impacts"
                     if group:
-                        outfile = f"{impacts_name}_grouped_{ibin_str}.html"
-                    else:
-                        outfile = f"{impacts_name}_{ibin_str}.html"
-                        if not args.noPulls:
-                            outfile = f"pulls_and_{outfile}"
+                        key += "_grouped"
 
-                    produce_plots_hist(
+                    hist_total = hists["hist_postfit_inclusive"].get()
+
+                    hist = hists[key].get()
+
+                    # TODO: implement ref
+                    # hist_ref
+                    # hist_total_ref
+
+                    # lumi in pb-1
+                    lumi = (
+                        meta["meta_info_input"]["channel_info"]["ch0"].get(
+                            "lumi", 0.001
+                        )
+                        * 1000
+                    )
+
+                    if fitresult_ref is not None:
+                        hists_ref = fitresult_ref["physics_models"][model_key][
+                            "channels"
+                        ][channel]
+                        hist_ref = hists_ref[key].get()
+                        hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
+
+                    for idxs in itertools.product(
+                        *[np.arange(a.size) for a in hist_total.axes]
+                    ):
+                        ibin = {a: i for a, i in zip(hist_total.axes.name, idxs)}
+                        print(f"Now at {ibin}")
+
+                        ibin_str = "_".join([f"{a}{i}" for a, i in ibin.items()])
+                        if group:
+                            outfile = f"{impacts_name}_grouped_{ibin_str}.html"
+                        else:
+                            outfile = f"{impacts_name}_{ibin_str}.html"
+                            if not args.noPulls:
+                                outfile = f"pulls_and_{outfile}"
+
+                        produce_plots_hist(
+                            args,
+                            fitresult,
+                            outdir,
+                            outfile,
+                            hist[ibin],
+                            hist_total[ibin],
+                            ibin,
+                            lumi,
+                            group=group,
+                            grouping=grouping,
+                            hist_impacts_ref=hist_ref[ibin] if fitresult_ref else None,
+                            hist_total_ref=(
+                                hist_total_ref[ibin] if fitresult_ref else None
+                            ),
+                            **kwargs,
+                        )
+        else:
+            pois = [args.poi] if args.poi else io_tools.get_poi_names(meta)
+            for poi in pois:
+                print(f"Now at {poi}")
+                if args.mode in ["both", "ungrouped"]:
+                    name = f"{impacts_name}_{poi}.html"
+                    if not args.noPulls:
+                        name = f"pulls_and_{name}"
+                    produce_plots_parms(
+                        args, fitresult, outdir, outfile=name, poi=poi, **kwargs
+                    )
+                if args.mode in ["both", "group"]:
+                    produce_plots_parms(
                         args,
                         fitresult,
                         outdir,
-                        outfile,
-                        hist[ibin],
-                        hist_total[ibin],
-                        ibin,
-                        lumi,
-                        group=group,
+                        outfile=f"{impacts_name}_grouped_{poi}.html",
+                        poi=poi,
+                        group=True,
                         grouping=grouping,
-                        hist_impacts_ref=None,
-                        hist_total_ref=None,
                         **kwargs,
                     )
-    else:
-        pois = [args.poi] if args.poi else io_tools.get_poi_names(meta)
-        for poi in pois:
-            print(f"Now at {poi}")
-            if args.mode in ["both", "ungrouped"]:
-                name = f"{impacts_name}_{poi}.html"
-                if not args.noPulls:
-                    name = f"pulls_and_{name}"
-                produce_plots_parms(
-                    args, fitresult, outdir, outfile=name, poi=poi, **kwargs
-                )
-            if args.mode in ["both", "group"]:
-                produce_plots_parms(
-                    args,
-                    fitresult,
-                    outdir,
-                    outfile=f"{impacts_name}_grouped_{poi}.html",
-                    poi=poi,
-                    group=True,
-                    grouping=grouping,
-                    **kwargs,
-                )
 
     output_tools.write_indexfile(outdir)
 
