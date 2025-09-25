@@ -253,7 +253,7 @@ def make_parser():
     parser.add_argument(
         "--binByBinStatType",
         default="automatic",
-        choices=["automatic", "gamma", "normal"],
+        choices=["automatic", *fitter.Fitter.valid_bin_by_bin_stat_types],
         help="probability density for bin-by-bin statistical uncertainties, ('automatic' is 'gamma' except for data covariance where it is 'normal')",
     )
     parser.add_argument(
@@ -665,6 +665,7 @@ def main():
         prefit_time = []
         postfit_time = []
         fit_time = []
+
         for i, ifit in enumerate(fits):
             group = "results"
 

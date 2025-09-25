@@ -22,16 +22,6 @@ def getGlobalImpactsAxes(indata):
     return hist.axis.StrCategory(impact_names, name="impacts")
 
 
-def getImpactsAxesGrouped(indata, bin_by_bin_stat=False):
-    impact_names_grouped = list(indata.systgroups.astype(str))
-    # impact data stat
-    impact_names_grouped.append("stat")
-    if bin_by_bin_stat:
-        # impact bin-by-bin stat
-        impact_names_grouped.append("binByBinStat")
-    return hist.axis.StrCategory(impact_names_grouped, name="impacts")
-
-
 def get_name_label_expected_hists(
     name=None, label=None, prefit=False, variations=False, process_axis=False
 ):
@@ -61,8 +51,8 @@ class Workspace:
         # some information for the impact histograms
         self.global_impact_axis = getGlobalImpactsAxes(fitter.indata)
         self.impact_axis = getImpactsAxes(fitter.indata)
-        self.grouped_impact_axis = getImpactsAxesGrouped(
-            fitter.indata, fitter.binByBinStat
+        self.grouped_impact_axis = hist.axis.StrCategory(
+            fitter.systgroupsfull, name="impacts"
         )
 
         self.parms = fitter.parms
