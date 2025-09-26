@@ -227,14 +227,14 @@ jobs:
       - name: linearized solution
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix linearized
-          -t 0 --chisqFit --doImpacts --globalImpacts --binByBinStatType normal --allowNegativePOI
+          -t 0 --chisqFit --doImpacts --globalImpacts --binByBinStatType normal-additive --allowNegativePOI
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistImpacts --computeHistCov -m Project ch1 a -m Project ch1 b 
 
       - name: chi2 fit with Barlow--Beeston full
         run: >- 
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix linearized
-          -t 0 --chisqFit --externalCovariance --doImpacts --globalImpacts --binByBinStatMode full
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix bb_full
+          -t 0 --doImpacts --globalImpacts --binByBinStatType normal-multiplicative --binByBinStatMode full
 
   plotting:
     runs-on: [self-hosted, linux, x64]
