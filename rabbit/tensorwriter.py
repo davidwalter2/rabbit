@@ -48,6 +48,7 @@ class TensorWriter:
 
         # temporary data
         self.dict_data_obs = {}  # [channel]
+        self.dict_data_var = {}  # [channel]
         self.data_covariance = None
         self.dict_pseudodata = {}  # [channel][pseudodata]
         self.dict_norm = {}  # [channel][process]
@@ -87,11 +88,14 @@ class TensorWriter:
 
         return variances.flatten().astype(self.dtype)
 
-    def add_data(self, h, channel="ch0"):
+    def add_data(self, h, channel="ch0", variances=None):
         self._check_hist_and_channel(h, channel)
         if channel in self.dict_data_obs.keys():
             raise RuntimeError(f"Data histogram for channel '{channel}' already set.")
         self.dict_data_obs[channel] = self.get_flat_values(h)
+        self.dict_data_var[channel] = self.get_flat_variances(
+            h if variances is None else variances
+        )
 
     def add_data_covariance(self, cov):
         self.data_covariance = cov if isinstance(cov, np.ndarray) else cov.values()
@@ -506,6 +510,7 @@ class TensorWriter:
         sumw = np.zeros([nbinsfull, nproc], self.dtype)
         sumw2 = np.zeros([nbinsfull, nproc], self.dtype)
         data_obs = np.zeros([nbins], self.dtype)
+        data_var = np.zeros([nbins], self.dtype)
         pseudodata = np.zeros([nbins, len(self.pseudodata_names)], self.dtype)
         ibin = 0
         for chan, chan_info in self.channels.items():
@@ -520,6 +525,7 @@ class TensorWriter:
 
             if not chan_info["masked"]:
                 data_obs[ibin : ibin + nbinschan] = self.dict_data_obs[chan]
+                data_var[ibin : ibin + nbinschan] = self.dict_data_var[chan]
 
                 for idx, name in enumerate(self.pseudodata_names):
                     pseudodata[ibin : ibin + nbinschan, idx] = self.dict_pseudodata[
@@ -749,8 +755,8 @@ class TensorWriter:
         if self.data_covariance is None and (
             self.systscovariance or self.add_bin_by_bin_stat_to_data_cov
         ):
-            # create data covariance assuming poisson statistics
-            self.data_covariance = np.diag(data_obs)
+            # create data covariance
+            self.data_covariance = np.diag(data_var)
 
         # write results to hdf5 file
         procSize = nproc * np.dtype(self.dtype).itemsize
@@ -829,6 +835,11 @@ class TensorWriter:
         nbytes += h5pyutils.writeFlatInChunks(
             data_obs, f, "hdata_obs", maxChunkBytes=self.chunkSize
         )
+        if np.any(data_var != data_obs):
+            nbytes += h5pyutils.writeFlatInChunks(
+                data_var, f, "hdata_var", maxChunkBytes=self.chunkSize
+            )
+            data_var = None
         data_obs = None
 
         nbytes += h5pyutils.writeFlatInChunks(

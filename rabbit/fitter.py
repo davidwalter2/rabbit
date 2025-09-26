@@ -161,6 +161,10 @@ class Fitter:
                     raise RuntimeError("No external covariance found in input data.")
                 # provided covariance
                 self.data_cov_inv = self.indata.data_cov_inv
+            else:
+                self.varnobs = tf.Variable(
+                    tf.zeros_like(self.indata.data_obs), trainable=False, name="varnobs"
+                )
 
         # constraint minima for nuisance parameters
         self.theta0 = tf.Variable(
@@ -391,13 +395,15 @@ class Fitter:
 
         return val, jac
 
-    def set_nobs(self, values):
+    def set_nobs(self, values, variances=None):
         if self.chisqFit and not self.externalCovariance:
             # covariance from data stat
             if tf.math.reduce_any(values <= 0).numpy():
                 raise RuntimeError(
                     "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
                 )
+            self.varnobs.assign(values if variances is None else variances)
+
         self.nobs.assign(values)
         # compute offset for poisson nll improved numerical precision in minimizatoin
         # the offset is chosen to give the saturated likelihood
@@ -534,6 +540,7 @@ class Fitter:
     def toyassign(
         self,
         data_values=None,
+        data_variances=None,
         syst_randomize="frequentist",
         data_randomize="poisson",
         data_mode="expected",
@@ -568,16 +575,23 @@ class Fitter:
                 )
                 self.set_nobs(pdata.sample())
             else:
+                if self.chisqFit:
+                    data_var = data_nom if data_variances is None else data_variances
+                else:
+                    data_var = data_nom
+
                 self.set_nobs(
                     tf.random.normal(
                         mean=data_nom,
-                        stddev=tf.sqrt(data_nom),
+                        stddev=tf.sqrt(data_var),
                         shape=[],
                         dtype=self.nobs.dtype,
-                    )
+                    ),
+                    data_variances,
                 )
+
         elif data_randomize == "none":
-            self.set_nobs(data_nom)
+            self.set_nobs(data_nom, data_variances)
 
         # assign start values for nuisance parameters to constraint minima
         self.xdefaultassign()
@@ -1208,16 +1222,12 @@ class Fitter:
                 varbeta = self.varbeta[: self.indata.nbins]
 
                 if self.chisqFit:
-                    # denominator in Gaussian likelihood is treated as a constant when computing
-                    # global impacts for example
-                    nobs0 = tf.stop_gradient(self.nobs)
-
                     if self.binByBinStatType == "gamma":
                         kstat = self.kstat[: self.indata.nbins]
 
                         abeta = nexp_profile**2
-                        bbeta = kstat * nobs0 - nexp_profile * self.nobs
-                        cbeta = -kstat * nobs0 * beta0
+                        bbeta = kstat * self.varnobs - nexp_profile * self.nobs
+                        cbeta = -kstat * self.varnobs * beta0
                         beta = solve_quad_eq(abeta, bbeta, cbeta)
 
                         betamask = self.betamask[: self.indata.nbins]
@@ -1237,22 +1247,21 @@ class Fitter:
                             n2kststsum = tf.reduce_sum(n2kstat, axis=-1)
 
                             nbeta = (
-                                self.nobs / nobs0 * n2kststsum
+                                self.nobs / self.varnobs * n2kststsum
                                 + tf.reduce_sum(norm_profile * beta0, axis=-1)
-                            ) / (1 + 1 / nobs0 * n2kststsum)
+                            ) / (1 + 1 / self.varnobs * n2kststsum)
                             beta = (
                                 beta0
-                                + (1 / nobs0 * (self.nobs - nbeta))[..., None]
+                                + (1 / self.varnobs * (self.nobs - nbeta))[..., None]
                                 * norm_profile
                                 / kstat
                             )
                             betamask = self.betamask[: self.indata.nbins]
                             beta = tf.where(betamask, beta0, beta)
                         else:
-                            # beta = (self.nobs/nexp_profile * varbeta + nobs0 * beta0) / (nobs0 + varbeta)
                             beta = (
-                                nexp_profile * self.nobs / nobs0 + kstat * beta0
-                            ) / (kstat + nexp_profile * nexp_profile / nobs0)
+                                nexp_profile * self.nobs / self.varnobs + kstat * beta0
+                            ) / (kstat + nexp_profile * nexp_profile / self.varnobs)
 
                             betamask = self.betamask[: self.indata.nbins]
                             beta = tf.where(betamask, beta0, beta)
@@ -1298,17 +1307,20 @@ class Fitter:
                             varbetasum = tf.reduce_sum(varbeta, axis=-1)
                             nbeta = (
                                 tf.reduce_sum(sbeta * beta0, axis=-1)
-                                + varbetasum / nobs0 * (self.nobs - nexp_profile)
-                            ) / (1 + varbetasum / nobs0)
+                                + varbetasum / self.varnobs * (self.nobs - nexp_profile)
+                            ) / (1 + varbetasum / self.varnobs)
                             beta = (
                                 beta0
                                 - sbeta
-                                * ((nexp_profile + nbeta - self.nobs) / nobs0)[:, None]
+                                * ((nexp_profile + nbeta - self.nobs) / self.varnobs)[
+                                    :, None
+                                ]
                             )
                         else:
                             beta = (
-                                sbeta * (self.nobs - nexp_profile) + nobs0 * beta0
-                            ) / (nobs0 + varbeta)
+                                sbeta * (self.nobs - nexp_profile)
+                                + self.varnobs * beta0
+                            ) / (self.varnobs + varbeta)
                 else:
                     if self.binByBinStatType == "gamma":
                         kstat = self.kstat[: self.indata.nbins]
@@ -1710,8 +1722,9 @@ class Fitter:
             else:
                 # stop_gradient needed in denominator here because it should be considered
                 # constant when evaluating global impacts from observed data
+                # TODO: support arbitrary variances
                 ln = 0.5 * tf.reduce_sum(
-                    (nexp - self.nobs) ** 2 / tf.stop_gradient(self.nobs), axis=-1
+                    (nexp - self.nobs) ** 2 / self.varnobs, axis=-1
                 )
         else:
             nexpsafe = tf.where(

@@ -670,15 +670,20 @@ def main():
             group = "results"
 
             if args.pseudoData is None:
-                datasets = [
-                    ifitter.indata.data_obs,
-                ]
+                datasets = zip([ifitter.indata.data_obs], [ifitter.indata.data_var])
             else:
                 # shape nobs x npseudodata
-                datasets = tf.transpose(indata.pseudodata_obs)
+                datasets = zip(
+                    tf.transpose(indata.pseudodata_obs),
+                    (
+                        tf.transpose(indata.pseudodata_var)
+                        if indata.pseudodata_var is not None
+                        else [None] * indata.pseudodata_obs.shape[-1]
+                    ),
+                )
 
             # loop over (pseudo)data sets
-            for j, data_values in enumerate(datasets):
+            for j, (data_values, data_variances) in enumerate(datasets):
 
                 ifitter.defaultassign()
                 if ifit == -1:
@@ -691,14 +696,15 @@ def main():
                         group += f"_toy{ifit}"
                         ifitter.toyassign(
                             data_values,
+                            data_variances,
                             syst_randomize=args.toysSystRandomize,
                             data_randomize=args.toysDataRandomize,
                             data_mode=args.toysDataMode,
                             randomize_parameters=args.toysRandomizeParameters,
                         )
 
-                if np.shape(datasets)[0] > 1:
-                    # in case there are more than 1 pseudodata set, label each one
+                if args.pseudoData is not None:
+                    # label each pseudodata set
                     group += f"_{indata.pseudodatanames[j]}"
 
                 ws.add_parms_hist(
