@@ -234,7 +234,7 @@ jobs:
       - name: chi2 fit with Barlow--Beeston full
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix bb_full
-          -t 0 --doImpacts --globalImpacts --binByBinStatType normal-multiplicative --binByBinStatMode full
+          -t 0 --globalImpacts --binByBinStatType normal-multiplicative --binByBinStatMode full
 
   plotting:
     runs-on: [self-hosted, linux, x64]

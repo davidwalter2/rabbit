@@ -201,19 +201,19 @@ class Fitter:
         self.ubeta = tf.zeros_like(self.beta)
 
         if self.binByBinStat:
-            self.varbeta = (
-                self.indata.sumw2
-                if self.binByBinStatMode == "full"
-                else tf.reduce_sum(self.indata.sumw2, axis=1)
-            )
+            if self.binByBinStatMode == "full":
+                self.varbeta = self.indata.sumw2
+                self.sumw = self.indata.sumw
+            else:
+                if self.indata.sumw2.ndim > 1:
+                    self.varbeta = tf.reduce_sum(self.indata.sumw2, axis=-1)
+                    self.sumw = tf.reduce_sum(self.indata.sumw, axis=-1)
+                else:
+                    self.varbeta = self.indata.sumw2
+                    self.sumw = self.indata.sumw
 
             if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
-                sumw = (
-                    self.indata.sumw
-                    if self.binByBinStatMode == "full"
-                    else tf.reduce_sum(self.indata.sumw, axis=1)
-                )
-                self.kstat = sumw**2 / self.varbeta
+                self.kstat = self.sumw**2 / self.varbeta
                 self.betamask = self.varbeta == 0.0
                 self.kstat = tf.where(self.betamask, 1.0, self.kstat)
             elif self.binByBinStatType == "normal-additive":
@@ -1686,7 +1686,7 @@ class Fitter:
 
                 if full_nll:
                     # TODO: verify
-                    sigma2 = self.indata.sumw2 / tf.square(self.indata.sumw)
+                    sigma2 = self.varbeta / tf.square(self.sumw)
 
                     # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
                     lbeta = (
