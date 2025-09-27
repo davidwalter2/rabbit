@@ -486,7 +486,7 @@ class Fitter:
                 self.beta.assign(betagen)
             else:
                 if self.binByBinStatType == "normal-multiplicative":
-                    stddev_beta = self.kstat * self.beta0  # TODO: check
+                    stddev_beta = tf.sqrt(self.beta0 / self.kstat)  # TODO: check
                 elif self.binByBinStatType == "normal-additive":
                     stddev_beta = tf.ones_like(self.beta0)
 
@@ -524,7 +524,7 @@ class Fitter:
                 self.set_beta0(beta0gen)
             else:
                 if self.binByBinStatType == "normal-multiplicative":
-                    stddev_beta = self.kstat * self.beta  # TODO: check
+                    stddev_beta = tf.sqrt(self.beta / self.kstat)  # TODO: check
                 elif self.binByBinStatType == "normal-additive":
                     stddev_beta = tf.ones_like(self.beta0)
 
@@ -667,7 +667,7 @@ class Fitter:
             impacts_grouped = tf.concat([impacts_data_stat, impacts_bbb], axis=1)
 
             if self.binByBinStatMode == "full":
-                raise NotADirectoryError()
+                raise NotImplementedError()
 
         else:
             impacts_data_stat = tf.sqrt(tf.linalg.diag_part(inv_hess_stat))
