@@ -258,8 +258,8 @@ def make_parser():
     )
     parser.add_argument(
         "--binByBinStatMode",
-        default="light",
-        choices=["light", "full"],
+        default="lite",
+        choices=["lite", "full"],
         help="Barlow-Beeston mode bin-by-bin statistical uncertainties",
     )
     parser.add_argument(

@@ -179,7 +179,7 @@ class Fitter:
         # global observables for mc stat uncertainty
         if self.binByBinStatMode == "full":
             self.beta_shape = self.indata.sumw.shape
-        elif self.binByBinStatMode == "light":
+        elif self.binByBinStatMode == "lite":
             self.beta_shape = self.indata.sumw.shape[0]
 
         self.beta0 = tf.Variable(
@@ -222,7 +222,7 @@ class Fitter:
                 if self.chisqFit:
                     sbeta = tf.math.sqrt(self.varbeta[: self.indata.nbins])
 
-                    if self.externalCovariance and self.binByBinStatMode == "light":
+                    if self.externalCovariance and self.binByBinStatMode == "lite":
                         sbeta = tf.linalg.LinearOperatorDiag(sbeta)
                         self.betaauxlu = tf.linalg.lu(
                             sbeta @ self.data_cov_inv @ sbeta
@@ -1235,7 +1235,7 @@ class Fitter:
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
 
-                        if self.externalCovariance and self.binByBinStatMode == "light":
+                        if self.externalCovariance and self.binByBinStatMode == "lite":
                             raise NotImplementedError()
                         elif (
                             self.externalCovariance and self.binByBinStatMode == "full"
@@ -1244,6 +1244,9 @@ class Fitter:
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
                             n2kstat = tf.square(norm_profile) / kstat
+                            n2kstat = tf.where(
+                                betamask, tf.constant(0.0, dtype=varbeta.dtype), n2kstat
+                            )
                             n2kststsum = tf.reduce_sum(n2kstat, axis=-1)
 
                             nbeta = (
@@ -1268,7 +1271,7 @@ class Fitter:
 
                     elif self.binByBinStatType == "normal-additive":
                         sbeta = tf.math.sqrt(varbeta)
-                        if self.externalCovariance and self.binByBinStatMode == "light":
+                        if self.externalCovariance and self.binByBinStatMode == "lite":
                             sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
                             beta = tf.linalg.lu_solve(
                                 *self.betaauxlu,
@@ -1331,7 +1334,7 @@ class Fitter:
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
                         betamask = self.betamask[: self.indata.nbins]
-                        if self.binByBinStatMode == "light":
+                        if self.binByBinStatMode == "lite":
                             abeta = kstat
                             bbeta = nexp_profile - beta0 * kstat
                             cbeta = -self.nobs
@@ -1340,6 +1343,9 @@ class Fitter:
                         else:
                             norm_profile = norm[: self.indata.nbins]
                             n2kstat = tf.square(norm_profile) / kstat
+                            n2kstat = tf.where(
+                                betamask, tf.constant(0.0, dtype=varbeta.dtype), n2kstat
+                            )
                             pbeta = tf.reduce_sum(
                                 n2kstat - beta0 * norm_profile, axis=-1
                             )
@@ -1355,7 +1361,7 @@ class Fitter:
 
                     elif self.binByBinStatType == "normal-additive":
                         sbeta = tf.math.sqrt(varbeta)
-                        if self.binByBinStatMode == "light":
+                        if self.binByBinStatMode == "lite":
                             abeta = sbeta
                             abeta = tf.where(
                                 varbeta == 0.0,
