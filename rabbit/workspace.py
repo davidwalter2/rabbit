@@ -12,13 +12,21 @@ axis_downUpVar = hist.axis.Regular(
 )
 
 
-def getImpactsAxes(indata):
-    impact_names = list(indata.signals.astype(str)) + list(indata.systs.astype(str))
+def getImpactsAxes(indata, global_impacts=False):
+    if global_impacts:
+        impact_names = list(indata.systs.astype(str))
+    else:
+        impact_names = list(indata.signals.astype(str)) + list(indata.systs.astype(str))
     return hist.axis.StrCategory(impact_names, name="impacts")
 
 
-def getGlobalImpactsAxes(indata):
-    impact_names = list(indata.systs.astype(str))
+def getGroupedImpactsAxes(indata, bin_by_bin_stat=False, per_process=False):
+    impact_names = list(indata.systgroups.astype(str))
+    impact_names.append("stat")
+    if bin_by_bin_stat:
+        impact_names.append("binByBinStat")
+        if per_process:
+            impact_names.extend([f"binByBinStat{p}" for p in indata.procs.astype(str)])
     return hist.axis.StrCategory(impact_names, name="impacts")
 
 
@@ -49,10 +57,15 @@ class Workspace:
         self.results = {}
 
         # some information for the impact histograms
-        self.global_impact_axis = getGlobalImpactsAxes(fitter.indata)
         self.impact_axis = getImpactsAxes(fitter.indata)
-        self.grouped_impact_axis = hist.axis.StrCategory(
-            fitter.systgroupsfull, name="impacts"
+        self.global_impact_axis = getImpactsAxes(fitter.indata, global_impacts=True)
+        self.grouped_impact_axis = getGroupedImpactsAxes(
+            fitter.indata, bin_by_bin_stat=fitter.binByBinStat, per_process=False
+        )
+        self.grouped_global_impact_axis = getGroupedImpactsAxes(
+            fitter.indata,
+            bin_by_bin_stat=fitter.binByBinStat,
+            per_process=fitter.binByBinStatMode == "full",
         )
 
         self.parms = fitter.parms
@@ -329,7 +342,11 @@ class Workspace:
         # write out histograms
         axis_parms = hist.axis.StrCategory(parms, name="parms")
         axis_impacts = self.global_impact_axis if global_impacts else self.impact_axis
-        axis_impacts_grouped = self.grouped_impact_axis
+        axis_impacts_grouped = (
+            self.grouped_global_impact_axis
+            if global_impacts
+            else self.grouped_impact_axis
+        )
 
         self.add_hist(base_name, [axis_parms, axis_impacts], values=impacts)
 
@@ -416,7 +433,7 @@ class Workspace:
                 )
 
             if impacts_grouped is not None:
-                axis_impacts_grouped = self.grouped_impact_axis
+                axis_impacts_grouped = self.grouped_global_impact_axis
                 self.add_hist(
                     f"{name}_global_impacts_grouped",
                     [*hist_axes, axis_impacts_grouped],
