@@ -40,9 +40,12 @@ class Fitter:
         self.binByBinStatMode = options.binByBinStatMode
 
         if options.binByBinStatType == "automatic":
-            self.binByBinStatType = (
-                "normal-additive" if options.externalCovariance else "gamma"
-            )
+            if options.externalCovariance:
+                self.binByBinStatType = "normal-additive"
+            elif options.binByBinStatMode == "full":
+                self.binByBinStatType = "normal-multiplicative"
+            else:
+                self.binByBinStatType = "gamma"
         else:
             self.binByBinStatType = options.binByBinStatType
 
@@ -578,7 +581,6 @@ class Fitter:
                     ),
                     data_variances,
                 )
-
         elif data_randomize == "none":
             self.set_nobs(data_nom, data_variances)
 
@@ -705,7 +707,6 @@ class Fitter:
                 pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
                 dlcdx = t1.gradient(lc, self.x)
                 dbetadx = t1.jacobian(beta, self.x)
-
             # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
             pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
             # d2lcdx2 is diagonal so we can use gradient instead of jacobian
@@ -793,7 +794,6 @@ class Fitter:
                     val = lbeta
 
             pdldbeta = t1.gradient(val, self.ubeta)
-
         if self.externalCovariance and profile:
             pd2ldbeta2_matrix = t2.jacobian(pdldbeta, self.ubeta)
             pd2ldbeta2 = tf.linalg.LinearOperatorFullMatrix(
@@ -1234,7 +1234,6 @@ class Fitter:
 
                 nexp_profile = nexp[: self.indata.nbins]
                 beta0 = self.beta0[: self.indata.nbins]
-
                 varbeta = self.varbeta[: self.indata.nbins]
 
                 if self.chisqFit:
