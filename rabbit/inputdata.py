@@ -57,6 +57,10 @@ class FitInputData:
 
                     mask = np.isin(self.pseudodatanames, pseudodata)
                     indices = np.where(mask)[0]
+                    if not indices.size:
+                        raise ValueError(
+                            f"Invalid pseudodata choice {pseudodata}. Valid choices are {self.pseudodatanames}"
+                        )
 
                     self.pseudodata_obs = tf.gather(
                         self.pseudodata_obs, indices, axis=1
