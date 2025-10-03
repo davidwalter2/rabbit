@@ -85,6 +85,7 @@ def plotImpacts(
     show_numbers=False,
     show_legend=True,
     legend_pos="bottom",
+    diff_pulls=True,
 ):
     impacts = impacts and bool(np.count_nonzero(df["absimpact"]))
     ncols = pulls + impacts
@@ -391,6 +392,10 @@ def plotImpacts(
         if spacing > 0.5 * pullrange:  # make sure to have at least two ticks
             spacing /= 2.0
         xaxis_title = "Nuisance parameter"
+        if diff_pulls:
+            xaxis_title += "<br> θ-θ₀"
+        else:
+            xaxis_title += "<br> θ"
         info = dict(
             xaxis=dict(
                 range=[-pullrange, pullrange], dtick=spacing, **gridargs, **tickargs
@@ -449,6 +454,7 @@ def readFitInfoFromFile(
     stat=0.0,
     normalize=False,
     scale=1,
+    diff_pulls=True,
 ):
     if poi is not None:
         out = io_tools.read_impacts_poi(
@@ -531,9 +537,12 @@ def readFitInfoFromFile(
             pulls_prefit = pulls_prefit[mask]
             constraints_prefit = constraints_prefit[mask]
 
-        df["pull"] = pulls
         df["pull_prefit"] = pulls_prefit
-        df["pull"] = pulls - pulls_prefit
+
+        if diff_pulls:
+            df["pull"] = pulls - pulls_prefit
+        else:
+            df["pull"] = pulls
         df["abspull"] = np.abs(df["pull"])
 
         if asym:
@@ -863,6 +872,11 @@ def parseArgs():
         default=1.0,
         help="Scale impacts by this number",
     )
+    parser.add_argument(
+        "--pullsNoDiff",
+        action="store_true",
+        help="Plot actual nuisance parameter value, by default nuisance parameter difference w.r.t. prefit value",
+    )
     return parser.parse_args()
 
 
@@ -921,6 +935,7 @@ def make_plots(
         ref_name=args.refName,
         show_numbers=args.showNumbers,
         show_legend=not group and not args.noImpacts,
+        diff_pulls=not args.pullsNoDiff,
     )
 
     if args.num and args.num < int(df.shape[0]):
@@ -962,6 +977,7 @@ def load_dataframe_parms(
             stat=args.stat / 100.0,
             normalize=normalize,
             scale=args.scaleImpacts,
+            diff_pulls=not args.pullsNoDiff,
         )
     elif group:
         df = readFitInfoFromFile(
@@ -988,6 +1004,7 @@ def load_dataframe_parms(
             normalize=normalize,
             grouping=grouping,
             scale=args.scaleImpacts,
+            diff_pulls=not args.pullsNoDiff,
         )
         df = df.merge(df_ref, how="outer", on="label", suffixes=("", "_ref"))
 
