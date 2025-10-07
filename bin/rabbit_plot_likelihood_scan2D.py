@@ -94,10 +94,47 @@ def parseArgs():
         help="Legend text size (small: axis ticks size, large: axis label size, number)",
     )
     parser.add_argument(
+        "--xlabel",
+        type=str,
+        default=None,
+        help="x axis label",
+    )
+    parser.add_argument(
+        "--ylabel",
+        type=str,
+        default=None,
+        help="y axis label",
+    )
+    parser.add_argument(
         "--config",
         type=str,
         default=None,
         help="Path to config file for style formatting",
+    )
+    parser.add_argument(
+        "--noHessian",
+        action="store_true",
+        help="Don't show hessian contour",
+    )
+    parser.add_argument(
+        "--noScan",
+        action="store_true",
+        help="Don't show map from likelihood scan",
+    )
+    parser.add_argument(
+        "--noScanContour",
+        action="store_true",
+        help="Don't show contour line from likelihood scan",
+    )
+    parser.add_argument(
+        "--noContour",
+        action="store_true",
+        help="Don't show contour from contour scan",
+    )
+    parser.add_argument(
+        "--spiralScan",
+        action="store_true",
+        help="Plot spiral scan illustration",
     )
     return parser.parse_args()
 
@@ -131,6 +168,7 @@ def plot_scan(
     cov,
     h_scan,
     h_contour,
+    scan_contour=True,
     xlabel="x",
     ylabel="y",
     confidence_levels=[
@@ -141,6 +179,7 @@ def plot_scan(
     title=None,
     subtitle=None,
     titlePos=0,
+    spiral_scan=False,
 ):
 
     # Parameterize ellipse
@@ -155,27 +194,28 @@ def plot_scan(
     else:
         right = 0.99
 
-    fig, ax = plt.subplots(figsize=(6, 4))
-    fig.subplots_adjust(left=0.16, bottom=0.14, right=right, top=0.94)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    fig.subplots_adjust(left=0.14, bottom=0.14, right=right, top=0.93)
 
     # Plot mean point
     ax.scatter(px, py, color="red", marker="x", label="Best fit")
 
     for i, cl in enumerate(levels):
-        xy = ellipse(cov, px, py, cl)(t)
+        if cov is not None:
+            xy = ellipse(cov, px, py, cl)(t)
 
-        label_contour = None
-        label_hess = None
-        if i == 0:
-            label_contour = "Contour scan"
-            label_hess = "Hessian"
-            linestyle = "-"
-        if i == 1:
-            linestyle = "--"
+            label_contour = None
+            label_hess = None
+            if i == 0:
+                label_contour = "Contour scan"
+                label_hess = "Hessian"
+                linestyle = "-"
+            if i == 1:
+                linestyle = "--"
 
-        ax.plot(
-            xy[0], xy[1], color="red", linestyle=linestyle, label=label_hess
-        )  # f"{cl}σ")
+            ax.plot(
+                xy[0], xy[1], color="red", linestyle=linestyle, label=label_hess
+            )  # f"{cl}σ")
 
         if h_contour is not None and str(cl) in h_contour.axes["confidence_level"]:
             x_contour = h_contour[{"confidence_level": str(cl), "params": 0}].values()
@@ -195,30 +235,92 @@ def plot_scan(
         y_scan = np.array(h_scan.axes["scan_y"]).astype(float)
         nll_values = 2 * h_scan.values()
         plt.pcolormesh(
-            x_scan, y_scan, nll_values, shading="auto", cmap="plasma", zorder=0
+            x_scan, y_scan, nll_values, shading="auto", cmap="Blues", zorder=0
         )
         plt.colorbar(label=r"$-2\,\Delta \log L$")
 
-        # Overlay contours for 68% and 95% confidence levels
-        linestyles = ["-", "--", "."]
+        if spiral_scan:
+            # plot path of spiral scan for illustration
+            Xc, Yc = np.meshgrid(x_scan, y_scan)
 
-        contour = plt.contour(
-            x_scan,
-            y_scan,
-            nll_values,
-            linestyles=linestyles[: len(levels)],
-            levels=levels,
-            colors="black",
-        )
-        plt.clabel(
-            contour,
-            fmt={l: rf"{c*100}%" for l, c in zip(levels, confidence_levels)},
-            colors="black",
-        )
+            spiral_path = []
+            visited = np.zeros_like(h_scan, dtype=bool)
+            ny = len(y_scan)
+            nx = len(x_scan)
+            i, j = ny // 2, nx // 2  # start from the center
+            spiral_path.append((Xc[i, j], Yc[i, j]))
+            visited[i, j] = True
 
-        ax.plot(
-            [], [], label="Likelihood scan", marker="none", color="black", linestyle="-"
-        )
+            dirs = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+            step = 1
+
+            while not visited.all():
+                for d in range(4):
+                    di, dj = dirs[d]
+                    for _ in range(step):
+                        i += di
+                        j += dj
+                        if step == 7 and Xc[i, j] < np.float32(px):
+                            break
+
+                        if 0 <= i < ny and 0 <= j < nx and not visited[i, j]:
+                            spiral_path.append((Xc[i, j], Yc[i, j]))
+                            visited[i, j] = True
+                    if step == 7:
+                        break
+                    if d % 2 == 1:
+                        step += (
+                            1  # increase step size after completing a horizontal pass
+                        )
+                if step == 7:
+                    break
+
+            spiral_path = np.array(spiral_path)
+            ax.plot(
+                spiral_path[:-5, 0],
+                spiral_path[:-5, 1],
+                color="red",
+                lw=2,
+                label="Spiral Path",
+            )
+
+            end = spiral_path[-5]
+            prev = spiral_path[-6]
+
+            dx = end[0] - prev[0]
+            dy = end[1] - prev[1]
+
+            scale = 1.2  # scale up the arrow length
+            arrow_end = end + 0.005 + scale * np.array([dx, dy])
+
+            ax.annotate(
+                "",
+                xy=arrow_end,
+                xytext=end + 0.005,
+                arrowprops=dict(arrowstyle="->", color="red", lw=2),
+            )
+
+        if scan_contour:
+            # Overlay contours for 68% and 95% confidence levels
+            linestyles = ["-", "--", "."]
+
+            contour = plt.contour(
+                x_scan,
+                y_scan,
+                nll_values,
+                linestyles=linestyles[: len(levels)],
+                levels=levels,
+                colors="black",
+            )
+            plt.clabel(
+                contour,
+                fmt={l: rf"{c*100}%" for l, c in zip(levels, confidence_levels)},
+                colors="black",
+            )
+
+            ax.plot(
+                [], [], label="Likelihood", marker="none", color="black", linestyle="-"
+            )
 
     plot_tools.add_decor(
         ax,
@@ -246,7 +348,6 @@ def main():
     args = parseArgs()
     fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
     config = plot_tools.load_config(args.config)
-    syst_labels = getattr(config, "systematics_labels", {})
 
     meta = {
         "tensorfit": meta["meta_info"],
@@ -267,15 +368,19 @@ def main():
         py_value = h_params[{"parms": py}].value
 
         cov = None
-        if h_cov is not None:
+        if h_cov is not None and not args.noHessian:
             cov = h_cov[{"parms_x": [px, py], "parms_y": [px, py]}].values()
 
         h_contour_params = None
-        if h_contour is not None and f"{px}-{py}" in h_contour.axes["param_tuple"]:
+        if (
+            h_contour is not None
+            and f"{px}-{py}" in h_contour.axes["param_tuple"]
+            and not args.noContour
+        ):
             h_contour_params = h_contour[{"param_tuple": f"{px}-{py}"}]
 
         h_scan = None
-        if f"nll_scan2D_{px}_{py}" in fitresult.keys():
+        if f"nll_scan2D_{px}_{py}" in fitresult.keys() and not args.noScan:
             h_scan = fitresult[f"nll_scan2D_{px}_{py}"].get()
 
         fig = plot_scan(
@@ -285,11 +390,13 @@ def main():
             cov,
             h_scan,
             h_contour_params,
-            xlabel=syst_labels.get(px, px),
-            ylabel=syst_labels.get(py, py),
+            scan_contour=not args.noScanContour,
+            xlabel=plot_tools.get_axis_label(config, px, args.xlabel),
+            ylabel=plot_tools.get_axis_label(config, py, args.ylabel),
             title=args.title,
             subtitle=args.subtitle,
             titlePos=args.titlePos,
+            spiral_scan=args.spiralScan,
         )
         os.makedirs(args.outpath, exist_ok=True)
         outfile = os.path.join(args.outpath, f"nll_scan2D_{px}_{py}")

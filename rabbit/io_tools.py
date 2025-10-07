@@ -14,11 +14,8 @@ def get_fitresult(fitresult_filename, result=None, meta=False):
         key = f"{key}_{result}"
     elif key not in h5file.keys():  # fallback in case only asimov was fit
         key = f"{key}_asimov"
-        if key not in h5file.keys():
-            raise ValueError(
-                f"'{key}' not in h5file, available keys are {h5file.keys()}"
-            )
-
+    if key not in h5file.keys():
+        raise ValueError(f"'{key}' not in h5file, available keys are {h5file.keys()}")
     h5results = ioutils.pickle_load_h5py(h5file[key])
     if meta:
         meta = ioutils.pickle_load_h5py(h5file["meta"])
@@ -121,7 +118,7 @@ def get_postfit_hist_cov(fitresult, physics_model="Basemodel", channels=None):
         found_channels = [c for c in result["channels"].keys() if c in channels]
         if list(channels) != list(found_channels):
             raise RuntimeError(
-                f"Not all channels found in fitresult or the order is wrong, requested: {channels} and found {found_channels}"
+                f"Not all channels found in fitresult or the order is wrong, requested: {channels} and found {found_channels}. Available: {result["channels"].keys()}."
             )
         h_data = [
             result["channels"][c]["hist_postfit_inclusive"].get() for c in channels
