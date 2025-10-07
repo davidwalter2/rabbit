@@ -82,9 +82,11 @@ def plotImpacts(
     asym_pulls=False,
     include_ref=False,
     ref_name="ref.",
+    name="",
     show_numbers=False,
     show_legend=True,
     legend_pos="bottom",
+    group=None,
 ):
     impacts = impacts and bool(np.count_nonzero(df["absimpact"]))
     ncols = pulls + impacts
@@ -232,6 +234,7 @@ def plotImpacts(
         fig.add_trace(
             make_bar(
                 key="impact_up",
+                name=f"+1σ impact ({name})" if name else "+1σ impact",
                 text_on_bars=text_on_bars,
                 opacity=0.5 if include_ref else 1,
             ),
@@ -247,28 +250,29 @@ def plotImpacts(
                 col=1,
             )
 
-        fig.add_trace(
-            make_bar(
-                key="impact_down",
-                name="-1σ impact",
-                color="#e41a1c",
-                text_on_bars=text_on_bars,
-                opacity=0.5 if include_ref else 1,
-            ),
-            row=1,
-            col=1,
-        )
-        if include_ref:
+        if not group:
             fig.add_trace(
                 make_bar(
-                    key="impact_down_ref",
-                    name=f"-1σ impact ({ref_name})",
+                    key="impact_down",
+                    name=f"-1σ impact ({name})" if name else "-1σ impact",
                     color="#e41a1c",
-                    filled=False,
+                    text_on_bars=text_on_bars,
+                    opacity=0.5 if include_ref else 1,
                 ),
                 row=1,
                 col=1,
             )
+            if include_ref:
+                fig.add_trace(
+                    make_bar(
+                        key="impact_down_ref",
+                        name=f"-1σ impact ({ref_name})",
+                        color="#e41a1c",
+                        filled=False,
+                    ),
+                    row=1,
+                    col=1,
+                    )
 
         impact_range = df["absimpact"].max()
         if include_ref:
@@ -720,6 +724,11 @@ def parseArgs():
         help="Name of reference input for legend",
     )
     parser.add_argument(
+        "--name",
+        type=str,
+        help="Name of input for legend",
+    )
+    parser.add_argument(
         "-s",
         "--sort",
         default="absimpact",
@@ -919,8 +928,10 @@ def make_plots(
         asym_pulls=args.diffPullAsym,
         include_ref=include_ref,
         ref_name=args.refName,
+        name=args.name,
         show_numbers=args.showNumbers,
-        show_legend=not group and not args.noImpacts,
+        show_legend=(not group and not args.noImpacts) or include_ref or args.name is not None,
+        group=group,
     )
 
     if args.num and args.num < int(df.shape[0]):
