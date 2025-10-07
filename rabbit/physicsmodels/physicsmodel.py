@@ -103,7 +103,7 @@ class CompositeModel(PhysicsModel):
         # make a composite model with unique channel names
         for m in models:
             for k, c in m.channel_info.items():
-                self.channel_info[f"{m.key}_{k}"] = c
+                self.channel_info[f"{m.key} {k}"] = c
 
             self.ndf_reduction += m.ndf_reduction
             # if any of the submodels does not process data, the composite model also does not
@@ -175,7 +175,7 @@ class Channelmodel(PhysicsModel):
             }
         }
 
-        self.has_data = not channel_info["masked"]
+        self.has_data = not channel_info.get("masked", False)
 
     def compute(self, params, observables):
         return observables

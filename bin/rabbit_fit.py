@@ -660,7 +660,7 @@ def main():
         postfit_time = []
         fit_time = []
         for i, ifit in enumerate(fits):
-            group = "results"
+            group = ["results"]
 
             if args.pseudoData is None:
                 datasets = [
@@ -675,13 +675,13 @@ def main():
 
                 ifitter.defaultassign()
                 if ifit == -1:
-                    group += "_asimov"
+                    group.append("asimov")
                     ifitter.set_nobs(ifitter.expected_yield())
                 else:
                     if ifit == 0:
                         ifitter.set_nobs(data_values)
                     elif ifit >= 1:
-                        group += f"_toy{ifit}"
+                        group.append(f"toy{ifit}")
                         ifitter.toyassign(
                             data_values,
                             syst_randomize=args.toysSystRandomize,
@@ -692,7 +692,10 @@ def main():
 
                 if np.shape(datasets)[0] > 1:
                     # in case there are more than 1 pseudodata set, label each one
-                    group += f"_{indata.pseudodatanames[j]}"
+                    if j == 0:
+                        group.append(indata.pseudodatanames[j])
+                    else:
+                        group[-1] = indata.pseudodatanames[j]
 
                 ws.add_parms_hist(
                     values=ifitter.x,
@@ -722,7 +725,7 @@ def main():
                 else:
                     fit_time.append(time.time())
 
-                ws.dump_and_flush(group)
+                ws.dump_and_flush("_".join(group))
                 postfit_time.append(time.time())
 
     end_time = time.time()

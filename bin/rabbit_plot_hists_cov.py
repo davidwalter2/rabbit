@@ -178,7 +178,7 @@ def plot_matrix(
         ax,
         args.title,
         args.subtitle,
-        data=False,
+        data=True,
         lumi=None,
         loc=args.titlePos,
     )
