@@ -118,7 +118,7 @@ def get_postfit_hist_cov(fitresult, physics_model="Basemodel", channels=None):
         found_channels = [c for c in result["channels"].keys() if c in channels]
         if list(channels) != list(found_channels):
             raise RuntimeError(
-                f"Not all channels found in fitresult or the order is wrong, requested: {channels} and found {found_channels}. Available: {result["channels"].keys()}."
+                f"Not all channels found in fitresult or the order is wrong, requested: {channels} and found {found_channels}. Available: {result['channels'].keys()}."
             )
         h_data = [
             result["channels"][c]["hist_postfit_inclusive"].get() for c in channels
