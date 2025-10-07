@@ -224,27 +224,16 @@ class Fitter:
                             )
                         )
                     elif self.externalCovariance and self.binByBinStatMode == "full":
-                        # make copies of each element nproc x nproc submatrices
-                        cov_inv = tf.expand_dims(
-                            tf.expand_dims(self.data_cov_inv, -1), -1
+                        varbetasum = tf.reduce_sum(
+                            self.varbeta[: self.indata.nbins], axis=1
                         )
-                        cov_inv = tf.broadcast_to(
-                            cov_inv,
-                            [*self.data_cov_inv.shape, sbeta.shape[1], sbeta.shape[1]],
-                        )
-                        cov_inv = tf.transpose(
-                            cov_inv, perm=[0, 2, 1, 3]
-                        )  # switch axes to be aligned with sbeta (nbins x nbins) x (nproc x nproc) -> (nbins x nproc) x (nbins x nproc)
 
-                        # flatten nproc, nbin axes
-                        sbeta = tf.reshape(sbeta, (-1,))
-                        sbeta = tf.linalg.LinearOperatorDiag(sbeta)
-                        cov_inv = tf.reshape(cov_inv, sbeta.shape)
+                        varbetasum = tf.linalg.LinearOperatorDiag(varbetasum)
 
                         self.betaauxlu = tf.linalg.lu(
-                            sbeta @ cov_inv @ sbeta
+                            varbetasum @ self.data_cov_inv
                             + tf.eye(
-                                cov_inv.shape[0],
+                                self.data_cov_inv.shape[0],
                                 dtype=self.data_cov_inv.dtype,
                             )
                         )
@@ -1249,39 +1238,87 @@ class Fitter:
                         beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
+                        betamask = self.betamask[: self.indata.nbins]
 
                         if self.externalCovariance and self.binByBinStatMode == "lite":
-                            raise NotImplementedError()
+
+                            nexp_profile_m = tf.linalg.LinearOperatorDiag(nexp_profile)
+                            A = (
+                                nexp_profile_m @ self.data_cov_inv @ nexp_profile_m
+                                + tf.linalg.diag(kstat)
+                            )
+                            b = (
+                                nexp_profile_m
+                                @ (self.data_cov_inv @ self.nobs[:, None])
+                                + (kstat * beta0)[:, None]
+                            )
+
+                            # Cholesky solve sometimes does not give corret result
+                            # chol = tf.linalg.cholesky(A)
+                            # beta = tf.linalg.cholesky_solve(chol, b)
+
+                            beta = tf.linalg.solve(A, b)
+
+                            beta = tf.squeeze(beta, axis=-1)
+                            beta = tf.where(betamask, beta0, beta)
                         elif (
                             self.externalCovariance and self.binByBinStatMode == "full"
                         ):
-                            raise NotImplementedError()
+                            norm_profile = norm[: self.indata.nbins]
+
+                            # first solve sum of processes
+                            nbeta0 = tf.reduce_sum(norm_profile * beta0, axis=1)
+                            n2kstat = tf.square(norm_profile) / kstat
+                            n2kstat = tf.where(
+                                betamask, tf.constant(0.0, dtype=varbeta.dtype), n2kstat
+                            )
+                            n2kstatsum = tf.reduce_sum(n2kstat, axis=1)
+                            n2kstatsum_m = tf.linalg.LinearOperatorDiag(n2kstatsum)
+
+                            A = n2kstatsum_m @ self.data_cov_inv + tf.eye(
+                                self.data_cov_inv.shape[0],
+                                dtype=self.data_cov_inv.dtype,
+                            )
+                            b = (
+                                n2kstatsum_m @ self.data_cov_inv @ (self.nobs[:, None])
+                                + nbeta0[:, None]
+                            )
+
+                            # Cholesky solve sometimes does not give corret result
+                            # chol = tf.linalg.cholesky(A)
+                            # nbeta = tf.linalg.cholesky_solve(chol, b)
+
+                            nbeta = tf.linalg.solve(A, b)
+
+                            # now solve for beta [nprocesses x nbins]
+                            beta = beta0 - norm_profile / kstat * (
+                                self.data_cov_inv @ (nbeta - self.nobs[:, None])
+                            )
+                            beta = tf.where(betamask, beta0, beta)
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
                             n2kstat = tf.square(norm_profile) / kstat
                             n2kstat = tf.where(
                                 betamask, tf.constant(0.0, dtype=varbeta.dtype), n2kstat
                             )
-                            n2kststsum = tf.reduce_sum(n2kstat, axis=-1)
+                            n2kstatsum = tf.reduce_sum(n2kstat, axis=-1)
 
                             nbeta = (
-                                self.nobs / self.varnobs * n2kststsum
+                                self.nobs / self.varnobs * n2kstatsum
                                 + tf.reduce_sum(norm_profile * beta0, axis=-1)
-                            ) / (1 + 1 / self.varnobs * n2kststsum)
+                            ) / (1 + 1 / self.varnobs * n2kstatsum)
                             beta = (
                                 beta0
                                 + (1 / self.varnobs * (self.nobs - nbeta))[..., None]
                                 * norm_profile
                                 / kstat
                             )
-                            betamask = self.betamask[: self.indata.nbins]
                             beta = tf.where(betamask, beta0, beta)
                         else:
                             beta = (
                                 nexp_profile * self.nobs / self.varnobs + kstat * beta0
                             ) / (kstat + nexp_profile * nexp_profile / self.varnobs)
 
-                            betamask = self.betamask[: self.indata.nbins]
                             beta = tf.where(betamask, beta0, beta)
 
                     elif self.binByBinStatType == "normal-additive":
@@ -1299,27 +1336,23 @@ class Fitter:
                         elif (
                             self.externalCovariance and self.binByBinStatMode == "full"
                         ):
-                            raise NotImplementedError()
-                            # nbin, nproc = sbeta.shape
+                            # first solve for sum of processes
+                            sbetabeta0sum = tf.reduce_sum(sbeta * beta0, axis=1)
+                            varbetasum = tf.reduce_sum(varbeta, axis=1)
+                            varbetasum = tf.linalg.LinearOperatorDiag(varbetasum)
 
-                            # res = (
-                            #     self.data_cov_inv @ (self.nobs - nexp_profile)[:, None]
-                            # )
-
-                            # # make copies of each element nproc x nproc submatrices
-                            # res = tf.broadcast_to(res, [nbin, nproc])
-
-                            # # flatten nproc, nbin axes
-                            # res = tf.reshape(res, [tf.size(res)])
-                            # sbeta = tf.reshape(sbeta, [tf.size(beta0)])
-                            # sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
-
-                            # beta = tf.linalg.lu_solve(
-                            #     *self.betaauxlu,
-                            #     sbeta_m @ res[:, None]
-                            #     + tf.reshape(beta0, [tf.size(beta0)])[:, None],
-                            # )
-                            # beta = tf.reshape(beta, (nbin, nproc))
+                            nbeta = tf.linalg.lu_solve(
+                                *self.betaauxlu,
+                                varbetasum
+                                @ self.data_cov_inv
+                                @ ((self.nobs - nexp_profile)[:, None])
+                                + sbetabeta0sum[:, None],
+                            )
+                            # second solve for beta
+                            beta = beta0 - sbeta * (
+                                self.data_cov_inv
+                                @ (nbeta + nexp_profile[:, None] - self.nobs[:, None])
+                            )
 
                         elif self.binByBinStatMode == "full":
                             varbetasum = tf.reduce_sum(varbeta, axis=-1)
