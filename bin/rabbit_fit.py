@@ -316,13 +316,13 @@ def make_parser():
         "--chisqFit",
         default=False,
         action="store_true",
-        help="Perform chi-square fit instead of likelihood fit",
+        help="Perform diagonal chi-square fit instead of poisson likelihood fit",
     )
     parser.add_argument(
-        "--externalCovariance",
+        "--covarianceFit",
         default=False,
         action="store_true",
-        help="Using an external covariance matrix for the observations in the chi-square fit",
+        help="Perform chi-square fit using covariance matrix for the observations",
     )
     parser.add_argument(
         "--prefitUnconstrainedNuisanceUncertainty",
