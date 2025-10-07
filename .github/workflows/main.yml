@@ -244,13 +244,12 @@ jobs:
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix pseudodata
           -t 0 --pseudoData original --doImpacts --globalImpacts --unblind ^sig$
 
-      - name: chi2 fit
+      - name: covariance fit
         run: >- 
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix chi2
-          -t 0 --unblind --chisqFit --externalCovariance --doImpacts --globalImpacts 
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix covariance
+          -t 0 --unblind --covarianceFit --doImpacts --globalImpacts 
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
-
 
       - name: linearized solution
         run: >- 
