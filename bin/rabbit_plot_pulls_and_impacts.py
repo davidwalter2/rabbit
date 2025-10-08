@@ -232,10 +232,12 @@ def plotImpacts(
                 name=name,
             )
 
+        sign = "+/-" if (oneSidedImpacts and not any(df["impact_down"] > 0)) else "+"
+        label = f"{sign}1σ impact ({name})" if name else f"{sign}1σ impact"
         fig.add_trace(
             make_bar(
                 key="impact_up",
-                name=f"+1σ impact ({name})" if name else "+1σ impact",
+                name=label,
                 text_on_bars=text_on_bars,
                 opacity=0.5 if include_ref else 1,
             ),
@@ -245,13 +247,15 @@ def plotImpacts(
         if include_ref:
             fig.add_trace(
                 make_bar(
-                    key="impact_up_ref", name=f"+1σ impact ({ref_name})", filled=False
+                    key="impact_up_ref",
+                    name=f"{sign}1σ impact ({ref_name})",
+                    filled=False,
                 ),
                 row=1,
                 col=1,
             )
 
-        if not oneSidedImpacts:
+        if (oneSidedImpacts and any(df["impact_down"] > 0)) or not oneSidedImpacts:
             fig.add_trace(
                 make_bar(
                     key="impact_down",
