@@ -108,7 +108,7 @@ def printImpactsParm(args, fitresult, poi):
     printImpacts(args, impacts, labels, poi)
 
 
-def printImpacts(args, impacts, labels, poi, unit="unit"):
+def printImpacts(args, impacts, labels, poi, scale=1, unit="unit"):
     if args.sort:
 
         def is_scalar(val):
@@ -118,13 +118,15 @@ def printImpacts(args, impacts, labels, poi, unit="unit"):
         labels = labels[order]
         impacts = impacts[order]
 
+    scale = scale * args.scale
+
     nround = 5
     if args.asymImpacts:
         fimpact = (
-            lambda x: f"{round(max(x)*args.scale, nround)} / {round(min(x)*args.scale, nround)}"
+            lambda x: f"{round(max(x)*scale, nround)} / {round(min(x)*scale, nround)}"
         )
     else:
-        fimpact = lambda x: round(x * args.scale, nround)
+        fimpact = lambda x: round(x * scale, nround)
 
     if args.nuisance:
         if args.nuisance not in labels:
