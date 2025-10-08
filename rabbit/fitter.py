@@ -816,37 +816,6 @@ class Fitter:
 
         return dxdtheta0, dxdnobs, dxdbeta0
 
-    # def _expected_with_variance_optimized(self, fun_exp, skipBinByBinStat=False):
-    #     # compute uncertainty on expectation propagating through uncertainty on fit parameters using full covariance matrix
-
-    #     # FIXME this doesn't actually work for the positive semi-definite case
-    #     invhesschol = tf.linalg.cholesky(self.cov)
-
-    #     # since the full covariance matrix with respect to the bin counts is given by J^T R^T R J, then summing RJ element-wise squared over the parameter axis gives the diagonal elements
-
-    #     expected = fun_exp()
-
-    #     # dummy vector for implicit transposition
-    #     u = tf.ones_like(expected)
-    #     with tf.GradientTape(watch_accessed_variables=False) as t1:
-    #         t1.watch(u)
-    #         with tf.GradientTape() as t2:
-    #             expected = fun_exp()
-    #         # this returns dndx_j = sum_i u_i dn_i/dx_j
-    #         Ju = t2.gradient(expected, self.x, output_gradients=u)
-    #         Ju = tf.transpose(Ju)
-    #         Ju = tf.reshape(Ju, [-1, 1])
-    #         RJu = tf.matmul(tf.stop_gradient(invhesschol), Ju, transpose_a=True)
-    #         RJu = tf.reshape(RJu, [-1])
-    #     RJ = t1.jacobian(RJu, u)
-    #     sRJ2 = tf.reduce_sum(RJ**2, axis=0)
-    #     sRJ2 = tf.reshape(sRJ2, tf.shape(expected))
-    #     if self.binByBinStat and not skipBinByBinStat:
-    #         # add MC stat uncertainty on variance
-    #         sumw2 = tf.square(expected) / self.kstat
-    #         sRJ2 = sRJ2 + sumw2
-    #     return expected, sRJ2
-
     def _compute_expected(
         self, fun_exp, inclusive=True, profile=False, full=True, need_observables=True
     ):
