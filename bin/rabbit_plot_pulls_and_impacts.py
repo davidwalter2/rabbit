@@ -251,7 +251,7 @@ def plotImpacts(
                 col=1,
             )
 
-        if not group:
+        if not oneSidedImpacts:
             fig.add_trace(
                 make_bar(
                     key="impact_down",
