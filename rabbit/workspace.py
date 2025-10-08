@@ -259,6 +259,18 @@ class Workspace:
         )
         self.add_hist(hist_name, [axis_parms_x, axis_parms_y], cov)
 
+    def add_nonprofiled_impacts_hist(self, parms, values, name="nonprofiled_impacts"):
+        axis_impacts = hist.axis.StrCategory(parms, name="impacts")
+        axis_parms = hist.axis.StrCategory(
+            np.array(self.parms).astype(str), name="parms"
+        )
+        self.add_hist(
+            name,
+            [axis_impacts, axis_downUpVar, axis_parms],
+            values,
+            label="Impacts of non profiled parameter variations",
+        )
+
     def add_nll_scan_hist(self, param, scan_values, nll_values, base_name="nll_scan"):
         axis_scan = hist.axis.StrCategory(
             np.array(scan_values).astype(str), name="scan"

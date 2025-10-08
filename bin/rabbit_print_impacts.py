@@ -20,7 +20,11 @@ def parseArgs():
         "-s", "--sort", action="store_true", help="Sort nuisances by impact"
     )
     parser.add_argument(
-        "--globalImpacts", action="store_true", help="Print global impacts"
+        "--impactType",
+        type=str,
+        choices=["traditional", "global", "nonprofiled"],
+        default="traditional",
+        help="Impact definition",
     )
     parser.add_argument(
         "--asymImpacts",
@@ -50,6 +54,12 @@ def parseArgs():
         "--relative",
         action="store_true",
         help="Print relative uncertainty, only for '--hist'",
+    )
+    parser.add_argument(
+        "--scale",
+        default=1,
+        type=float,
+        help="Scale impacts",
     )
     return parser.parse_args()
 
@@ -84,14 +94,15 @@ def printImpactsParm(args, fitresult, poi):
     impacts, labels = io_tools.read_impacts_poi(
         fitresult,
         poi,
+        add_total=args.impactType != "nonprofiled",
         asym=args.asymImpacts,
         grouped=not args.ungroup,
-        global_impacts=args.globalImpacts,
+        impact_type=args.impactType,
     )
     printImpacts(args, impacts, labels, poi)
 
 
-def printImpacts(args, impacts, labels, poi, scale=100, unit="nuisance unc. %"):
+def printImpacts(args, impacts, labels, poi, unit="unit"):
     if args.sort:
 
         def is_scalar(val):
@@ -104,10 +115,10 @@ def printImpacts(args, impacts, labels, poi, scale=100, unit="nuisance unc. %"):
     nround = 5
     if args.asymImpacts:
         fimpact = (
-            lambda x: f"{round(max(x)*scale, nround)} / {round(min(x)*100, nround)}"
+            lambda x: f"{round(max(x)*args.scale, nround)} / {round(min(x)*args.scale, nround)}"
         )
     else:
-        fimpact = lambda x: round(x * scale, nround)
+        fimpact = lambda x: round(x * args.scale, nround)
 
     if args.nuisance:
         if args.nuisance not in labels:
