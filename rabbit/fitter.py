@@ -554,6 +554,67 @@ class Fitter:
                     )
                 )
 
+    def nonprofiled_impacts_parms(self):
+        x_tmp = tf.identity(self.x.value())
+        x_tmp_tiled = tf.tile(
+            tf.reshape(x_tmp, [1, 1, -1]), [len(self.frozen_indices), 2, 1]
+        )
+        nonprofiled_impacts = tf.Variable(x_tmp_tiled)
+
+        for i, idx in enumerate(self.frozen_indices):
+            logger.info(f"Now at parameter {self.frozen_params[i]}")
+
+            for j, variation in enumerate((1, -1)):
+                self.x.assign(x_tmp)
+                # vary the non-profile parameter
+                self.x[idx].assign(variation)
+                # minimize
+                self.minimize()
+                # difference w.r.t. nominal fit
+                diff = x_tmp - self.x.value()
+                nonprofiled_impacts[i, j].assign(diff)
+
+            # back to original value
+            self.x[idx].assign(x_tmp[idx])
+
+        # grouped nonprofiled impacts
+        @tf.function
+        def envelope(values):
+            zeros = tf.zeros(
+                (tf.shape(values)[0], tf.shape(values)[-1]), dtype=values.dtype
+            )
+            vmin = tf.reduce_min(values, axis=1)
+            vmax = tf.reduce_max(values, axis=1)
+            lower = -tf.sqrt(tf.reduce_sum(tf.minimum(zeros, vmin) ** 2, axis=0))
+            upper = tf.sqrt(tf.reduce_sum(tf.maximum(zeros, vmax) ** 2, axis=0))
+            return tf.stack([lower, upper])
+
+        impact_group_names = []
+        impact_groups = []
+
+        for group, idxs in zip(self.indata.systgroups, self.indata.systgroupidxs):
+            frozen_mask = tf.constant(np.isin(self.frozen_indices, idxs))
+            frozen_idxs = tf.where(frozen_mask)
+            if tf.size(frozen_idxs) > 0:
+                selected_impacts = tf.gather(nonprofiled_impacts, frozen_idxs[:, 0])
+                group_env = envelope(selected_impacts)
+                impact_groups.append(group_env)
+                impact_group_names.append(group)
+
+        # Add total envelope
+        total_env = envelope(nonprofiled_impacts)
+        impact_groups.append(total_env)
+        impact_group_names.append(b"Total")
+
+        impact_groups = tf.stack(impact_groups)
+
+        return (
+            self.frozen_params,
+            nonprofiled_impacts.numpy(),
+            impact_group_names,
+            impact_groups.numpy(),
+        )
+
     def _compute_impact_group(self, v, idxs):
         cov_reduced = tf.gather(self.cov[self.npoi :, self.npoi :], idxs, axis=0)
         cov_reduced = tf.gather(cov_reduced, idxs, axis=1)

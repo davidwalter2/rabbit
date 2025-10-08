@@ -447,7 +447,7 @@ def readFitInfoFromFile(
     fitresult,
     poi,
     group=False,
-    global_impacts=False,
+    impact_type=False,
     grouping=None,
     asym=False,
     filters=[],
@@ -463,8 +463,8 @@ def readFitInfoFromFile(
             group,
             pulls=not group,
             asym=asym,
-            global_impacts=global_impacts,
-            add_total=group,
+            impact_type=impact_type,
+            add_total=group and not impact_type == "nonprofiled",
         )
         if group:
             impacts, labels = out
@@ -480,7 +480,7 @@ def readFitInfoFromFile(
                     True,
                     pulls=False,
                     asym=asym,
-                    global_impacts=global_impacts,
+                    impact_type=impact_type,
                     add_total=True,
                 )
 
@@ -812,14 +812,15 @@ def parseArgs():
     )
     parser.add_argument("--noImpacts", action="store_true", help="Don't show impacts")
     parser.add_argument(
-        "--globalImpacts",
-        action="store_true",
-        help="Show global impacts instead of traditional ones",
+        "--globalImpacts", action="store_true", help="Print global impacts"
+    )
+    parser.add_argument(
+        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
     )
     parser.add_argument(
         "--asymImpacts",
         action="store_true",
-        help="Show asymmetric numbers from likelihood confidence intervals",
+        help="Print asymmetric impacts from likelihood, otherwise symmetric from hessian",
     )
     parser.add_argument(
         "--showNumbers", action="store_true", help="Show values of impacts"
@@ -965,6 +966,12 @@ def load_dataframe_parms(
     grouping=None,
     translate_label={},
 ):
+    if args.globalImpacts:
+        impact_type = "global"
+    elif args.nonprofiledImpacts:
+        impact_type = "nonprofiled"
+    else:
+        impact_type = "traditional"
 
     if not group:
         df = readFitInfoFromFile(
@@ -972,7 +979,7 @@ def load_dataframe_parms(
             poi,
             False,
             asym=asym,
-            global_impacts=args.globalImpacts,
+            impact_type=impact_type,
             filters=args.filters,
             stat=args.stat / 100.0,
             normalize=normalize,
@@ -984,7 +991,8 @@ def load_dataframe_parms(
             fitresult,
             poi,
             True,
-            global_impacts=args.globalImpacts,
+            asym=asym,
+            impact_type=impact_type,
             filters=args.filters,
             stat=args.stat / 100.0,
             normalize=normalize,
@@ -998,7 +1006,7 @@ def load_dataframe_parms(
             poi,
             group,
             asym=asym,
-            global_impacts=args.globalImpacts,
+            impact_type=impact_type,
             filters=args.filters,
             stat=args.stat / 100.0,
             normalize=normalize,
@@ -1055,7 +1063,7 @@ def load_dataframe_hists(
         hist_impacts,
         hist_total,
         group,
-        global_impacts=args.globalImpacts,
+        impact_type="global",
         filters=args.filters,
         stat=args.stat / 100.0,
         normalize=normalize,
@@ -1069,7 +1077,7 @@ def load_dataframe_hists(
             hist_impacts_ref,
             hist_total_ref,
             group,
-            global_impacts=args.globalImpacts,
+            impact_type="global",
             filters=args.filters,
             stat=args.stat / 100.0,
             normalize=normalize,
@@ -1237,6 +1245,8 @@ def main():
         impacts_name = "impacts"
         if args.globalImpacts:
             impacts_name = f"global_{impacts_name}"
+        elif args.nonprofiledImpacts:
+            impacts_name = f"nonprofiled_{impacts_name}"
 
         grouping = None
         if args.grouping is not None:

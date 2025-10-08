@@ -20,16 +20,15 @@ def parseArgs():
         "-s", "--sort", action="store_true", help="Sort nuisances by impact"
     )
     parser.add_argument(
-        "--impactType",
-        type=str,
-        choices=["traditional", "global", "nonprofiled"],
-        default="traditional",
-        help="Impact definition",
+        "--globalImpacts", action="store_true", help="Print global impacts"
+    )
+    parser.add_argument(
+        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
     )
     parser.add_argument(
         "--asymImpacts",
         action="store_true",
-        help="Print asymmetric impacts from likelihood confidence intervals",
+        help="Print asymmetric impacts from likelihood, otherwise symmetric from hessian",
     )
     parser.add_argument(
         "inputFile",
@@ -91,13 +90,20 @@ def printImpactsParm(args, fitresult, poi):
     if args.relative:
         raise NotImplementedError("Relative uncertainty for POIs not implemented")
 
+    if args.globalImpacts:
+        impact_type = "global"
+    elif args.nonprofiledImpacts:
+        impact_type = "nonprofiled"
+    else:
+        impact_type = "traditional"
+
     impacts, labels = io_tools.read_impacts_poi(
         fitresult,
         poi,
-        add_total=args.impactType != "nonprofiled",
+        add_total=not args.nonprofiledImpacts,
         asym=args.asymImpacts,
         grouped=not args.ungroup,
-        impact_type=args.impactType,
+        impact_type=impact_type,
     )
     printImpacts(args, impacts, labels, poi)
 

@@ -578,26 +578,7 @@ def fit(args, fitter, ws, dofit=True):
 
     if args.nonProfiledImpacts:
         # TODO: based on covariance
-
-        nonprofiled_impacts = np.full(
-            (len(fitter.frozen_indices), 2, fitter.npoi + fitter.indata.nsyst),
-            fitter.x.value(),
-        )
-        for i, idx in enumerate(fitter.frozen_indices):
-            logger.info(f"Now at parameter {fitter.frozen_params[i]}")
-
-            x_tmp = nonprofiled_impacts[i, 0, idx]
-            for j, variation in enumerate((1, -1)):
-                # vary the non-profile parameter
-                fitter.x[idx].assign(variation)
-                # minimize
-                fitter.minimize()
-                # difference w.r.t. nominal fit
-                nonprofiled_impacts[i, j] -= fitter.x.value()
-            # back to original value
-            fitter.x[idx].assign(x_tmp)
-
-        ws.add_nonprofiled_impacts_hist(fitter.frozen_params, nonprofiled_impacts)
+        ws.add_nonprofiled_impacts_hist(*fitter.nonprofiled_impacts_parms())
 
     if args.scan is not None:
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
