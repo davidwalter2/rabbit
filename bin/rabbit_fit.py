@@ -141,7 +141,7 @@ def make_parser():
         ],
         type=float,
         nargs="+",
-        help="Confidence level in standard deviations for contour scans (1 = 1 sigma = 68%)",
+        help="Confidence level in standard deviations for contour scans (1 = 1 sigma = 68%%)",
     )
     parser.add_argument(
         "--contourScan2D",
@@ -292,7 +292,7 @@ def make_parser():
         specifying the model defined in rabbit/physicsmodels/ followed by arguments passed in the model __init__, 
         e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.  
         This argument can be called multiple times.
-        Custom models can be specified with the full path to the custom model e.g. '-m custom_modesl.MyCustomModel'.
+        Custom models can be specified with the full path to the custom model e.g. '-m custom_models.MyCustomModel'.
         """,
     )
     parser.add_argument(
