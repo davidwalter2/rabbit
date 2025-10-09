@@ -36,19 +36,19 @@ def read_impacts_poi(
     fitresult,
     poi,
     grouped=False,
-    global_impacts=False,
+    impact_type="traditional",
     pulls=False,
     add_total=True,
     asym=False,
 ):
     # read impacts of a single POI
 
-    if asym:
+    if asym and impact_type == "traditional":
         h_impacts = fitresult["contour_scans"].get()[{"confidence_level": "1.0"}]
     else:
         impact_name = "impacts"
-        if global_impacts:
-            impact_name = f"global_{impact_name}"
+        if impact_type != "traditional":
+            impact_name = f"{impact_type}_{impact_name}"
         if grouped:
             impact_name += "_grouped"
 
@@ -69,10 +69,10 @@ def read_impacts_poi(
 
     if pulls:
         pulls_labels, pulls, constraints = get_pulls_and_constraints(
-            fitresult, asym=asym
+            fitresult, asym=asym and impact_type == "traditional"
         )
         pulls_labels, pulls_prefit, constraints_prefit = get_pulls_and_constraints(
-            fitresult, asym=asym, prefit=True
+            fitresult, asym=asym and impact_type == "traditional", prefit=True
         )
         if len(pulls_labels) != len(labels):
             mask = [l in labels for l in pulls_labels]
