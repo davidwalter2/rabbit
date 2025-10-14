@@ -286,11 +286,6 @@ class Fitter:
         )
         self.frozen_params_mask = np.isin(self.parms, self.frozen_params)
         self.frozen_indices = np.where(self.frozen_params_mask)[0]
-        self.floating_indices = np.where(~self.frozen_params_mask)[0]
-
-        keep = tf.cast(~self.frozen_params_mask, dtype=self.indata.dtype)
-        # Outer product of keep vectors masks both rows & columns
-        self.frozen_params_mask2d = tf.tensordot(keep, keep, axes=0)  # shape [n, n]
 
     def init_blinding_values(self, unblind_parameter_expressions=[]):
 
@@ -660,9 +655,14 @@ class Fitter:
                 )
                 # vary the non-profile parameter
                 self.theta0[idx - self.npoi].assign(variation)
-                self.x[idx].assign(variation)
+                self.x[idx].assign(
+                    variation
+                )  # this should not be needed but should accelerates the minimization
                 # minimize
                 self.minimize()
+                val, grad, hess = self.loss_val_grad_hess()
+                edmval, cov = tfh.edmval_cov(grad, hess)
+                logger.info(f"edmval: {edmval}")
                 # difference w.r.t. nominal fit
                 diff = x_tmp - self.x.value()
                 nonprofiled_impacts[i, j].assign(diff)
@@ -1903,51 +1903,28 @@ class Fitter:
         with tf.GradientTape() as t:
             val = self._compute_loss()
         grad = t.gradient(val, self.x)
-
-        # grad = tf.where(
-        #     self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
-        # )
-
         return val, grad
 
     # FIXME in principle this version of the function is preferred
     # but seems to introduce some small numerical non-reproducibility
     @tf.function
     def loss_val_grad_hessp_fwdrev(self, p):
-        # p = tf.where(self.frozen_params_mask, tf.constant(0.0, dtype=p.dtype), p)
         p = tf.stop_gradient(p)
         with tf.autodiff.ForwardAccumulator(self.x, p) as acc:
             with tf.GradientTape() as grad_tape:
                 val = self._compute_loss()
             grad = grad_tape.gradient(val, self.x)
         hessp = acc.jvp(grad)
-
-        # grad = tf.where(
-        #     self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
-        # )
-        # hessp = tf.where(
-        #     self.frozen_params_mask, tf.constant(0.0, dtype=hessp.dtype), hessp
-        # )
-
         return val, grad, hessp
 
     @tf.function
     def loss_val_grad_hessp_revrev(self, p):
-        # p = tf.where(self.frozen_params_mask, tf.constant(0.0, dtype=p.dtype), p)
         p = tf.stop_gradient(p)
         with tf.GradientTape() as t2:
             with tf.GradientTape() as t1:
                 val = self._compute_loss()
             grad = t1.gradient(val, self.x)
         hessp = t2.gradient(grad, self.x, output_gradients=p)
-
-        # grad = tf.where(
-        #     self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
-        # )
-        # hessp = tf.where(
-        #     self.frozen_params_mask, tf.constant(0.0, dtype=hessp.dtype), hessp
-        # )
-
         return val, grad, hessp
 
     loss_val_grad_hessp = loss_val_grad_hessp_revrev
@@ -1959,12 +1936,6 @@ class Fitter:
                 val = self._compute_loss(profile=profile)
             grad = t1.gradient(val, self.x)
         hess = t2.jacobian(grad, self.x)
-
-        # grad = tf.where(
-        #     self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
-        # )
-        # hess = self.frozen_params_mask2d * hess
-
         return val, grad, hess
 
     @tf.function
