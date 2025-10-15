@@ -223,7 +223,6 @@ class Select(Channelmodel):
         Processes selections are optional.
         Axes selections are optional.
         """
-
         if len(args) and ":" not in args[0]:
             procs = [p for p in args[0].split(",") if p != "None"]
         else:

@@ -190,7 +190,9 @@ class ID(PhysicsModel):
 
         eps_hlt = 2*h2/(h1_hlt + 2*h2)
         
-        eps_hlt_expanded = tf.zeros(shape=[2, 1, 3], dtype = tf.float64)  # or tf.ones, or any values you want
+        eps_hlt_expanded = tf.zeros(shape=[24, 1, 6], dtype = tf.float64)  # or tf.ones, or any values you want
+        
+        # eps_hlt_expanded = tf.zeros(shape=[24, 1, 6], dtype = tf.float64)
         eps_hlt_expanded = tf.concat([eps_hlt_expanded, eps_hlt], axis = 1)
        
         eps_id = h1/(h1 + h0*(1-eps_hlt_expanded))
