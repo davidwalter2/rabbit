@@ -471,7 +471,7 @@ def make_plot(
                 if j == 0:
                     hep.histplot(
                         h_data[{f"{axis_name}_probe": j}],
-                        yerr=True if counts else h_data.variances() ** 0.5,
+                        yerr=True if counts else h_data[{f"{axis_name}_probe": j}].variances() ** 0.5,
                         histtype=histtype_data,
                         color="black",
                         label=args.dataName,
@@ -484,7 +484,7 @@ def make_plot(
                 else:
                     hep.histplot(
                         h_data[{f"{axis_name}_probe": j}],
-                        yerr=True if counts else h_data.variances() ** 0.5,
+                        yerr=True if counts else h_data[{f"{axis_name}_probe": j}].variances() ** 0.5,
                         histtype=histtype_data,
                         color="black",
                         binwnorm=binwnorm,
@@ -642,7 +642,7 @@ def make_plots(
     hist_data_stat = None
     if args.prefit:
         fittype = "prefit"
-    if args.unfoldedXsec:
+    if args.unfoldedXsec: ### should go through this
         hist_data = result[f"hist_{fittype}_inclusive"].get()
         name_impacts = f"hist_global_impacts_grouped_{fittype}_inclusive"
         if name_impacts in result.keys():
