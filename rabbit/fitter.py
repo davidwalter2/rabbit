@@ -12,6 +12,10 @@ from rabbit import tfhelpers as tfh
 logger = logging.child_logger(__name__)
 
 
+def solve_quad_eq(a, b, c):
+    return 0.5 * (-b + tf.sqrt(b**2 - 4.0 * a * c)) / a
+
+
 def match_regexp_params(regular_expressions, parameter_names):
     if isinstance(regular_expressions, str):
         regular_expressions = [regular_expressions]
@@ -39,52 +43,66 @@ class FitterCallback:
 
 
 class Fitter:
+    valid_bin_by_bin_stat_types = ["gamma", "normal-additive", "normal-multiplicative"]
+    valid_systematic_types = ["log_normal", "normal"]
+
     def __init__(self, indata, options, do_blinding=False):
         self.indata = indata
+
         self.binByBinStat = not options.noBinByBinStat
-        self.systgroupsfull = self.indata.systgroups.tolist()
-        self.systgroupsfull.append("stat")
-        if self.binByBinStat:
-            self.systgroupsfull.append("binByBinStat")
+        self.binByBinStatMode = options.binByBinStatMode
 
         if options.binByBinStatType == "automatic":
-            self.binByBinStatType = "normal" if options.externalCovariance else "gamma"
+            if options.covarianceFit:
+                self.binByBinStatType = "normal-additive"
+            elif options.binByBinStatMode == "full":
+                self.binByBinStatType = "normal-multiplicative"
+            else:
+                self.binByBinStatType = "gamma"
         else:
             self.binByBinStatType = options.binByBinStatType
 
-        if options.externalCovariance and not options.chisqFit:
-            raise Exception(
-                'option "--externalCovariance" only works with "--chisqFit"'
-            )
         if (
-            options.externalCovariance
-            and self.binByBinStat
-            and self.binByBinStatType != "normal"
+            self.binByBinStat
+            and self.binByBinStatMode == "full"
+            and not self.binByBinStatType.startswith("normal")
         ):
             raise Exception(
-                'option "--binByBinStat" only for options "--externalCovariance" with "--binByBinStatType normal"'
+                'bin-by-bin stat only for option "--binByBinStatMode full" with "--binByBinStatType normal"'
             )
 
-        if self.binByBinStatType not in ["gamma", "normal"]:
-            raise RuntimeError(
-                f"Invalid binByBinStatType {self.indata.binByBinStatType}, valid choices are 'gamma' or 'normal'"
+        if (
+            options.covarianceFit
+            and self.binByBinStat
+            and not self.binByBinStatType.startswith("normal")
+        ):
+            raise Exception(
+                'bin-by-bin stat only for option "--covarianceFit" with "--binByBinStatType normal"'
             )
 
-        if self.indata.systematic_type not in ["log_normal", "normal"]:
+        if self.binByBinStatType not in Fitter.valid_bin_by_bin_stat_types:
             raise RuntimeError(
-                f"Invalid systematic_type {self.indata.systematic_type}, valid choices are 'log_normal' or 'normal'"
+                f"Invalid binByBinStatType {self.binByBinStatType}, valid choices are {Fitter.valid_bin_by_bin_stat_types}"
+            )
+
+        if self.indata.systematic_type not in Fitter.valid_systematic_types:
+            raise RuntimeError(
+                f"Invalid systematic_type {self.indata.systematic_type}, valid choices are {Fitter.valid_systematic_types}"
             )
 
         self.diagnostics = options.diagnostics
         self.minimizer_method = options.minimizerMethod
 
+        if options.covarianceFit and options.chisqFit:
+            raise Exception(
+                'Use either "--covarianceFit" for chi-squared fit using covariance or "--chisqFit" for diagonal chi-squared fit'
+            )
+
         self.chisqFit = options.chisqFit
-        self.externalCovariance = options.externalCovariance
+        self.covarianceFit = options.covarianceFit
         self.prefitUnconstrainedNuisanceUncertainty = (
             options.prefitUnconstrainedNuisanceUncertainty
         )
-
-        self.nsystgroupsfull = len(self.systgroupsfull)
 
         self.pois = []
 
@@ -145,9 +163,18 @@ class Fitter:
         self.data_cov_inv = None
 
         if self.chisqFit:
-            if self.externalCovariance:
-                if self.indata.data_cov_inv is None:
-                    raise RuntimeError("No external covariance found in input data.")
+            self.varnobs = tf.Variable(
+                tf.zeros_like(self.indata.data_obs), trainable=False, name="varnobs"
+            )
+        elif self.covarianceFit:
+            if self.indata.data_cov_inv is None:
+                logger.warning(
+                    "No covariance provided, use reciproval of data variances"
+                )
+                self.data_cov_inv = np.diag(
+                    1.0 / self.indata.getattr("data_obs", "data_var")
+                )
+            else:
                 # provided covariance
                 self.data_cov_inv = self.indata.data_cov_inv
 
@@ -162,13 +189,22 @@ class Fitter:
         #  and uncertainty band computations (gradient is allowed to be zero or None and then propagated or skipped only later)
 
         # global observables for mc stat uncertainty
+        if self.binByBinStatMode == "full":
+            self.beta_shape = self.indata.sumw.shape
+        elif self.binByBinStatMode == "lite":
+            self.beta_shape = (self.indata.sumw.shape[0],)
+
         self.beta0 = tf.Variable(
-            tf.zeros_like(self.indata.sumw), trainable=False, name="beta0"
+            tf.zeros(self.beta_shape, dtype=self.indata.dtype),
+            trainable=False,
+            name="beta0",
         )
         self.logbeta0 = tf.Variable(
-            tf.zeros_like(self.indata.sumw), trainable=False, name="logbeta0"
+            tf.zeros(self.beta_shape, dtype=self.indata.dtype),
+            trainable=False,
+            name="logbeta0",
         )
-        self.set_beta0(self._default_beta0())
+        self.beta0defaultassign()
 
         # nuisance parameters for mc stat uncertainty
         self.beta = tf.Variable(self.beta0, trainable=False, name="beta")
@@ -177,23 +213,50 @@ class Fitter:
         self.ubeta = tf.zeros_like(self.beta)
 
         if self.binByBinStat:
-            if tf.reduce_any(self.indata.sumw2 < 0.0).numpy():
-                raise ValueError("Negative variance for binByBinStat")
+            if self.binByBinStatMode == "full":
+                self.varbeta = self.indata.sumw2
+                self.sumw = self.indata.sumw
+            else:
+                if self.indata.sumw2.ndim > 1:
+                    self.varbeta = tf.reduce_sum(self.indata.sumw2, axis=-1)
+                    self.sumw = tf.reduce_sum(self.indata.sumw, axis=-1)
+                else:
+                    self.varbeta = self.indata.sumw2
+                    self.sumw = self.indata.sumw
 
-            if self.binByBinStatType == "gamma":
-                self.kstat = self.indata.sumw**2 / self.indata.sumw2
-                self.betamask = self.indata.sumw2 == 0.0
+            if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
+                self.kstat = self.sumw**2 / self.varbeta
+                self.betamask = self.varbeta == 0.0
                 self.kstat = tf.where(self.betamask, 1.0, self.kstat)
-            elif self.binByBinStatType == "normal" and self.externalCovariance:
+            elif self.binByBinStatType == "normal-additive":
                 # precompute decomposition of composite matrix to speed up
                 # calculation of profiled beta values
-                varbeta = self.indata.sumw2[: self.indata.nbins]
-                sbeta = tf.sqrt(varbeta)
-                sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
-                self.betaauxlu = tf.linalg.lu(
-                    sbeta_m @ self.data_cov_inv @ sbeta_m
-                    + tf.eye(self.data_cov_inv.shape[0], dtype=self.data_cov_inv.dtype)
-                )
+                if self.covarianceFit:
+                    sbeta = tf.math.sqrt(self.varbeta[: self.indata.nbins])
+
+                    if self.binByBinStatMode == "lite":
+                        sbeta = tf.linalg.LinearOperatorDiag(sbeta)
+                        self.betaauxlu = tf.linalg.lu(
+                            sbeta @ self.data_cov_inv @ sbeta
+                            + tf.eye(
+                                self.data_cov_inv.shape[0],
+                                dtype=self.data_cov_inv.dtype,
+                            )
+                        )
+                    elif self.binByBinStatMode == "full":
+                        varbetasum = tf.reduce_sum(
+                            self.varbeta[: self.indata.nbins], axis=1
+                        )
+
+                        varbetasum = tf.linalg.LinearOperatorDiag(varbetasum)
+
+                        self.betaauxlu = tf.linalg.lu(
+                            varbetasum @ self.data_cov_inv
+                            + tf.eye(
+                                self.data_cov_inv.shape[0],
+                                dtype=self.data_cov_inv.dtype,
+                            )
+                        )
 
         self.nexpnom = tf.Variable(
             self.expected_yield(), trainable=False, name="nexpnom"
@@ -210,11 +273,11 @@ class Fitter:
 
         # determine if problem is linear (ie likelihood is purely quadratic)
         self.is_linear = (
-            self.chisqFit
+            (self.chisqFit or self.covarianceFit)
             and (self.npoi == 0 or self.allowNegativePOI)
             and self.indata.symmetric_tensor
             and self.indata.systematic_type == "normal"
-            and ((not self.binByBinStat) or self.binByBinStatType == "normal")
+            and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
         )
 
     def init_frozen_params(self, frozen_parmeter_expressions):
@@ -312,10 +375,10 @@ class Fitter:
             return poi
 
     def _default_beta0(self):
-        if self.binByBinStatType == "gamma":
-            return tf.ones_like(self.indata.sumw)
-        elif self.binByBinStatType == "normal":
-            return tf.zeros_like(self.indata.sumw)
+        if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
+            return tf.ones(self.beta_shape, dtype=self.indata.dtype)
+        elif self.binByBinStatType == "normal-additive":
+            return tf.zeros(self.beta_shape, dtype=self.indata.dtype)
 
     def prefit_covariance(self, unconstrained_err=0.0):
         # free parameters are taken to have zero uncertainty for the purposes of prefit uncertainties
@@ -340,13 +403,15 @@ class Fitter:
 
         return val, jac
 
-    def set_nobs(self, values):
-        if self.chisqFit and not self.externalCovariance:
+    def set_nobs(self, values, variances=None):
+        if self.chisqFit:
             # covariance from data stat
             if tf.math.reduce_any(values <= 0).numpy():
                 raise RuntimeError(
                     "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
                 )
+            self.varnobs.assign(values if variances is None else variances)
+
         self.nobs.assign(values)
         # compute offset for poisson nll improved numerical precision in minimizatoin
         # the offset is chosen to give the saturated likelihood
@@ -427,12 +492,17 @@ class Fitter:
 
                 betagen = tf.where(self.kstat == 0.0, 0.0, betagen)
                 self.beta.assign(betagen)
-            elif self.binByBinStatType == "normal":
+            else:
+                if self.binByBinStatType == "normal-multiplicative":
+                    stddev_beta0 = tf.sqrt(self.varbeta)
+                elif self.binByBinStatType == "normal-additive":
+                    stddev_beta0 = tf.ones_like(self.beta0)
+
                 self.beta.assign(
                     tf.random.normal(
                         shape=[],
                         mean=self.beta0,
-                        stddev=tf.ones_like(self.beta0),
+                        stddev=stddev_beta0,
                         dtype=self.beta.dtype,
                     )
                 )
@@ -460,12 +530,17 @@ class Fitter:
                     beta0gen,
                 )
                 self.set_beta0(beta0gen)
-            elif self.binByBinStatType == "normal":
+            else:
+                if self.binByBinStatType == "normal-multiplicative":
+                    stddev_beta = tf.sqrt(self.varbeta)
+                elif self.binByBinStatType == "normal-additive":
+                    stddev_beta = tf.ones_like(self.beta)
+
                 self.set_beta0(
                     tf.random.normal(
                         shape=[],
                         mean=self.beta,
-                        stddev=tf.ones_like(self.beta0),
+                        stddev=stddev_beta,
                         dtype=self.beta.dtype,
                     )
                 )
@@ -473,6 +548,7 @@ class Fitter:
     def toyassign(
         self,
         data_values=None,
+        data_variances=None,
         syst_randomize="frequentist",
         data_randomize="poisson",
         data_mode="expected",
@@ -491,7 +567,7 @@ class Fitter:
             data_nom = data_values
 
         if data_randomize == "poisson":
-            if self.externalCovariance:
+            if self.covarianceFit:
                 raise RuntimeError(
                     "Toys with external covariance only possible with data_randomize=normal"
                 )
@@ -500,23 +576,29 @@ class Fitter:
                     tf.random.poisson(lam=data_nom, shape=[], dtype=self.nobs.dtype)
                 )
         elif data_randomize == "normal":
-            if self.externalCovariance:
+            if self.covarianceFit:
                 pdata = tfp.distributions.MultivariateNormalTriL(
                     loc=data_nom,
                     scale_tril=tf.linalg.cholesky(tf.linalg.inv(self.data_cov_inv)),
                 )
                 self.set_nobs(pdata.sample())
             else:
+                if self.chisqFit:
+                    data_var = data_nom if data_variances is None else data_variances
+                else:
+                    data_var = data_nom
+
                 self.set_nobs(
                     tf.random.normal(
                         mean=data_nom,
-                        stddev=tf.sqrt(data_nom),
+                        stddev=tf.sqrt(data_var),
                         shape=[],
                         dtype=self.nobs.dtype,
-                    )
+                    ),
+                    data_variances,
                 )
         elif data_randomize == "none":
-            self.set_nobs(data_nom)
+            self.set_nobs(data_nom, data_variances)
 
         # assign start values for nuisance parameters to constraint minima
         self.xdefaultassign()
@@ -549,7 +631,7 @@ class Fitter:
                     tf.random.normal(
                         shape=[],
                         mean=self.beta0,
-                        stddev=tf.sqrt(self.indata.sumw2),
+                        stddev=tf.sqrt(self.varbeta),
                         dtype=self.beta.dtype,
                     )
                 )
@@ -735,16 +817,25 @@ class Fitter:
             )
 
             impacts_beta0 = sbeta @ dbetadx @ cov_dexpdx
-
             var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
-            var_nobs -= var_beta0
 
-            impacts_beta0 = tf.sqrt(var_beta0)
+            if self.binByBinStatMode == "full":
+                impacts_beta0_process = tf.sqrt(var_beta0)
+                var_beta0 = tf.reduce_sum(var_beta0, axis=0)
+
+            impacts_beta0_total = tf.sqrt(var_beta0)
+
+            var_nobs -= var_beta0
 
         impacts_nobs = tf.sqrt(var_nobs)
 
         if self.binByBinStat:
-            impacts_grouped = tf.stack([impacts_nobs, impacts_beta0], axis=-1)
+            impacts_grouped = tf.stack([impacts_nobs, impacts_beta0_total], axis=-1)
+            if self.binByBinStatMode == "full":
+                impacts_grouped = tf.concat(
+                    [impacts_grouped, tf.transpose(impacts_beta0_process)], axis=-1
+                )
+
         else:
             impacts_grouped = impacts_nobs[..., None]
 
@@ -780,17 +871,14 @@ class Fitter:
                     val = lbeta
 
             pdldbeta = t1.gradient(val, self.ubeta)
-        if self.externalCovariance and profile:
+        if self.covarianceFit and profile:
             pd2ldbeta2_matrix = t2.jacobian(pdldbeta, self.ubeta)
             pd2ldbeta2 = tf.linalg.LinearOperatorFullMatrix(
                 pd2ldbeta2_matrix, is_self_adjoint=True
             )
         else:
             # pd2ldbeta2 is diagonal, so we can use gradient instead of jacobian
-            pd2ldbeta2_diag = t2.gradient(pdldbeta, self.ubeta)
-            pd2ldbeta2 = tf.linalg.LinearOperatorDiag(
-                pd2ldbeta2_diag, is_self_adjoint=True
-            )
+            pd2ldbeta2 = t2.gradient(pdldbeta, self.ubeta)
         return pd2ldbeta2
 
     def _dxdvars(self):
@@ -807,40 +895,9 @@ class Fitter:
         # cov is inverse hesse, thus cov ~ d2xd2l
         dxdtheta0 = -self.cov @ pd2ldxdtheta0
         dxdnobs = -self.cov @ pd2ldxdnobs
-        dxdbeta0 = -self.cov @ pd2ldxdbeta0
+        dxdbeta0 = -self.cov @ tf.reshape(pd2ldxdbeta0, [pd2ldxdbeta0.shape[0], -1])
 
         return dxdtheta0, dxdnobs, dxdbeta0
-
-    def _expected_with_variance_optimized(self, fun_exp, skipBinByBinStat=False):
-        # compute uncertainty on expectation propagating through uncertainty on fit parameters using full covariance matrix
-
-        # FIXME this doesn't actually work for the positive semi-definite case
-        invhesschol = tf.linalg.cholesky(self.cov)
-
-        # since the full covariance matrix with respect to the bin counts is given by J^T R^T R J, then summing RJ element-wise squared over the parameter axis gives the diagonal elements
-
-        expected = fun_exp()
-
-        # dummy vector for implicit transposition
-        u = tf.ones_like(expected)
-        with tf.GradientTape(watch_accessed_variables=False) as t1:
-            t1.watch(u)
-            with tf.GradientTape() as t2:
-                expected = fun_exp()
-            # this returns dndx_j = sum_i u_i dn_i/dx_j
-            Ju = t2.gradient(expected, self.x, output_gradients=u)
-            Ju = tf.transpose(Ju)
-            Ju = tf.reshape(Ju, [-1, 1])
-            RJu = tf.matmul(tf.stop_gradient(invhesschol), Ju, transpose_a=True)
-            RJu = tf.reshape(RJu, [-1])
-        RJ = t1.jacobian(RJu, u)
-        sRJ2 = tf.reduce_sum(RJ**2, axis=0)
-        sRJ2 = tf.reshape(sRJ2, tf.shape(expected))
-        if self.binByBinStat and not skipBinByBinStat:
-            # add MC stat uncertainty on variance
-            sumw2 = tf.square(expected) / self.kstat
-            sRJ2 = sRJ2 + sumw2
-        return expected, sRJ2
 
     def _compute_expected(
         self, fun_exp, inclusive=True, profile=False, full=True, need_observables=True
@@ -905,7 +962,25 @@ class Fitter:
 
         if pdexpdbeta is not None:
             pd2ldbeta2 = self._pd2ldbeta2(profile)
-            pd2ldbeta2_pdexpdbeta = pd2ldbeta2.solve(pdexpdbeta, adjoint_arg=True)
+
+            if self.covarianceFit and profile:
+                pd2ldbeta2_pdexpdbeta = pd2ldbeta2.solve(pdexpdbeta, adjoint_arg=True)
+            else:
+                if self.binByBinStatType == "normal-additive":
+                    pd2ldbeta2_pdexpdbeta = pdexpdbeta / pd2ldbeta2[None, :]
+                else:
+                    pd2ldbeta2_pdexpdbeta = tf.where(
+                        self.betamask[None, :],
+                        tf.zeros_like(pdexpdbeta),
+                        pdexpdbeta / pd2ldbeta2[None, :],
+                    )
+
+                # flatten all but first axes
+                batch = tf.shape(pdexpdbeta)[0]
+                pdexpdbeta = tf.reshape(pdexpdbeta, [batch, -1])
+                pd2ldbeta2_pdexpdbeta = tf.transpose(
+                    tf.reshape(pd2ldbeta2_pdexpdbeta, [batch, -1])
+                )
 
             if compute_cov:
                 expcov += pdexpdbeta @ pd2ldbeta2_pdexpdbeta
@@ -985,28 +1060,46 @@ class Fitter:
             if self.binByBinStat:
                 # this the cholesky decomposition of pd2lbetadbeta2
                 sbeta = tf.linalg.LinearOperatorDiag(
-                    tf.sqrt(pd2lbetadbeta2_diag), is_self_adjoint=True
+                    tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
                 )
 
-                impacts_beta0 = tf.zeros(
-                    shape=(*self.beta.shape, *expvar_flat.shape), dtype=expvar.dtype
-                )
+                impacts_beta_shape = (*self.beta_shape, *expvar_flat.shape)
+                impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=expvar.dtype)
 
                 if pdexpdbeta is not None:
-                    impacts_beta0 += sbeta @ pd2ldbeta2_pdexpdbeta
+                    impacts_beta0 += tf.reshape(
+                        sbeta @ pd2ldbeta2_pdexpdbeta, impacts_beta_shape
+                    )
 
                 if dbetadx is not None:
-                    impacts_beta0 += sbeta @ dbetadx @ cov_dexpdx
+                    dbetadx_cov_dexpdx = dbetadx @ cov_dexpdx
+                    # flatten all but last axes
+                    dbetadx_cov_dexpdx = tf.reshape(
+                        dbetadx_cov_dexpdx, [-1, tf.shape(dbetadx_cov_dexpdx)[-1]]
+                    )
+                    impacts_beta0 += tf.reshape(
+                        sbeta @ dbetadx_cov_dexpdx, impacts_beta_shape
+                    )
 
                 var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
-                var_nobs -= var_beta0
+                if self.binByBinStatMode == "full":
+                    impacts_beta0_process = tf.sqrt(var_beta0)
 
-                impacts_beta0 = tf.sqrt(var_beta0)
+                    var_beta0 = tf.reduce_sum(var_beta0, axis=0)
+
+                impacts_beta0_total = tf.sqrt(var_beta0)
+
+                var_nobs -= var_beta0
 
             impacts_nobs = tf.sqrt(var_nobs)
 
             if self.binByBinStat:
-                impacts_grouped = tf.stack([impacts_nobs, impacts_beta0], axis=-1)
+                impacts_grouped = tf.stack([impacts_nobs, impacts_beta0_total], axis=-1)
+                if self.binByBinStatMode == "full":
+                    impacts_grouped = tf.concat(
+                        [impacts_grouped, tf.transpose(impacts_beta0_process)], axis=-1
+                    )
+
             else:
                 impacts_grouped = impacts_nobs[..., None]
 
@@ -1176,7 +1269,9 @@ class Fitter:
         return nexpcentral, normcentral
 
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
-        nexp, norm = self._compute_yields_noBBB(compute_norm, full=full)
+        nexp, norm = self._compute_yields_noBBB(
+            compute_norm or self.binByBinStatMode == "full", full=full
+        )
 
         if self.binByBinStat:
             if profile:
@@ -1185,28 +1280,133 @@ class Fitter:
 
                 nexp_profile = nexp[: self.indata.nbins]
                 beta0 = self.beta0[: self.indata.nbins]
-                # denominator in Gaussian likelihood is treated as a constant when computing
-                # global impacts for example
-                nobs0 = tf.stop_gradient(self.nobs)
 
                 if self.chisqFit:
                     if self.binByBinStatType == "gamma":
                         kstat = self.kstat[: self.indata.nbins]
-                        betamask = self.betamask[: self.indata.nbins]
 
                         abeta = nexp_profile**2
-                        bbeta = kstat * nobs0 - nexp_profile * self.nobs
-                        cbeta = -kstat * nobs0 * beta0
-                        beta = (
-                            0.5
-                            * (-bbeta + tf.sqrt(bbeta**2 - 4.0 * abeta * cbeta))
-                            / abeta
-                        )
+                        bbeta = kstat * self.varnobs - nexp_profile * self.nobs
+                        cbeta = -kstat * self.varnobs * beta0
+                        beta = solve_quad_eq(abeta, bbeta, cbeta)
+
+                        betamask = self.betamask[: self.indata.nbins]
                         beta = tf.where(betamask, beta0, beta)
-                    elif self.binByBinStatType == "normal":
-                        varbeta = self.indata.sumw2[: self.indata.nbins]
-                        sbeta = tf.sqrt(varbeta)
-                        if self.externalCovariance:
+                    elif self.binByBinStatType == "normal-multiplicative":
+                        kstat = self.kstat[: self.indata.nbins]
+                        betamask = self.betamask[: self.indata.nbins]
+                        if self.binByBinStatMode == "lite":
+                            beta = (
+                                nexp_profile * self.nobs / self.varnobs + kstat * beta0
+                            ) / (kstat + nexp_profile * nexp_profile / self.varnobs)
+
+                            beta = tf.where(betamask, beta0, beta)
+
+                        elif self.binByBinStatMode == "full":
+                            norm_profile = norm[: self.indata.nbins]
+                            n2kstat = tf.square(norm_profile) / kstat
+                            n2kstat = tf.where(
+                                betamask,
+                                tf.constant(0.0, dtype=self.indata.dtype),
+                                n2kstat,
+                            )
+                            n2kstatsum = tf.reduce_sum(n2kstat, axis=-1)
+
+                            nbeta = (
+                                self.nobs / self.varnobs * n2kstatsum
+                                + tf.reduce_sum(norm_profile * beta0, axis=-1)
+                            ) / (1 + 1 / self.varnobs * n2kstatsum)
+                            beta = (
+                                beta0
+                                + (1 / self.varnobs * (self.nobs - nbeta))[..., None]
+                                * norm_profile
+                                / kstat
+                            )
+                            beta = tf.where(betamask, beta0, beta)
+                    elif self.binByBinStatType == "normal-additive":
+                        varbeta = self.varbeta[: self.indata.nbins]
+                        sbeta = tf.math.sqrt(varbeta)
+                        if self.binByBinStatMode == "lite":
+                            beta = (
+                                sbeta * (self.nobs - nexp_profile)
+                                + self.varnobs * beta0
+                            ) / (self.varnobs + varbeta)
+                        elif self.binByBinStatMode == "full":
+                            varbetasum = tf.reduce_sum(varbeta, axis=-1)
+                            nbeta = (
+                                tf.reduce_sum(sbeta * beta0, axis=-1)
+                                + varbetasum / self.varnobs * (self.nobs - nexp_profile)
+                            ) / (1 + varbetasum / self.varnobs)
+                            beta = (
+                                beta0
+                                - sbeta
+                                * ((nexp_profile + nbeta - self.nobs) / self.varnobs)[
+                                    :, None
+                                ]
+                            )
+                elif self.covarianceFit:
+                    if self.binByBinStatType == "normal-multiplicative":
+                        kstat = self.kstat[: self.indata.nbins]
+                        betamask = self.betamask[: self.indata.nbins]
+                        if self.binByBinStatMode == "lite":
+
+                            nexp_profile_m = tf.linalg.LinearOperatorDiag(nexp_profile)
+                            A = (
+                                nexp_profile_m @ self.data_cov_inv @ nexp_profile_m
+                                + tf.linalg.diag(kstat)
+                            )
+                            b = (
+                                nexp_profile_m
+                                @ (self.data_cov_inv @ self.nobs[:, None])
+                                + (kstat * beta0)[:, None]
+                            )
+
+                            # Cholesky solve sometimes does not give corret result
+                            # chol = tf.linalg.cholesky(A)
+                            # beta = tf.linalg.cholesky_solve(chol, b)
+
+                            beta = tf.linalg.solve(A, b)
+
+                            beta = tf.squeeze(beta, axis=-1)
+                            beta = tf.where(betamask, beta0, beta)
+                        elif self.binByBinStatMode == "full":
+                            norm_profile = norm[: self.indata.nbins]
+
+                            # first solve sum of processes
+                            nbeta0 = tf.reduce_sum(norm_profile * beta0, axis=1)
+                            n2kstat = tf.square(norm_profile) / kstat
+                            n2kstat = tf.where(
+                                betamask,
+                                tf.constant(0.0, dtype=self.indata.dtype),
+                                n2kstat,
+                            )
+                            n2kstatsum = tf.reduce_sum(n2kstat, axis=1)
+                            n2kstatsum_m = tf.linalg.LinearOperatorDiag(n2kstatsum)
+
+                            A = n2kstatsum_m @ self.data_cov_inv + tf.eye(
+                                self.data_cov_inv.shape[0],
+                                dtype=self.data_cov_inv.dtype,
+                            )
+                            b = (
+                                n2kstatsum_m @ self.data_cov_inv @ (self.nobs[:, None])
+                                + nbeta0[:, None]
+                            )
+
+                            # Cholesky solve sometimes does not give corret result
+                            # chol = tf.linalg.cholesky(A)
+                            # nbeta = tf.linalg.cholesky_solve(chol, b)
+
+                            nbeta = tf.linalg.solve(A, b)
+
+                            # now solve for beta [nprocesses x nbins]
+                            beta = beta0 - norm_profile / kstat * (
+                                self.data_cov_inv @ (nbeta - self.nobs[:, None])
+                            )
+                            beta = tf.where(betamask, beta0, beta)
+                    elif self.binByBinStatType == "normal-additive":
+                        varbeta = self.varbeta[: self.indata.nbins]
+                        sbeta = tf.math.sqrt(varbeta)
+                        if self.binByBinStatMode == "lite":
                             sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
                             beta = tf.linalg.lu_solve(
                                 *self.betaauxlu,
@@ -1216,10 +1416,24 @@ class Fitter:
                                 + beta0[:, None],
                             )
                             beta = tf.squeeze(beta, axis=-1)
-                        else:
-                            beta = (
-                                sbeta * (self.nobs - nexp_profile) + nobs0 * beta0
-                            ) / (nobs0 + varbeta)
+                        elif self.binByBinStatMode == "full":
+                            # first solve for sum of processes
+                            sbetabeta0sum = tf.reduce_sum(sbeta * beta0, axis=1)
+                            varbetasum = tf.reduce_sum(varbeta, axis=1)
+                            varbetasum = tf.linalg.LinearOperatorDiag(varbetasum)
+
+                            nbeta = tf.linalg.lu_solve(
+                                *self.betaauxlu,
+                                varbetasum
+                                @ self.data_cov_inv
+                                @ ((self.nobs - nexp_profile)[:, None])
+                                + sbetabeta0sum[:, None],
+                            )
+                            # second solve for beta
+                            beta = beta0 - sbeta * (
+                                self.data_cov_inv
+                                @ (nbeta + nexp_profile[:, None] - self.nobs[:, None])
+                            )
                 else:
                     if self.binByBinStatType == "gamma":
                         kstat = self.kstat[: self.indata.nbins]
@@ -1227,23 +1441,62 @@ class Fitter:
 
                         beta = (self.nobs + kstat * beta0) / (nexp_profile + kstat)
                         beta = tf.where(betamask, beta0, beta)
-                    elif self.binByBinStatType == "normal":
-                        varbeta = self.indata.sumw2[: self.indata.nbins]
-                        sbeta = tf.sqrt(varbeta)
-                        abeta = sbeta
-                        abeta = tf.where(
-                            varbeta == 0.0, tf.constant(1.0, dtype=varbeta.dtype), abeta
-                        )
-                        bbeta = varbeta + nexp_profile - sbeta * beta0
-                        cbeta = (
-                            sbeta * (nexp_profile - self.nobs) - nexp_profile * beta0
-                        )
-                        beta = (
-                            0.5
-                            * (-bbeta + tf.sqrt(bbeta**2 - 4.0 * abeta * cbeta))
-                            / abeta
-                        )
-                        beta = tf.where(varbeta == 0.0, beta0, beta)
+                    elif self.binByBinStatType == "normal-multiplicative":
+                        kstat = self.kstat[: self.indata.nbins]
+                        betamask = self.betamask[: self.indata.nbins]
+                        if self.binByBinStatMode == "lite":
+                            abeta = kstat
+                            bbeta = nexp_profile - beta0 * kstat
+                            cbeta = -self.nobs
+                            beta = solve_quad_eq(abeta, bbeta, cbeta)
+                            beta = tf.where(betamask, beta0, beta)
+                        elif self.binByBinStatMode == "full":
+                            norm_profile = norm[: self.indata.nbins]
+                            n2kstat = tf.square(norm_profile) / kstat
+                            n2kstat = tf.where(
+                                betamask,
+                                tf.constant(0.0, dtype=self.indata.dtype),
+                                n2kstat,
+                            )
+                            pbeta = tf.reduce_sum(
+                                n2kstat - beta0 * norm_profile, axis=-1
+                            )
+                            qbeta = -self.nobs * tf.reduce_sum(n2kstat, axis=-1)
+                            nbeta = solve_quad_eq(1, pbeta, qbeta)
+                            beta = (
+                                beta0
+                                + (self.nobs / nbeta - 1)[..., None]
+                                * norm_profile
+                                / kstat
+                            )
+                            beta = tf.where(betamask, beta0, beta)
+                    elif self.binByBinStatType == "normal-additive":
+                        varbeta = self.varbeta[: self.indata.nbins]
+                        sbeta = tf.math.sqrt(varbeta)
+                        if self.binByBinStatMode == "lite":
+                            abeta = sbeta
+                            abeta = tf.where(
+                                varbeta == 0.0,
+                                tf.constant(1.0, dtype=varbeta.dtype),
+                                abeta,
+                            )
+                            bbeta = varbeta + nexp_profile - sbeta * beta0
+                            cbeta = (
+                                sbeta * (nexp_profile - self.nobs)
+                                - nexp_profile * beta0
+                            )
+                            beta = solve_quad_eq(abeta, bbeta, cbeta)
+                            beta = tf.where(varbeta == 0.0, beta0, beta)
+                        elif self.binByBinStatMode == "full":
+                            norm_profile = norm[: self.indata.nbins]
+
+                            qbeta = -self.nobs * tf.reduce_sum(varbeta, axis=-1)
+                            pbeta = tf.reduce_sum(
+                                varbeta - sbeta * beta0 - norm_profile, axis=-1
+                            )
+                            nbeta = solve_quad_eq(1, pbeta, qbeta)
+
+                            beta = beta0 + (self.nobs / nbeta - 1)[..., None] * sbeta
 
                 if self.indata.nbinsmasked:
                     beta = tf.concat([beta, self.beta0[self.indata.nbins :]], axis=0)
@@ -1255,23 +1508,32 @@ class Fitter:
 
             betasel = beta[: nexp.shape[0]]
 
-            if self.binByBinStatType == "gamma":
+            if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
                 betamask = self.betamask[: nexp.shape[0]]
-                nexp = tf.where(betamask, nexp, nexp * betasel)
-                if compute_norm:
-                    norm = tf.where(
-                        betamask[..., None], norm, betasel[..., None] * norm
-                    )
-            elif self.binByBinStatType == "normal":
-                varbeta = self.indata.sumw2[: nexp.shape[0]]
-                sbeta = tf.sqrt(varbeta)
-                nexpnorm = nexp[..., None]
-                nexp = nexp + sbeta * betasel
-                if compute_norm:
-                    # distribute the change in yields proportionally across processes
-                    norm = (
-                        norm + sbeta[..., None] * betasel[..., None] * norm / nexpnorm
-                    )
+                if self.binByBinStatMode == "full":
+                    norm = tf.where(betamask, norm, betasel * norm)
+                    nexp = tf.reduce_sum(norm, -1)
+                else:
+                    nexp = tf.where(betamask, nexp, nexp * betasel)
+                    if compute_norm:
+                        norm = tf.where(
+                            betamask[..., None], norm, betasel[..., None] * norm
+                        )
+            elif self.binByBinStatType == "normal-additive":
+                varbeta = self.varbeta[: nexp.shape[0]]
+                sbeta = tf.math.sqrt(varbeta)
+                if self.binByBinStatMode == "full":
+                    norm = norm + sbeta * betasel
+                    nexp = tf.reduce_sum(norm, -1)
+                else:
+                    nexpnorm = nexp[..., None]
+                    nexp = nexp + sbeta * betasel
+                    if compute_norm:
+                        # distribute the change in yields proportionally across processes
+                        norm = (
+                            norm
+                            + sbeta[..., None] * betasel[..., None] * norm / nexpnorm
+                        )
         else:
             beta = None
 
@@ -1330,7 +1592,9 @@ class Fitter:
 
         dresdtheta0 = pdresdtheta0 + pdresdx @ dxdtheta0
         dresdnobs = pdresdnobs + pdresdx @ dxdnobs
-        dresdbeta0 = pdresdbeta0 + pdresdx @ dxdbeta0
+        dresdbeta0 = (
+            tf.reshape(pdresdbeta0, [pdresdbeta0.shape[0], -1]) + pdresdx @ dxdbeta0
+        )
 
         var_theta0 = tf.where(
             self.indata.constraintweights == 0.0,
@@ -1340,7 +1604,7 @@ class Fitter:
 
         res_cov = dresdtheta0 @ (var_theta0[:, None] * tf.transpose(dresdtheta0))
 
-        if self.externalCovariance:
+        if self.covarianceFit:
             res_cov_stat = dresdnobs @ tf.linalg.solve(
                 self.data_cov_inv, tf.transpose(dresdnobs)
             )
@@ -1351,7 +1615,6 @@ class Fitter:
 
         if self.binByBinStat:
             pd2ldbeta2 = self._pd2ldbeta2(profile=False)
-            pd2ldbeta2 = tf.linalg.diag_part(pd2ldbeta2)
 
             with tf.GradientTape() as t2:
                 t2.watch([self.ubeta, self.beta0])
@@ -1364,13 +1627,14 @@ class Fitter:
 
                 dlbetadbeta = t1.gradient(lbeta, self.ubeta)
             pd2lbetadbetadbeta0 = t2.gradient(dlbetadbeta, self.beta0)
-
             var_beta0 = pd2ldbeta2 / pd2lbetadbetadbeta0**2
 
-            if self.binByBinStatType == "gamma":
+            if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
                 var_beta0 = tf.where(self.betamask, tf.zeros_like(var_beta0), var_beta0)
 
-            res_cov_BBB = dresdbeta0 @ (var_beta0[:, None] * tf.transpose(dresdbeta0))
+            res_cov_BBB = dresdbeta0 @ (
+                tf.reshape(var_beta0, [-1])[:, None] * tf.transpose(dresdbeta0)
+            )
             res_cov += res_cov_BBB
 
         return residuals, res_cov
@@ -1526,11 +1790,23 @@ class Fitter:
                     lbeta = -kstat * beta0 * (logbeta - self.logbeta0) + kstat * (
                         beta - beta0
                     )
-            elif self.binByBinStatType == "normal":
+            elif self.binByBinStatType == "normal-multiplicative":
+                kstat = self.kstat
+                betamask = self.betamask
+                lbeta = tf.where(
+                    betamask,
+                    tf.constant(0.0, dtype=beta.dtype),
+                    0.5 * tf.square(beta - beta0) * kstat,
+                )
+                if full_nll:
+                    raise NotImplementedError()
+
+            elif self.binByBinStatType == "normal-additive":
                 lbeta = 0.5 * tf.square(beta - beta0)
 
                 if full_nll:
-                    sigma2 = self.indata.sumw2 / tf.square(self.indata.sumw)
+                    # TODO: verify
+                    sigma2 = self.varbeta / tf.square(self.sumw)
 
                     # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
                     lbeta = (
@@ -1553,22 +1829,17 @@ class Fitter:
         nexp = nexpfullcentral
 
         if self.chisqFit:
-            if self.externalCovariance:
-                # Solve the system without inverting
-                residual = tf.reshape(self.nobs - nexp, [-1, 1])  # chi2 residual
-                ln = 0.5 * tf.reduce_sum(
-                    tf.matmul(
-                        residual,
-                        tf.matmul(self.data_cov_inv, residual),
-                        transpose_a=True,
-                    )
+            ln = 0.5 * tf.reduce_sum((nexp - self.nobs) ** 2 / self.varnobs, axis=-1)
+        elif self.covarianceFit:
+            # Solve the system without inverting
+            residual = tf.reshape(self.nobs - nexp, [-1, 1])  # chi2 residual
+            ln = 0.5 * tf.reduce_sum(
+                tf.matmul(
+                    residual,
+                    tf.matmul(self.data_cov_inv, residual),
+                    transpose_a=True,
                 )
-            else:
-                # stop_gradient needed in denominator here because it should be considered
-                # constant when evaluating global impacts from observed data
-                ln = 0.5 * tf.reduce_sum(
-                    (nexp - self.nobs) ** 2 / tf.stop_gradient(self.nobs), axis=-1
-                )
+            )
         else:
             nexpsafe = tf.where(
                 self.nobs == 0.0, tf.constant(1.0, dtype=nexp.dtype), nexp
