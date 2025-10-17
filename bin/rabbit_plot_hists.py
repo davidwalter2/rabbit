@@ -367,10 +367,11 @@ def parseArgs():
         """,
     )
     parser.add_argument(
-        "--colorVarFromExtFile",
+        "--externalRatio",
         type=str,
-        default=None,
-        help="To overlay the inclusive histogram taken from this external file",
+        default="num",
+        choices=["num", "den"],
+        help="For the ratio, use this external variation as alternative denominator (den, for example to do Data/alt.pred.) or numerator (num, alt.pred./nom.pred.)",
     )
     args = parser.parse_args()
 
@@ -528,7 +529,10 @@ def make_plot(
                 rlabel += r"\,-\,"
             else:
                 rlabel += r"\,/\,"
-            rlabel = f"${rlabel} Pred.$"
+            if h_inclusive_alt is not None and args.externalRatio == "den":
+                rlabel = f"${rlabel} Any\\,pred.$"
+            else:
+                rlabel = f"${rlabel} Pred.$"
 
         fig, ax1, ratio_axes = plot_tools.figureWithRatio(
             h_inclusive,
@@ -748,10 +752,16 @@ def make_plot(
                     h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
                 )
             if h_inclusive_alt is not None:
-                h3 = hh.addHists(h_data, h_inclusive_alt, scale2=-1)
-                if h_data_stat is not None:
+                if args.externalRatio == "den":
+                    h3 = hh.addHists(h_data, h_inclusive_alt, scale2=-1)
+                    if h_data_stat is not None:
+                        h3_stat = hh.divideHists(
+                            h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                        )
+                else:
+                    h3 = hh.addHists(h_inclusive_alt, h_inclusive, scale2=-1)
                     h3_stat = hh.divideHists(
-                        h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
                     )
 
         else:
@@ -769,12 +779,20 @@ def make_plot(
                     h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
                 )
             if h_inclusive_alt is not None:
-                h3 = hh.divideHists(
-                    h_data, h_inclusive_alt, cutoff=cutoff, rel_unc=True
-                )
-                if h_data_stat is not None:
+                if args.externalRatio == "den":
+                    h3 = hh.divideHists(
+                        h_data, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                    )
+                    if h_data_stat is not None:
+                        h3_stat = hh.divideHists(
+                            h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                        )
+                else:
+                    h3 = hh.divideHists(
+                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
+                    )
                     h3_stat = hh.divideHists(
-                        h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
                     )
 
         hep.histplot(
@@ -812,7 +830,7 @@ def make_plot(
             if h_inclusive_alt is not None:
                 hep.histplot(
                     h3,
-                    histtype="errorbar",
+                    histtype="errorbar" if args.externalRatio == "den" else "step",
                     color=args.addVarFromExternalFile[1],
                     yerr=True if counts else h2.variances() ** 0.5,
                     linewidth=2,
