@@ -506,31 +506,9 @@ def fit(args, fitter, ws, dofit=True):
         if not args.noHessian:
 
             val, grad, hess = fitter.loss_val_grad_hess()
-
-            if len(fitter.frozen_params) > 0:
-                # Only keep parameters that were floating in the fit
-                subgrad = tf.gather(grad, fitter.floating_indices, axis=0)
-                subhess = tf.gather(hess, fitter.floating_indices, axis=0)
-                subhess = tf.gather(subhess, fitter.floating_indices, axis=1)
-                edmval, cov = edmval_cov(subgrad, subhess)
-            else:
-                edmval, cov = edmval_cov(grad, hess)
+            edmval, cov = edmval_cov(grad, hess)
 
             logger.info(f"edmval: {edmval}")
-
-            if len(fitter.frozen_params) > 0:
-                # update only the covariance entries for parameters that were floating in the fit
-                coords = tf.stack(
-                    tf.meshgrid(
-                        fitter.floating_indices, fitter.floating_indices, indexing="ij"
-                    ),
-                    axis=-1,
-                )
-                coords = tf.reshape(coords, [-1, 2])
-
-                updates = tf.reshape(cov, [-1])
-
-                cov = tf.tensor_scatter_nd_update(fitter.cov, coords, updates)
 
             fitter.cov.assign(cov)
 
@@ -542,11 +520,6 @@ def fit(args, fitter, ws, dofit=True):
                 # It should be near-zero by construction as long as the analytic profiling is
                 # correct
                 _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
-                if len(fitter.frozen_params) > 0:
-                    # Only keep parameters that were floating in the fit
-                    gradbeta = tf.gather(gradbeta, fitter.floating_indices, axis=0)
-                    hessbeta = tf.gather(hessbeta, fitter.floating_indices, axis=0)
-                    hessbeta = tf.gather(hessbeta, fitter.floating_indices, axis=1)
                 edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
                 logger.info(f"edmvalbeta: {edmvalbeta}")
 
