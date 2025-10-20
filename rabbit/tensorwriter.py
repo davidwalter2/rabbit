@@ -40,7 +40,6 @@ class TensorWriter:
         self.systsstandard = set()
         self.systsnoi = set()
         self.systsnoconstraint = set()
-        self.systsnoprofile = set()
         self.systscovariance = set()
 
         self.sparse = sparse
@@ -267,7 +266,6 @@ class TensorWriter:
         process,
         channel,
         uncertainty,
-        profile=True,
         add_to_data_covariance=False,
         groups=None,
         symmetrize="average",
@@ -327,7 +325,6 @@ class TensorWriter:
         self.book_systematic(
             var_name_out,
             groups=groups,
-            profile=profile,
             add_to_data_covariance=add_to_data_covariance,
             **kargs,
         )
@@ -461,7 +458,6 @@ class TensorWriter:
     def book_systematic(
         self,
         name,
-        profile=True,
         noi=False,
         constrained=True,
         add_to_data_covariance=False,
@@ -470,8 +466,6 @@ class TensorWriter:
 
         if add_to_data_covariance:
             self.systscovariance.add(name)
-        elif not profile:
-            self.systsnoprofile.add(name)
         elif not constrained:
             self.systsnoconstraint.add(name)
         else:
@@ -789,7 +783,6 @@ class TensorWriter:
 
         ioutils.pickle_dump_h5py("meta", meta, f)
 
-        systsnoprofile = self.get_systsnoprofile()
         systsnoconstraint = self.get_systsnoconstraint()
         noigroups, noigroupidxs = self.get_noigroups()
         systgroups, systgroupidxs = self.get_systgroups()
@@ -811,7 +804,6 @@ class TensorWriter:
         create_dataset("procs", procs)
         create_dataset("signals", sorted(list(self.signals)))
         create_dataset("systs", systs)
-        create_dataset("systsnoprofile", systsnoprofile)
         create_dataset("systsnoconstraint", systsnoconstraint)
         create_dataset("systgroups", systgroups)
         create_dataset(
@@ -929,9 +921,6 @@ class TensorWriter:
     def get_systsstandard(self):
         return list(common.natural_sort(self.systsstandard))
 
-    def get_systsnoprofile(self):
-        return list(common.natural_sort(self.systsnoprofile))
-
     def get_systsnoi(self):
         return list(common.natural_sort(self.systsnoi))
 
@@ -939,11 +928,7 @@ class TensorWriter:
         return list(common.natural_sort(self.systsnoconstraint))
 
     def get_systs(self):
-        return (
-            self.get_systsnoconstraint()
-            + self.get_systsstandard()
-            + self.get_systsnoprofile()
-        )
+        return self.get_systsnoconstraint() + self.get_systsstandard()
 
     def get_constraintweights(self, dtype):
         systs = self.get_systs()

@@ -14,7 +14,6 @@ class FitInputData:
             self.procs = f["hprocs"][...]
             self.signals = f["hsignals"][...]
             self.systs = f["hsysts"][...]
-            self.systsnoprofile = f["hsystsnoprofile"][...]
             self.systsnoconstraint = f["hsystsnoconstraint"][...]
             self.systgroups = f["hsystgroups"][...]
             self.systgroupidxs = f["hsystgroupidxs"][...]
@@ -95,7 +94,6 @@ class FitInputData:
             self.nbinsmasked = self.nbinsfull - self.nbins
             self.nproc = len(self.procs)
             self.nsyst = len(self.systs)
-            self.nsystnoprofile = len(self.systsnoprofile)
             self.nsystnoconstraint = len(self.systsnoconstraint)
             self.nsignals = len(self.signals)
             self.nsystgroups = len(self.systgroups)
