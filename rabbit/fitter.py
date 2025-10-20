@@ -660,9 +660,10 @@ class Fitter:
                 )  # this should not be needed but should accelerates the minimization
                 # minimize
                 self.minimize()
-                val, grad, hess = self.loss_val_grad_hess()
-                edmval, cov = tfh.edmval_cov(grad, hess)
-                logger.info(f"edmval: {edmval}")
+                if self.diagnostics:
+                    val, grad, hess = self.loss_val_grad_hess()
+                    edmval, cov = tfh.edmval_cov(grad, hess)
+                    logger.info(f"edmval: {edmval}")
                 # difference w.r.t. nominal fit
                 diff = x_tmp - self.x.value()
                 nonprofiled_impacts[i, j].assign(diff)
