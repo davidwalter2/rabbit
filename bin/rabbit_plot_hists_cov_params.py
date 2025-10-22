@@ -172,6 +172,7 @@ def plot_matrix(
         matrix,
         cmap=cmap,
         annot=args.annot,
+        annot_kws={"fontsize":6},
         # fmt=".2g",
         square=True,
         cbar=True,

@@ -432,11 +432,13 @@ def make_plot(
         rlabel += r"\,/\,"
         rlabel = f"${rlabel} Pred.$"
         ### this creates the fiugre style. so i need 
-        fig, ax1 = plot_tools.figure(
+        fig, ax1, ratio_axes= plot_tools.figureWithRatio(
             h_inclusive[{f"{axis_name}_probe": 0}], ### just to make the right dimensions
             xlabel,
             ylabel,
             args.ylim,
+            rlabel,
+            args.rrange,
             xlim=args.axlim,
             width_scale=(
                 args.customFigureWidth
@@ -447,6 +449,7 @@ def make_plot(
             # subplotsizes=args.subplotSizes,
         )
         
+        ax2 = ratio_axes[-1]
         histtype_data = "errorbar"
 
         for j in range(len(h_inclusive[{f"{other_axis}_probe": 0}].values())):
@@ -456,7 +459,7 @@ def make_plot(
             if other_axis == "pt":
                 this_color = colormaps["tab10"](j)
 
-            # print(h_inclusive[{f"{axis_name}_probe": j}]) ### what if this one is actually data becuase it dones't change
+
             hep.histplot(
                 h_inclusive[{f"{axis_name}_probe": j}],
                 histtype = "step",
@@ -473,7 +476,6 @@ def make_plot(
             
             if data:
                 hscale = hh.divideHists(h_data[{f"{axis_name}_probe": j}], h_inclusive[{f"{axis_name}_probe": j}], rel_unc=True)
-                print(True if counts else h_data[{f"{axis_name}_probe": j}].variances() ** 0.5) ### so this is the only thing that changes but this is supposedly data which shouldnt change. crap.
                 if j == 0:
                     hep.histplot(
                         h_data[{f"{axis_name}_probe": j}],
@@ -499,6 +501,15 @@ def make_plot(
                         zorder=2,
                         flow="none",
                     )
+                hep.histplot(
+                    hscale,
+                    histtype="errorbar",
+                    color="black",
+                    yerr = True if counts else hscale.variances() ** 0.5,
+                    linewidth=2,
+                    ax=ax2,
+                    flow="none",
+                )
 
                 if h_data_stat is not None:
                     var_stat = h_data_stat[{f"{axis_name}_probe": j}].values() ** 2
@@ -533,7 +544,21 @@ def make_plot(
             if args.uncertaintyLabel:
                 label_unc = args.uncertaintyLabel
                 
-            # print(np.append((nom + std), ((nom + std))[-1])) ### so this doesnt chant
+            print(np.append((nom - std) / nom, ((nom - std) / nom)[-1]))
+
+            ax2.fill_between(
+                edges,
+                np.append((nom + std) / nom, ((nom + std) / nom)[-1]),
+                np.append((nom - std) / nom, ((nom - std) / nom)[-1]),
+                step="post",
+                facecolor=this_color,
+                zorder=0,
+                hatch=hatchstyle,
+                edgecolor="k",
+                linewidth=0.0,
+                # alpha = 0.5,
+                label=label_unc if not args.upperPanelUncertaintyBand else None,
+            )
             if args.upperPanelUncertaintyBand:
                 ax1.fill_between(
                     edges,
@@ -562,7 +587,7 @@ def make_plot(
             min_y = min(min_y, np.min(h_data.values() - h_data.variances() ** 0.5))
 
         range_y = max_y - min_y
-        
+
         if args.title == "HLT":
             if other_axis == "eta":
                 ax1.set_ylim(min_y - range_y * 0.1, max_y + range_y * 0.6)
@@ -576,9 +601,9 @@ def make_plot(
             
             
         if args.prefit:
-            outfile = f"{other_axis}_{args.title}_prefit"
+            outfile = f"{other_axis}_{args.title}_prefit_ratio"
         else:
-            outfile = f"{other_axis}_{args.title}_postfit"
+            outfile = f"{other_axis}_{args.title}_postfit_ratio"
 
         plot_tools.add_decor(
             ax1,
@@ -589,6 +614,9 @@ def make_plot(
             loc=args.titlePos,
             text_size=args.legSize,
         )
+        
+        ax1.xaxis.set_ticklabels([])
+        ax1.set_xlabel("")
 
         plot_tools.save_pdf_and_png(outdir, outfile)
 
@@ -692,7 +720,7 @@ def make_plots(
         hists_down = None
         hists_up = None
 
-    if args.unfoldedXsec: ### i set this to 1
+    if args.unfoldedXsec: ### i set this to 0
         # convert number in cross section in pb
         if lumi is not None and binwnorm is not None:
             to_xsc = lambda h: hh.scaleHist(h, 1.0 / (lumi * 1000))
@@ -707,7 +735,6 @@ def make_plots(
         if hist_var is not None:
             hists_up = [to_xsc(h) for h in hists_up]
             hists_down = [to_xsc(h) for h in hists_down]
-        # pdb.set_trace()
 
     # make plots in slices (e.g. for charge plus an minus separately)
     selection_axes = [a for a in axes if a.name in args.selectionAxes] ### i have none of these
@@ -921,7 +948,6 @@ def main():
     )
 
     results = fitresult["physics_models"]
-    pdb.set_trace()
     for margs in args.physicsModel:
         if margs == []:
             instance_keys = results.keys()
