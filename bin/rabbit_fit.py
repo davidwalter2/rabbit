@@ -624,7 +624,7 @@ def fit(args, fitter, ws, dofit=True):
                     logger.info(f"Observed Limit: {param} < {r}")
                     limits[i, j] = r
                 else:
-                    # now we need to find the the values for mu where q_{mu,A} = -2ln(L)
+                    # now we need to find the values for mu where q_{mu,A} = -2ln(L)
                     for k, clb in enumerate(clb_list):
                         clsb = cls * clb
                         qmuA = (
@@ -650,6 +650,7 @@ def fit(args, fitter, ws, dofit=True):
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
 
         for param in parms:
+            logger.info(f"-delta log(L) scan for {param}")
             x_scan, dnll_values = fitter.nll_scan(
                 param, args.scanRange, args.scanPoints, args.scanRangeUsePrefit
             )
@@ -678,7 +679,9 @@ def fit(args, fitter, ws, dofit=True):
 
         contours = np.zeros((len(parms), len(args.contourLevels), 2, len(fitter.parms)))
         for i, param in enumerate(parms):
+            logger.info(f"Contour scan for {param}")
             for j, cl in enumerate(args.contourLevels):
+                logger.info(f"    Now at CL {cl}")
 
                 # find confidence interval
                 contour = fitter.contour_scan(

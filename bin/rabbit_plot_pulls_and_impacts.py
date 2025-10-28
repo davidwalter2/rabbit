@@ -613,10 +613,6 @@ def readHistImpacts(
     #     unit = "rel. unc. in %"
     #     impacts /= hist_total.value
     #     scale=100
-    # elif lumi is not None:
-    #     unit = "bin/lumi unc. in /pb"
-    #     impacts /= lumi
-    #     scale=1
     # else:
     #     unit = "bin unc."
     #     scale=1
@@ -1172,7 +1168,6 @@ def produce_plots_hist(
     hist_impacts,
     hist_total,
     ibin=None,
-    lumi=None,
     group=False,
     asym=False,
     normalize=False,
@@ -1305,14 +1300,6 @@ def main():
                     # hist_ref
                     # hist_total_ref
 
-                    # lumi in pb-1
-                    lumi = (
-                        meta["meta_info_input"]["channel_info"]["ch0"].get(
-                            "lumi", 0.001
-                        )
-                        * 1000
-                    )
-
                     if fitresult_ref is not None:
                         hists_ref = fitresult_ref["physics_models"][model_key][
                             "channels"
@@ -1342,7 +1329,6 @@ def main():
                             hist[ibin],
                             hist_total[ibin],
                             ibin,
-                            lumi,
                             group=group,
                             grouping=grouping,
                             hist_impacts_ref=hist_ref[ibin] if fitresult_ref else None,
