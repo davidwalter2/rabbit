@@ -125,10 +125,12 @@ def plot_scan(
     combine=None,
 ):
 
-    xlabel = config.get("systematics_labels", {}).get(param, param)
+    xlabel = getattr(config, "systematics_labels", {}).get(param, param)
 
-    x = np.array(h_scan.axes["scan"]).astype(float)
-    y = h_scan.values() * 2
+    mask = np.isfinite(h_scan.values())
+
+    x = np.array(h_scan.axes["scan"]).astype(float)[mask]
+    y = h_scan.values()[mask] * 2
 
     fig, ax = plot_tools.figure(
         x,
