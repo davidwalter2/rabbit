@@ -354,6 +354,15 @@ def parseArgs():
         default=None,
         help="Label for uncertainty shown in the (ratio) plot",
     )
+    
+    parser.add_argument(
+        "--fixed_param",
+        type=str,
+        default="time",
+        help="the parameter that is not plotted. you choose a singe bin of this",
+    )
+    
+    
     args = parser.parse_args()
 
     return args
@@ -386,7 +395,6 @@ def make_plot(
     is_normalized=False,
     binwnorm=1.0,
     counts=True,
-    
 ):
     
     ratio = not args.noLowerPanel and h_data is not None ##TRUE
@@ -401,7 +409,8 @@ def make_plot(
 
     # compute event yield table before dividing by bin width
     
-    
+    params = list(h_data.axes.name)
+    varying_params = [p for p in params if p != args.fixed_param]
 
 
     histtype_data = "errorbar"
@@ -409,8 +418,8 @@ def make_plot(
 
    
     #len(h_inclusive.axes)): ## the first axis should be time. should implement time into this but for now am only going to take the average
-    h_data = h_data[{"time": 1}]
-    h_inclusive = h_inclusive[{"time": 1}]
+    h_data = h_data[{f"{args.fixed_param}": 1}]
+    h_inclusive = h_inclusive[{f"{args.fixed_param}": 1}]
     
     
     
@@ -420,10 +429,10 @@ def make_plot(
         h_inclusive = hh.scaleHist(h_inclusive, scale)
 
 
-    for axis_name in ["pt", "eta"]:
-        other_axis = "eta"
-        if axis_name == "eta":
-            other_axis = "pt"
+    for axis_name in varying_params:
+        other_axis = varying_params[1]
+        if axis_name == varying_params[1]:
+            other_axis = varying_params[0]
         xlabel = f"{other_axis}" ### for now am going to hard code this in
         # xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel)
 
@@ -433,7 +442,7 @@ def make_plot(
         rlabel = f"${rlabel} Pred.$"
         ### this creates the fiugre style. so i need 
         fig, ax1 = plot_tools.figure(
-            h_inclusive[{f"{axis_name}_probe": 0}], ### just to make the right dimensions
+            h_inclusive[{f"{axis_name}": 0}], ### just to make the right dimensions
             xlabel,
             ylabel,
             args.ylim,
@@ -444,21 +453,18 @@ def make_plot(
                 else 1.25 if len(axes_names) == 1 else 1
             ),
             automatic_scale=args.customFigureWidth is None,
-            # subplotsizes=args.subplotSizes,
         )
         
         histtype_data = "errorbar"
 
-        for j in range(len(h_inclusive[{f"{other_axis}_probe": 0}].values())):
-
+        for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
             
             this_color = colormaps["tab20"](j)
             if other_axis == "pt":
                 this_color = colormaps["tab10"](j)
 
-            # print(h_inclusive[{f"{axis_name}_probe": j}]) ### what if this one is actually data becuase it dones't change
             hep.histplot(
-                h_inclusive[{f"{axis_name}_probe": j}],
+                h_inclusive[{f"{axis_name}": j}],
                 histtype = "step",
                 xerr=False,
                 yerr=False,
@@ -470,27 +476,25 @@ def make_plot(
                 flow="none",
             )
             
-            
             if data:
-                hscale = hh.divideHists(h_data[{f"{axis_name}_probe": j}], h_inclusive[{f"{axis_name}_probe": j}], rel_unc=True)
-                print(True if counts else h_data[{f"{axis_name}_probe": j}].variances() ** 0.5) ### so this is the only thing that changes but this is supposedly data which shouldnt change. crap.
+                hscale = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}], rel_unc=True)
+                # print(True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5) ### so this is the only thing that changes but this is supposedly data which shouldnt change. crap.
                 if j == 0:
                     hep.histplot(
-                        h_data[{f"{axis_name}_probe": j}],
-                        yerr=True if counts else h_data[{f"{axis_name}_probe": j}].variances() ** 0.5,
+                        h_data[{f"{axis_name}": j}],
+                        yerr=True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5,
                         histtype=histtype_data,
                         color="black",
                         label=args.dataName,
                         binwnorm=binwnorm,
                         ax=ax1,
-                        # alpha=1.0,
                         zorder=2,
                         flow="none",
                     )
                 else:
                     hep.histplot(
-                        h_data[{f"{axis_name}_probe": j}],
-                        yerr=True if counts else h_data[{f"{axis_name}_probe": j}].variances() ** 0.5,
+                        h_data[{f"{axis_name}": j}],
+                        yerr=True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5,
                         histtype=histtype_data,
                         color="black",
                         binwnorm=binwnorm,
@@ -501,8 +505,8 @@ def make_plot(
                     )
 
                 if h_data_stat is not None:
-                    var_stat = h_data_stat[{f"{axis_name}_probe": j}].values() ** 2
-                    h_data_stat = h_data[{f"{axis_name}_probe": j}].copy()
+                    var_stat = h_data_stat[{f"{axis_name}": j}].values() ** 2
+                    h_data_stat = h_data[{f"{axis_name}": j}].copy()
                     h_data_stat.variances()[...] = var_stat
 
                     hep.histplot(
@@ -517,12 +521,12 @@ def make_plot(
                         zorder=2,
                         flow="none",
                     )
-            edges = h_inclusive[{f"{axis_name}_probe": j}].axes[0].edges
+            edges = h_inclusive[{f"{axis_name}": j}].axes[0].edges
 
             binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
 
-            nom = h_inclusive[{f"{axis_name}_probe": j}].values() / binwidth
-            std = np.sqrt(h_inclusive[{f"{axis_name}_probe": j}].variances()) / binwidth ### so this doesnt change which is wrong. i feel like this should be changing. or its converging on the same 
+            nom = h_inclusive[{f"{axis_name}": j}].values() / binwidth
+            std = np.sqrt(h_inclusive[{f"{axis_name}": j}].variances()) / binwidth ### so this doesnt change which is wrong. i feel like this should be changing. or its converging on the same 
 
             hatchstyle = None
             # label_unc = "Pred. unc."
@@ -533,7 +537,7 @@ def make_plot(
             if args.uncertaintyLabel:
                 label_unc = args.uncertaintyLabel
                 
-            # print(np.append((nom + std), ((nom + std))[-1])) ### so this doesnt chant
+            print(np.append((nom + std), ((nom + std))[-1])) ### so this doesnt chant
             if args.upperPanelUncertaintyBand:
                 ax1.fill_between(
                     edges,
@@ -544,12 +548,10 @@ def make_plot(
                     zorder=0,
                     hatch=hatchstyle,
                     edgecolor="k",
-                    # alpha = 0.5,
                     linewidth=0.0,
                     label=label_unc,
                 )
-                
-                
+                    
         ax1.legend(loc='upper right', ncols = 3, fontsize = 16)
         # need to divide by bin width
         
@@ -564,21 +566,23 @@ def make_plot(
         range_y = max_y - min_y
         
         if args.title == "HLT":
-            if other_axis == "eta":
+            if other_axis == "eta_probe":
                 ax1.set_ylim(min_y - range_y * 0.1, max_y + range_y * 0.6)
             else:
                 ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
         if args.title == "ID":
-            if other_axis == "eta":
+            if other_axis == "eta_probe":
                 ax1.set_ylim(0.99, 1.0)
             else:
                 ax1.set_ylim(0.99, 1.0)
             
+        outfile = f"{other_axis}_{axis_name}_{args.title}"
+
+        if other_axis == "time":
+            ax1.set_xlabel("sidereal time")
             
         if args.prefit:
-            outfile = f"{other_axis}_{args.title}_prefit"
-        else:
-            outfile = f"{other_axis}_{args.title}_postfit"
+            outfile += "_prefit"
 
         plot_tools.add_decor(
             ax1,
@@ -592,30 +596,72 @@ def make_plot(
 
         plot_tools.save_pdf_and_png(outdir, outfile)
 
-        # analysis_meta_info = None
-        # if meta is not None:
-        #     if "meta_info_input" in meta:
-        #         analysis_meta_info = {
-        #             "RabbitOutput": meta["meta_info"],
-        #             "AnalysisOutput": meta["meta_info_input"]["meta_info"],
-        #         }
-        #     else:
-        #         analysis_meta_info = {"AnalysisOutput": meta["meta_info"]}
+        analysis_meta_info = None
+        if meta is not None:
+            if "meta_info_input" in meta:
+                analysis_meta_info = {
+                    "RabbitOutput": meta["meta_info"],
+                    "AnalysisOutput": meta["meta_info_input"]["meta_info"],
+                }
+            else:
+                analysis_meta_info = {"AnalysisOutput": meta["meta_info"]}
 
         output_tools.write_index_and_log(
             outdir,
             outfile,
-            # analysis_meta_info={
-            #     "Stacked processes": yield_tables["stacked"],
-            #     "Unstacked processes": yield_tables["unstacked"],
-            #     **analysis_meta_info,
-            # },
+            analysis_meta_info={
+                **analysis_meta_info,
+            },
             args=args,
         )
+        
+        
+        
+        
+        fig, ax1 = plot_tools.figure(
+            h_inclusive[{f"{axis_name}": 0}], ### just to make the right dimensions
+            xlabel,
+            ylabel,
+            args.ylim,
+            xlim=args.axlim,
+            width_scale=(
+                args.customFigureWidth
+                if args.customFigureWidth is not None
+                else 1.25 if len(axes_names) == 1 else 1
+            ),
+            automatic_scale=args.customFigureWidth is None,
+        )
+                
+                
+                
+        
+        for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
+            
+            this_color = colormaps["tab20"](j)
+            if other_axis == "pt":
+                this_color = colormaps["tab10"](j)
 
-
-
-
+            scale_hist = hh.divideHists(h_inclusive[{f"{axis_name}": j}], h_data[{f"{axis_name}": j}])
+            hep.histplot(
+                scale_hist,
+                histtype = "step",
+                xerr=False,
+                yerr=False,
+                color=this_color,
+                label = f"{axis_name} bin {j}",
+                binwnorm=binwnorm,
+                ax=ax1,
+                zorder = 1,
+                flow="none",
+            )
+        outfile += "_scale"
+            
+        plot_tools.save_pdf_and_png(outdir, outfile)
+   
+            
+        
+        
+        
 
 
 def make_plots(
@@ -707,7 +753,6 @@ def make_plots(
         if hist_var is not None:
             hists_up = [to_xsc(h) for h in hists_up]
             hists_down = [to_xsc(h) for h in hists_down]
-        # pdb.set_trace()
 
     # make plots in slices (e.g. for charge plus an minus separately)
     selection_axes = [a for a in axes if a.name in args.selectionAxes] ### i have none of these
@@ -921,7 +966,6 @@ def main():
     )
 
     results = fitresult["physics_models"]
-    pdb.set_trace()
     for margs in args.physicsModel:
         if margs == []:
             instance_keys = results.keys()

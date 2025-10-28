@@ -51,6 +51,15 @@ def parseArgs():
         action="store_true",
         help="Print asymmetric constraints from contour scans",
     )
+    
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Path to output file. If not set, prints to terminal.",
+    )
+    
+    
     return parser.parse_args()
 
 
@@ -98,43 +107,48 @@ def main():
 
         if args.asym:
             constraints_asym = constraints_asym[order]
-
     nround = 5
+    output_lines = []
+
     if args.asym:
-        print(
+        output_lines.append(
             f"   {'Parameter':<30} {'pull':>6} +/- {'constraint':>10} + {'up':>10} - {'down':>10} ({'pull prefit':>11} +/- {'constraint prefit':>17})"
         )
-        print("   " + "-" * 100)
-        print(
-            "\n".join(
-                [
-                    f"   {l:<30} {round(p, nround):>6} +/- {round(c, nround):>10} + {round(c_asym[0], nround):>10} - {round(c_asym[1], nround):>10} ({round(pp, nround):>11} +/- {round(pc, nround):>17})"
-                    for l, p, c, c_asym, pp, pc in zip(
-                        labels,
-                        pulls,
-                        constraints,
-                        constraints_asym,
-                        pulls_prefit,
-                        constraints_prefit,
-                    )
-                ]
-            )
+        output_lines.append("   " + "-" * 100)
+        output_lines.extend(
+            [
+                f"   {l:<30} {round(p, nround):>6} +/- {round(c, nround):>10} + {round(c_asym[0], nround):>10} - {round(c_asym[1], nround):>10} ({round(pp, nround):>11} +/- {round(pc, nround):>17})"
+                for l, p, c, c_asym, pp, pc in zip(
+                    labels,
+                    pulls,
+                    constraints,
+                    constraints_asym,
+                    pulls_prefit,
+                    constraints_prefit,
+                )
+            ]
         )
     else:
-        print(
+        output_lines.append(
             f"   {'Parameter':<30} {'pull':>6} +/- {'constraint':>10} ({'pull prefit':>11} +/- {'constraint prefit':>17})"
         )
-        print("   " + "-" * 100)
-        print(
-            "\n".join(
-                [
-                    f"   {l:<30} {round(p, nround):>6} +/- {round(c, nround):>10} ({round(pp, nround):>11} +/- {round(pc, nround):>17})"
-                    for l, p, c, pp, pc in zip(
-                        labels, pulls, constraints, pulls_prefit, constraints_prefit
-                    )
-                ]
-            )
+        output_lines.append("   " + "-" * 100)
+        output_lines.extend(
+            [
+                f"   {l:<30} {round(p, nround):>6} +/- {round(c, nround):>10} ({round(pp, nround):>11} +/- {round(pc, nround):>17})"
+                for l, p, c, pp, pc in zip(
+                    labels, pulls, constraints, pulls_prefit, constraints_prefit
+                )
+            ]
         )
+        
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write("\n".join(output_lines))
+    else:
+        print("\n".join(output_lines))
+        
+        
 
 
 if __name__ == "__main__":

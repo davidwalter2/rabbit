@@ -15,6 +15,7 @@ from matplotlib import colormaps
 from matplotlib.lines import Line2D
 
 import rabbit.io_tools
+import pdb
 
 from wums import boostHistHelpers as hh  # isort: skip
 from wums import logging, output_tools, plot_tools  # isort: skip
@@ -596,7 +597,6 @@ def make_plot(
             var_stat = h_data_stat.values() ** 2
             h_data_stat = h_data.copy()
             h_data_stat.variances()[...] = var_stat
-
             hep.histplot(
                 h_data_stat,
                 yerr=True if counts else h_data_stat.variances() ** 0.5,
@@ -762,8 +762,9 @@ def make_plot(
             label_unc = default_unc_label if not args.unfoldedXsec else "Prefit unc."
             if args.uncertaintyLabel:
                 label_unc = args.uncertaintyLabel
-
+            
             if diff:
+
                 ax2.fill_between(
                     edges,
                     np.append((+std), ((+std))[-1]),
@@ -790,6 +791,8 @@ def make_plot(
                         label=label_unc,
                     )
             else:
+                print("THIS ONE")
+                print((nom + std) / nom)
                 ax2.fill_between(
                     edges,
                     np.append((nom + std) / nom, ((nom + std) / nom)[-1]),

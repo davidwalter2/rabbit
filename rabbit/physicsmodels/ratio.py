@@ -4,6 +4,7 @@ import tensorflow as tf
 from rabbit.physicsmodels import helpers
 from rabbit.physicsmodels.physicsmodel import PhysicsModel
 
+import pdb
 
 class Ratio(PhysicsModel):
     """
@@ -122,7 +123,6 @@ class Ratio(PhysicsModel):
         Axes selections are optional. But in case one is given for the numerator, the denominator must be specified as well and vice versa.
         Use 'None:None' if you don't want to do any for either numerator xor denominator.
         """
-
         if len(args) > 2 and ":" not in args[2]:
             procs_num = [p for p in args[2].split(",") if p != "None"]
             procs_den = [p for p in args[3].split(",") if p != "None"]
@@ -165,7 +165,6 @@ class Ratio(PhysicsModel):
         den = self.den.select(observables, inclusive=True)
 
         ratio = tf.reshape(num / den, [-1])
-
         return ratio
 
     def compute_flat_per_process(self, params, observables):

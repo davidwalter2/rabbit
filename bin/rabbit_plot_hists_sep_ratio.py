@@ -321,7 +321,7 @@ def parseArgs():
         help="Scale a variation by this factor",
     )
     parser.add_argument(
-        "--subplotSizes",
+        "-]-subplotSizes",
         nargs=2,
         type=int,
         default=[4, 2],
@@ -353,6 +353,13 @@ def parseArgs():
         type=str,
         default=None,
         help="Label for uncertainty shown in the (ratio) plot",
+    )
+
+    parser.add_argument(
+        "--fixed_param",
+        type=str,
+        default=None,
+        help="the parameter that is not plotted. you choose a singe bin of this",
     )
     args = parser.parse_args()
 
@@ -401,7 +408,7 @@ def make_plot(
 
     # compute event yield table before dividing by bin width
     
-    
+    pdb.set_trace()
 
 
     histtype_data = "errorbar"
@@ -409,8 +416,8 @@ def make_plot(
 
    
     #len(h_inclusive.axes)): ## the first axis should be time. should implement time into this but for now am only going to take the average
-    h_data = h_data[{"time": 1}]
-    h_inclusive = h_inclusive[{"time": 1}]
+    h_data = h_data[{f"{args.fixed_param}": 1}]
+    h_inclusive = h_inclusive[{f"{args.fixed_param}": 1}]
     
     
     
@@ -697,6 +704,7 @@ def make_plots(
         ].get()
     else: ## goes in here, i should have a variation plot though
         hist_var = None
+    
 
     if args.processGrouping is not None: ## this should be none
         hist_stack, labels, colors, procs = config.process_grouping(
