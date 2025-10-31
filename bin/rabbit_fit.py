@@ -127,7 +127,6 @@ def make_parser():
         action="store_true",
         help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
     )
-    parser.add_argument("--POIDefault", default=1.0, type=float, help="mode for POI's")
     parser.add_argument(
         "--asymptoticLimits",
         nargs="+",
