@@ -1,9 +1,14 @@
 name: Publish to PyPI
 
+### to release a new version vX.Y.Z
+# 1) Update the version in pyproject.toml: version = "X.Y.Z"
+# 2) git tag vX.Y.Z
+# 3) git push origin vX.Y.Z
+
 on:
   push:
     tags:
-      - "v*"   # e.g. v1.0.0, v2.3.1 etc.
+      - "v*" 
 
 jobs:
   build-and-publish:
