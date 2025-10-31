@@ -126,7 +126,6 @@ def make_parser():
         action="store_true",
         help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
     )
-    parser.add_argument("--POIDefault", default=1.0, type=float, help="mode for POI's")
     parser.add_argument(
         "--contourScan",
         default=None,
@@ -563,6 +562,7 @@ def fit(args, fitter, ws, dofit=True):
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
 
         for param in parms:
+            logger.info(f"-delta log(L) scan for {param}")
             x_scan, dnll_values = fitter.nll_scan(
                 param, args.scanRange, args.scanPoints, args.scanRangeUsePrefit
             )
@@ -591,7 +591,9 @@ def fit(args, fitter, ws, dofit=True):
 
         contours = np.zeros((len(parms), len(args.contourLevels), 2, len(fitter.parms)))
         for i, param in enumerate(parms):
+            logger.info(f"Contour scan for {param}")
             for j, cl in enumerate(args.contourLevels):
+                logger.info(f"    Now at CL {cl}")
 
                 # find confidence interval
                 contour = fitter.contour_scan(param, nllvalreduced, cl)

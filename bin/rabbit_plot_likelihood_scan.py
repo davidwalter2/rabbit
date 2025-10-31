@@ -4,14 +4,16 @@ import argparse
 import os
 
 import matplotlib.pyplot as plt
+import mplhep as hep
 import numpy as np
 
 from rabbit import io_tools
 
-from wums import output_tools, plot_tools  # isort: skip
+from wums import logging, output_tools, plot_tools  # isort: skip
 
+hep.style.use(hep.style.ROOT)
 
-plt.rcParams.update({"font.size": 14})
+logger = None
 
 
 def writeOutput(fig, outfile, extensions=[], postfix=None, args=None, meta_info=None):
@@ -48,6 +50,17 @@ def parseArgs():
         help="fitresults output",
     )
     parser.add_argument(
+        "-v",
+        "--verbose",
+        type=int,
+        default=3,
+        choices=[0, 1, 2, 3, 4],
+        help="Set verbosity level with logging, the larger the more verbose",
+    )
+    parser.add_argument(
+        "--noColorLogger", action="store_true", help="Do not use logging with colors"
+    )
+    parser.add_argument(
         "--result",
         default=None,
         type=str,
@@ -71,6 +84,12 @@ def parseArgs():
         help="Parameters to plot the likelihood scan",
     )
     parser.add_argument(
+        "--combine",
+        type=str,
+        default=None,
+        help="Provide a root file with likelihood scan result from combine",
+    )
+    parser.add_argument(
         "--title",
         default="Rabbit",
         type=str,
@@ -83,6 +102,12 @@ def parseArgs():
         help="Subtitle to be printed after title",
     )
     parser.add_argument("--titlePos", type=int, default=2, help="title position")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to config file for style formatting",
+    )
     return parser.parse_args()
 
 
@@ -95,13 +120,25 @@ def plot_scan(
     title=None,
     subtitle=None,
     titlePos=0,
+    ylabel=r"$-2\,\Delta \log L$",
+    config={},
+    combine=None,
 ):
 
-    x = np.array(h_scan.axes["scan"]).astype(float)
-    y = h_scan.values() * 2
+    xlabel = getattr(config, "systematics_labels", {}).get(param, param)
 
-    fig, ax = plt.subplots(figsize=(6, 4))
-    fig.subplots_adjust(left=0.12, bottom=0.14, right=0.99, top=0.99)
+    mask = np.isfinite(h_scan.values())
+
+    x = np.array(h_scan.axes["scan"]).astype(float)[mask]
+    y = h_scan.values()[mask] * 2
+
+    fig, ax = plot_tools.figure(
+        x,
+        xlabel,
+        ylabel,
+        xlim=(min(x), max(x)),
+        ylim=(min(y), max(y)),  # logy=args.logy
+    )
 
     ax.axhline(y=1, color="gray", linestyle="--", alpha=0.5)
     ax.axhline(y=4, color="gray", linestyle="--", alpha=0.5)
@@ -120,7 +157,17 @@ def plot_scan(
         label="Hessian",
     )
 
-    ax.plot(x, y, marker="x", color="blue", label="Likelihood scan")
+    ax.plot(
+        x,
+        y,
+        marker="x",
+        color="blue",
+        label="Likelihood scan",
+        markeredgewidth=2,
+    )
+
+    if combine is not None:
+        ax.plot(*combine, marker="o", color="orange", label="Combine")
 
     if h_contours is not None:
         for i, cl in enumerate(h_contours.axes["confidence_level"]):
@@ -134,8 +181,12 @@ def plot_scan(
                 markerfacecolor="none",
                 color="black",
                 linestyle="",
+                markeredgewidth=2,
                 label=label,
             )
+            logger.info(f"{int(float(cl))} sigma confidence level for {param} in {x}")
+
+            ax.axvline(x=0, color="gray", linestyle="--", alpha=0.5)
             for ix in x:
                 ax.axvline(x=ix, color="gray", linestyle="--", alpha=0.5)
 
@@ -150,15 +201,18 @@ def plot_scan(
         loc=titlePos,
     )
 
-    ax.set_xlabel(param)
-    ax.set_ylabel(r"$-2\,\Delta \log L$")
-
     return fig
 
 
 def main():
     args = parseArgs()
+
+    global logger
+    logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
+
     fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
+
+    config = plot_tools.load_config(args.config)
 
     meta = {
         "rabbit": meta["meta_info"],
@@ -166,11 +220,23 @@ def main():
 
     h_params = fitresult["parms"].get()
 
-    h_contour = None
-    if "contour_scans" in fitresult.keys():
-        h_contour = fitresult["contour_scans"].get()
+    if "contour_scan" in fitresult.keys():
+        h_contour = fitresult["contour_scan"].get()
+    else:
+        h_contour = None
 
     parms = h_params.axes["parms"] if len(args.params) == 0 else args.params
+
+    if args.combine is not None:
+        import uproot
+
+        with uproot.open(args.combine) as tfile:
+            vals = tfile["limit"]["r"].array()
+            nlls = tfile["limit"]["deltaNLL"].array()
+
+            order = np.argsort(vals)
+            vals = vals[order]
+            nlls = nlls[order] * 2  # -2ln(L)
 
     for param in parms:
         p = h_params[{"parms": param}]
@@ -178,9 +244,10 @@ def main():
         param_variance = p.variance
         h_scan = fitresult[f"nll_scan_{param}"].get()
 
-        h_contour_param = None
         if h_contour is not None:
             h_contour_param = h_contour[{"parms": param, "impacts": param}]
+        else:
+            h_contour_param = None
 
         fig = plot_scan(
             h_scan,
@@ -191,6 +258,8 @@ def main():
             title=args.title,
             subtitle=args.subtitle,
             titlePos=args.titlePos,
+            config=config,
+            combine=(vals, nlls) if args.combine is not None else None,
         )
         os.makedirs(args.outpath, exist_ok=True)
         outfile = os.path.join(args.outpath, f"nll_scan_{param}")

@@ -70,6 +70,11 @@ def parseArgs():
         help="Luminosity used in the fit, needed to get the absolute cross section",
     )
     parser.add_argument(
+        "--noEnergy",
+        action="store_true",
+        help="Don't include the energy in the upper right corner of the plot",
+    )
+    parser.add_argument(
         "--title",
         default="Rabbit",
         type=str,
@@ -1042,6 +1047,7 @@ def make_plot(
         lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
         loc=args.titlePos,
         text_size=args.legSize,
+        no_energy=args.noEnergy,
     )
 
     if len(h_stack) < 10:
@@ -1175,24 +1181,6 @@ def make_plots(
     else:
         hists_down = None
         hists_up = None
-
-    if args.unfoldedXsec:
-        # convert number in cross section in pb
-        if lumi is not None and binwnorm is not None:
-            to_xsc = lambda h: hh.scaleHist(h, 1.0 / (lumi * 1000))
-        else:
-            to_xsc = lambda h: h
-
-        hist_data = to_xsc(hist_data)
-        hist_inclusive = to_xsc(hist_inclusive)
-        if hist_inclusive_alt is not None:
-            hist_inclusive_alt = to_xsc(hist_inclusive_alt)
-        hist_stack = [to_xsc(h) for h in hist_stack]
-        if hist_data_stat is not None:
-            hist_data_stat = to_xsc(hist_data_stat)
-        if hist_var is not None:
-            hists_up = [to_xsc(h) for h in hists_up]
-            hists_down = [to_xsc(h) for h in hists_down]
 
     # make plots in slices (e.g. for charge plus an minus separately)
     selection_axes = [a for a in axes if a.name in args.selectionAxes]
