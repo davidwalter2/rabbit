@@ -916,7 +916,12 @@ def make_plots(
                 df[f"{key}_both"] = df[[key, f"{key}_ref"]].min(axis=1)
 
         if args.sort in df.keys():
-            df = df.sort_values(by=args.sort, ascending=args.ascending)
+            if f"{args.sort}_ref" in df.keys():
+                df = df.sort_values(
+                    by=[args.sort, f"{args.sort}_ref"], ascending=args.ascending
+                )
+            else:
+                df = df.sort_values(by=args.sort, ascending=args.ascending)
         else:
             print(
                 f"Trying to sort {args.sort} but not found in dataframe, continue without sorting"
