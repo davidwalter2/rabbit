@@ -632,9 +632,13 @@ def fit(args, fitter, ws, dofit=True):
                             + scipy.stats.norm.ppf(1 - clsb, loc=0, scale=1)
                         ) ** 2
                         logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmuA}")
-                        r = fitter.contour_scan(param, nllvalreduced, qmuA, signs=[1])[
-                            0
-                        ]
+
+                        ### Gaussian approximation
+                        r = xval[idx] + xerr * qmuA**0.5
+
+                        # r = fitter.contour_scan(param, nllvalreduced, qmuA, signs=[1])[
+                        #     0
+                        # ]
                         logger.info(f"Expected {round(clb*100,1):4.1f}%: {param} < {r}")
                         limits[i, j, k] = r
 
