@@ -63,7 +63,7 @@ def parseArgs():
     return parser.parse_args()
 
 
-def printImpactsHist(args, hist_bin, hist_total_bin, ibin, lumi=None):
+def printImpactsHist(args, hist_bin, hist_total_bin, ibin):
     labels = np.array(hist_bin.axes["impacts"])
     impacts = hist_bin.values()
 
@@ -75,10 +75,6 @@ def printImpactsHist(args, hist_bin, hist_total_bin, ibin, lumi=None):
         unit = "rel. unc. in %"
         impacts /= hist_total_bin.value
         scale = 100
-    elif lumi is not None:
-        unit = "bin/lumi unc. in /pb"
-        impacts /= lumi
-        scale = 1
     else:
         unit = "bin unc."
         scale = 1
@@ -165,17 +161,12 @@ def main():
 
             hist = hists[key].get()
 
-            # lumi in pb-1
-            lumi = (
-                meta["meta_info_input"]["channel_info"]["ch0"].get("lumi", 0.001) * 1000
-            )
-
             for idxs in itertools.product(
                 *[np.arange(a.size) for a in hist_total.axes]
             ):
                 ibin = {a: i for a, i in zip(hist_total.axes.name, idxs)}
-                print(f"Now at {ibin}")
-                printImpactsHist(args, hist[ibin], hist_total[ibin], ibin, lumi)
+                print(f"Now at {ibin} with {hist_total[ibin]}")
+                printImpactsHist(args, hist[ibin], hist_total[ibin], ibin)
     else:
         for poi in io_tools.get_poi_names(meta):
             print(f"Now at {poi}")

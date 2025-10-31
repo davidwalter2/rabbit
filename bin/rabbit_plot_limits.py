@@ -97,6 +97,13 @@ def parseArgs():
     parser.add_argument(
         "--legCols", type=int, default=2, help="Number of columns in legend"
     )
+    parser.add_argument(
+        "--ylim",
+        type=float,
+        nargs=2,
+        default=None,
+        help="Min and max values for y axis (if not specified, range set automatically)",
+    )
     args = parser.parse_args()
 
     return args
@@ -177,7 +184,11 @@ def main():
             args.ylabel,
             automatic_scale=False,
             xlim=(min(x) - 0.5, max(x) + 0.5),
-            ylim=(ymin - yrange * 0.1, ymax + yrange * 0.6),
+            ylim=(
+                (ymin - yrange * 0.1, ymax + yrange * 0.6)
+                if args.ylim is None
+                else args.ylim
+            ),
         )
 
         ax.fill_between(x, yexp_m2, yexp_p2, color="#F5BB54", label=r"95% expected")
