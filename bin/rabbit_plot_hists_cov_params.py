@@ -168,7 +168,7 @@ def plot_matrix(
     if args.n_params != 0:
         start = int(-1*args.n_params)
         matrix = matrix[start:, start:]
-    
+    pdb.set_trace()
     sns.heatmap(
         matrix,
         cmap=cmap,

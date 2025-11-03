@@ -14,12 +14,14 @@ import scipy.stats
 from matplotlib import colormaps
 from matplotlib.lines import Line2D
 
+
+import seaborn as sns
 import rabbit.io_tools
-import pdb
 
 from wums import boostHistHelpers as hh  # isort: skip
 from wums import logging, output_tools, plot_tools  # isort: skip
 
+import pdb
 
 hep.style.use(hep.style.ROOT)
 
@@ -352,6 +354,27 @@ def parseArgs():
         default=None,
         help="Label for uncertainty shown in the (ratio) plot",
     )
+    parser.add_argument(
+        "--fixed_param",
+        type=str,
+        default="time",
+        help="the parameter that is not plotted. you choose a singe bin of this",
+    )
+    
+    parser.add_argument(
+        "--useData",
+        type=str,
+        default=False,
+        help="whether to use data or mc for the heatmap",
+    )
+    
+    parser.add_argument(
+        "--annot", type = bool, default = False, help="display values in center of the cell"
+    )
+        
+        
+    
+    
     args = parser.parse_args()
 
     return args
@@ -359,7 +382,6 @@ def parseArgs():
 
 def make_plot(
     h_data,
-    h_inclusive,
     h_stack,
     axes,
     outdir,
@@ -384,586 +406,73 @@ def make_plot(
     is_normalized=False,
     binwnorm=1.0,
     counts=True,
+    cmap = "coolwarm"
 ):
-    ratio = not args.noLowerPanel and h_data is not None
-    diff = not args.noLowerPanel and args.diff and h_data is not None
-    data = not args.noData and h_data is not None
+        
+    params = list(h_data.axes.name)
+    varying_params = [p for p in params if p != args.fixed_param]
+    varying_params_ind = [i for i in range(len(axes)) if axes[i].name in varying_params]
 
-    axes_names = [a.name for a in axes]
-    if len(axes_names) == 0:
-        axes_names = ["yield"]
+    axis_1 = [axes[varying_params_ind[0]].value(i) for i in range(len(axes[varying_params_ind[0]])+1)]
+    axis_2 = [axes[varying_params_ind[1]].value(i) for i in range(len(axes[varying_params_ind[1]])+1)]
+    axes_names = [a.name for a in axes] ## [time, pt_probe, eta_probe]
 
-    if any(x.startswith("pt") or x.startswith("mll") for x in axes_names):
-        # in case of variable bin width normalize to unit
-        ylabel = (
-            r"$Events\,/\,GeV$" if not args.unfoldedXsec else r"$d\sigma (pb\,/\,GeV)$"
-        )
-    else:
-        ylabel = r"$Normalized\ units$" if is_normalized else r"$Events\,/\,unit$"
-        if args.unfoldedXsec:
-            ylabel = r"$d\sigma (pb)$"
+    ### NEED TO FIX THIS
+    # pdb.set_trace()
+    h_data = h_data[{f"{args.fixed_param}": 1}]
+    if len(h_data.shape) > 2:
+        flat = np.prod(h_data.shape[: len(h_data.shape) // 2])
+        h_data = h_data.reshape((flat, flat))
+        
+    fig, ax = plt.subplots(figsize=(8, 6))
+    # sns.color_palette("Spectral", as_cmap=True)
 
-    if args.ylabel is not None:
-        ylabel = args.ylabel
+    
+    mesh = ax.pcolormesh(axis_2, axis_1, h_data.values(), cmap='Spectral_r')
 
-    # compute event yield table before dividing by bin width
-    yield_tables = {
-        "stacked": pd.DataFrame(
-            [
-                (
-                    k,
-                    np.sum(h.project(*axes_names).values()),
-                    np.sum(h.project(*axes_names).variances()) ** 0.5,
-                )
-                for k, h in zip(labels, h_stack)
-            ],
-            columns=["Process", "Yield", "Uncertainty"],
-        ),
-        "unstacked": pd.DataFrame(
-            [
-                (
-                    k,
-                    np.sum(h.project(*axes_names).values()),
-                    np.sum(h.project(*axes_names).variances()) ** 0.5,
-                )
-                for k, h in zip([args.dataName, "Inclusive"], [h_data, h_inclusive])
-                if h is not None
-            ],
-            columns=["Process", "Yield", "Uncertainty"],
-        ),
-    }
+    # sns.heatmap(
+    #     h_data.values(),
+    #     cmap="Spectral_r",
+    #     annot=args.annot,
+    #     annot_kws={"fontsize":6},
+    #     # fmt=".2g",
+    #     cbar=True,
+    #     linewidths=0.5,
+    #     ax=ax,
+    #     xticklabels = axis_2, 
+    #     yticklabels = axis_1,
+    #     fmt = ".3f"
+    # )
+    ax.set_aspect('auto')
+    plt.colorbar(mesh, ax=ax, label='efficiency')
 
-    histtype_data = "errorbar"
-    histtype_mc = "fill" if not args.unfoldedXsec else "errorbar"
 
-    if len(h_inclusive.axes) > 1:
-        if args.invertAxes:
-            logger.info("invert eta order")
-            axes_names = axes_names[::-1]
-            axes = axes[::-1]
+        
+    outfile = f"{varying_params[0]}_{varying_params[1]}_{args.title}"
 
-        # make unrolled 1D histograms
-        if (
-            h_data is not None
-            and binwnorm is not None
-            and h_data.storage_type != hist.storage.Weight
-        ):
-            # need hist with variances to handle bin width normaliztion
-            h_data_tmp = hist.Hist(
-                *[a for a in h_data.axes], storage=hist.storage.Weight()
-            )
-            h_data_tmp.values()[...] = h_data.values()
-            h_data_tmp.variances()[...] = h_data.values()
-            h_data = h_data_tmp
 
-        if h_data is not None:
-            h_data = hh.unrolledHist(h_data, binwnorm=binwnorm, obs=axes_names)
-
-        h_inclusive = hh.unrolledHist(h_inclusive, binwnorm=binwnorm, obs=axes_names)
-        h_stack = [
-            hh.unrolledHist(h, binwnorm=binwnorm, obs=axes_names) for h in h_stack
-        ]
-        if hup is not None:
-            hup = [hh.unrolledHist(h, binwnorm=binwnorm, obs=axes_names) for h in hup]
-        if hdown is not None:
-            hdown = [
-                hh.unrolledHist(h, binwnorm=binwnorm, obs=axes_names) for h in hdown
-            ]
-        if h_data_stat is not None:
-            h_data_stat = hh.unrolledHist(
-                h_data_stat, binwnorm=binwnorm, obs=axes_names
-            )
-
-    if args.normToData and h_data is not None:
-        scale = h_data.values().sum() / h_inclusive.values().sum()
-        h_stack = [hh.scaleHist(h, scale) for h in h_stack]
-        h_inclusive = hh.scaleHist(h_inclusive, scale)
-
-    xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel)
-
-    if ratio or diff:
-        if args.noData:
-            rlabel = ("Diff." if diff else "Ratio") + " to nominal"
-        else:
-            rlabel = args.dataName.replace(" ", r"\ ")
-            if diff:
-                rlabel += r"\,-\,"
-            else:
-                rlabel += r"\,/\,"
-            rlabel = f"${rlabel} Pred.$"
-
-        fig, ax1, ratio_axes = plot_tools.figureWithRatio(
-            h_inclusive,
-            xlabel,
-            ylabel,
-            args.ylim,
-            rlabel,
-            args.rrange,
-            xlim=args.axlim,
-            width_scale=(
-                args.customFigureWidth
-                if args.customFigureWidth is not None
-                else 1.25 if len(axes_names) == 1 else 1
-            ),
-            automatic_scale=args.customFigureWidth is None,
-            subplotsizes=args.subplotSizes,
-        )
-        ax2 = ratio_axes[-1]
-    else:
-        fig, ax1 = plot_tools.figure(h_inclusive, xlabel, ylabel, args.ylim)
-
-    for (
-        h,
-        c,
-        l,
-    ) in zip(h_stack, colors, labels):
-        # only for labels
-        hep.histplot(
-            h,
-            xerr=False,
-            yerr=False,
-            histtype=histtype_mc,
-            color=c,
-            label=getattr(config, "process_labels", {}).get(l, l),
-            density=False,
-            binwnorm=binwnorm,
-            ax=ax1,
-            zorder=1,
-            flow="none",
-        )
-
-    if len(h_stack):
-        hep.histplot(
-            h_stack,
-            xerr=False,
-            yerr=False,
-            histtype=histtype_mc,
-            color=colors,
-            stack=True,
-            density=False,
-            binwnorm=binwnorm,
-            ax=ax1,
-            zorder=1,
-            flow="none",
-        )
-
-    if args.showVariations in ["upper", "both"]:
-        linewidth = 2
-        if hup is not None:
-            hep.histplot(
-                hup,
-                histtype="step",
-                color=varColors,
-                linestyle="-",
-                yerr=False,
-                linewidth=linewidth,
-                label=varLabels,
-                binwnorm=binwnorm,
-                ax=ax1,
-                flow="none",
-            )
-        if (
-            hdown is not None
-            and any(h is not None for h in hdown)
-            and len(args.varOneSided) == 0
-        ):
-            hep.histplot(
-                hdown,
-                histtype="step",
-                color=varColors,
-                linestyle="--",
-                yerr=False,
-                linewidth=linewidth,
-                binwnorm=binwnorm,
-                ax=ax1,
-                flow="none",
-            )
-
-    if data:
-        hep.histplot(
-            h_data,
-            yerr=True if counts else h_data.variances() ** 0.5,
-            histtype=histtype_data,
-            color="black",
-            label=args.dataName,
-            binwnorm=binwnorm,
-            ax=ax1,
-            alpha=1.0,
-            zorder=2,
-            flow="none",
-        )
-
-        if h_data_stat is not None:
-            var_stat = h_data_stat.values() ** 2
-            h_data_stat = h_data.copy()
-            h_data_stat.variances()[...] = var_stat
-            hep.histplot(
-                h_data_stat,
-                yerr=True if counts else h_data_stat.variances() ** 0.5,
-                histtype=histtype_data,
-                color="black",
-                binwnorm=binwnorm,
-                capsize=2,
-                ax=ax1,
-                alpha=1.0,
-                zorder=2,
-                flow="none",
-            )
-    if (args.unfoldedXsec or len(h_stack) == 0) and not args.noPrefit:
-        hep.histplot(
-            h_inclusive,
-            yerr=False,
-            histtype="step",
-            color="black",
-            label="Prefit model" if args.unfoldedXsec else "Prediction",
-            binwnorm=binwnorm,
-            ax=ax1,
-            alpha=1.0,
-            zorder=2,
-            flow="none",
-        )
-
-    if args.ylim is None and binwnorm is None:
-        max_y = np.max(h_inclusive.values() + h_inclusive.variances() ** 0.5)
-        min_y = np.min(h_inclusive.values() - h_inclusive.variances() ** 0.5)
-
-        if h_data is not None:
-            max_y = max(max_y, np.max(h_data.values() + h_data.variances() ** 0.5))
-            min_y = min(min_y, np.min(h_data.values() - h_data.variances() ** 0.5))
-
-        range_y = max_y - min_y
-
-        ax1.set_ylim(min_y - range_y * 0.1, max_y + range_y * 0.1)
-
-    if len(axes_names) > 1 and args.binSeparationLines is not None:
-        # plot dashed vertical lines to sepate makro bins
-
-        s_range = lambda x, n=1: (
-            int(x) if round(x, n) == float(int(round(x, n))) else round(x, n)
-        )
-        max_y = np.max(h_inclusive.values()[...])
-        min_y = ax1.get_ylim()[0]
-
-        range_y = max_y - min_y
-
-        for i in range(1, axes[0].size + 1):
-            if len(args.binSeparationLines) > 0 and not any(
-                np.isclose(x, axes[0].edges[i]) for x in args.binSeparationLines
-            ):
-                continue
-
-            x = axes[-1].size * i
-            x_lo = axes[-1].size * (i - 1)
-
-            if i < axes[0].size + 1:
-                # don't plot last line since it's the axis line already
-                ax1.plot([x, x], [min_y, max_y], linestyle="--", color="black")
-
-            if len(args.binSeparationLines) == 0 or any(
-                np.isclose(x, axes[0].edges[i - 1]) for x in args.binSeparationLines
-            ):
-                y = min_y + range_y * (
-                    0.15 if np.min(h_inclusive.values()[x_lo:x]) > max_y * 0.3 else 0.8
-                )
-                lo = s_range(axes[0].edges[i - 1])
-                hi = s_range(axes[0].edges[i])
-                plot_tools.wrap_text(
-                    [axes_names[0], f"${lo}-{hi}$"],
-                    ax1,
-                    x_lo,
-                    y,
-                    x,
-                    text_size="small",
-                    transform=ax1.transData,
-                )
-
-    if ratio or diff:
-        extra_handles = []
-        extra_labels = []
-        if is_normalized:
-            cutoff = 0.5 * np.stack((h_data.values(), h_inclusive.values())).min()
-        else:
-            cutoff = 0.01
-        if diff:
-            h1 = hh.addHists(h_inclusive, h_inclusive, scale2=-1)
-            h2 = hh.addHists(h_data, h_inclusive, scale2=-1)
-            if h_data_stat is not None:
-                h2_stat = hh.divideHists(
-                    h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
-                )
-        else:
-            h1 = hh.divideHists(
-                h_inclusive,
-                h_inclusive,
-                cutoff=1e-8,
-                rel_unc=True,
-                flow=False,
-                by_ax_name=False,
-            )
-            h2 = hh.divideHists(h_data, h_inclusive, cutoff=cutoff, rel_unc=True)
-            if h_data_stat is not None:
-                h2_stat = hh.divideHists(
-                    h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
-                )
-
-        hep.histplot(
-            h1,
-            histtype="step",
-            color="grey",
-            alpha=0.5,
-            yerr=False,
-            ax=ax2,
-            linewidth=2,
-            flow="none",
-        )
-
-        if data:
-            hep.histplot(
-                h2,
-                histtype="errorbar",
-                color="black",
-                yerr=True if counts else h2.variances() ** 0.5,
-                linewidth=2,
-                ax=ax2,
-                flow="none",
-            )
-            if h_data_stat is not None:
-                hep.histplot(
-                    h2_stat,
-                    histtype="errorbar",
-                    color="black",
-                    yerr=True if counts else h2.variances() ** 0.5,
-                    linewidth=2,
-                    capsize=2,
-                    ax=ax2,
-                    flow="none",
-                )
-
-        # for uncertaity bands
-        edges = h_inclusive.axes[0].edges
-
-        # need to divide by bin width
-        binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
-        if h_inclusive.storage_type != hist.storage.Weight:
-            raise ValueError(
-                f"Did not find uncertainties in {fittype} hist. Make sure you run rabbit_fit with --computeHistErrors!"
-            )
-
-        if not args.noUncertainty:
-            nom = h_inclusive.values() / binwidth
-            std = np.sqrt(h_inclusive.variances()) / binwidth
-
-            hatchstyle = None
-            facecolor = "silver"
-            # label_unc = "Pred. unc."
-            default_unc_label = (
-                "Normalized model unc." if is_normalized else "Model unc."
-            )
-            label_unc = default_unc_label if not args.unfoldedXsec else "Prefit unc."
-            if args.uncertaintyLabel:
-                label_unc = args.uncertaintyLabel
-            
-            if diff:
-                
-                ax2.fill_between(
-                    edges,
-                    np.append((+std), ((+std))[-1]),
-                    np.append((-std), ((-std))[-1]),
-                    step="post",
-                    facecolor=facecolor,
-                    zorder=0,
-                    hatch=hatchstyle,
-                    edgecolor="k",
-                    linewidth=0.0,
-                    label=label_unc if not args.upperPanelUncertaintyBand else None,
-                )
-                if args.upperPanelUncertaintyBand:
-                    ax1.fill_between(
-                        edges,
-                        np.append((nom + std), ((nom + std))[-1]),
-                        np.append((nom - std), ((nom - std))[-1]),
-                        step="post",
-                        facecolor=facecolor,
-                        zorder=0,
-                        hatch=hatchstyle,
-                        edgecolor="k",
-                        linewidth=0.0,
-                        label=label_unc,
-                    )
-            else:
-
-                ax2.fill_between(
-                    edges,
-                    np.append((nom + std) / nom, ((nom + std) / nom)[-1]),
-                    np.append((nom - std) / nom, ((nom - std) / nom)[-1]),
-                    step="post",
-                    facecolor=facecolor,
-                    zorder=0,
-                    hatch=hatchstyle,
-                    edgecolor="k",
-                    linewidth=0.0,
-                    label=label_unc if not args.upperPanelUncertaintyBand else None,
-                )
-                if args.upperPanelUncertaintyBand:
-                    ax1.fill_between(
-                        edges,
-                        np.append((nom + std), ((nom + std))[-1]),
-                        np.append((nom - std), ((nom - std))[-1]),
-                        step="post",
-                        facecolor=facecolor,
-                        zorder=0,
-                        hatch=hatchstyle,
-                        edgecolor="k",
-                        linewidth=0.0,
-                        label=label_unc,
-                    )
-
-        if (
-            args.showVariations in ["lower", "both"]
-            and hup is not None
-            and any(h is not None for h in hup)
-        ):
-            linewidth = 2
-            scaleVariation = [
-                args.scaleVariation[i] if i < len(args.scaleVariation) else 1
-                for i in range(len(varNames))
-            ]
-            varOneSided = [
-                args.varOneSided[i] if i < len(args.varOneSided) else 0
-                for i in range(len(varNames))
-            ]
-
-            for i, (hu, hd) in enumerate(zip(hup, hdown)):
-
-                if scaleVariation[i] != 1:
-                    hdiff = hh.addHists(hu, h_inclusive, scale2=-1)
-                    hdiff = hh.scaleHist(hdiff, scaleVariation[i])
-                    hu = hh.addHists(hdiff, h_inclusive)
-
-                    if not varOneSided[i]:
-                        hdiff = hh.addHists(hd, h_inclusive, scale2=-1)
-                        hdiff = hh.scaleHist(hdiff, scaleVariation[i])
-                        hd = hh.addHists(hdiff, h_inclusive)
-
-                if diff:
-                    op = lambda h, hI=h_inclusive: hh.addHists(h, hI, scale2=-1)
-                else:
-                    op = lambda h, hI=h_inclusive: hh.divideHists(
-                        h, hI, cutoff=cutoff, rel_unc=True
-                    )
-
-                if varOneSided[i]:
-                    hvars = op(hu)
-                    linestyles = "-"
-                else:
-                    hvars = [
-                        op(hu),
-                        op(hd),
-                    ]
-                    linestyles = ["-", "--"]
-
-                hep.histplot(
-                    hvars,
-                    histtype="step",
-                    color=varColors[i],
-                    linestyle=linestyles,
-                    yerr=False,
-                    linewidth=linewidth,
-                    label=varLabels[i] if varOneSided[i] else None,
-                    ax=ax2,
-                    flow="none",
-                )
-                if not varOneSided[i]:
-                    extra_handles.append(
-                        Line2D([0], [0], color=varColors[i], linewidth=linewidth)
-                    )
-                    extra_labels.append(varLabels[i])
-
-    scale = max(1, np.divide(*ax1.get_figure().get_size_inches()) * 0.3)
-
-    text_pieces = []
-    if not args.unfoldedXsec:
-        if is_normalized:
-            text_pieces.append(fittype.capitalize() + " (normalized)")
-        else:
-            text_pieces.append(fittype.capitalize())
-
-    if selection is not None:
-        text_pieces.extend(selection)
-
-    if chi2[0] is not None and data:
-        p_val = int(np.round(scipy.stats.chi2.sf(chi2[0], chi2[1]) * 100))
-        if saturated_chi2:
-            chi2_name = r"$\mathit{\chi}_{\mathrm{sat.}}^2/\mathit{ndf}$"
-        else:
-            chi2_name = r"$\mathit{\chi}^2/\mathit{ndf}$"
-
-        # chi2_text = [
-        #     chi2_name,
-        #     rf"$= {round(chi2[0],1)}/{chi2[1]}\ (\mathit{{p}}={p_val}\%)$",
-        # ]
-        chi2_text = [
-            rf"{chi2_name} = ${np.round(chi2[0],1)}/{chi2[1]}$",
-            rf"$(\mathit{{p}}={p_val}\%)$",
-        ]
-
-        if args.extraTextLoc is None or len(args.extraTextLoc) <= 2:
-            text_pieces.extend(chi2_text)
-        else:
-            plot_tools.wrap_text(
-                chi2_text,
-                ax1,
-                *args.extraTextLoc[2:],
-                text_size=args.legSize,
-                ha="left",
-                va="top",
-            )
-
-    if ratio or diff:
-        plot_tools.fix_axes(ax1, ax2, fig, yscale=args.yscale, noSci=args.noSciy)
-    else:
-        plot_tools.fix_axes(ax1, yscale=args.yscale, logy=args.logy)
 
     plot_tools.add_decor(
-        ax1,
-        args.title,
+        ax,
+        outfile,
         args.subtitle,
-        data=data or "Nonprompt" in labels,
         lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
         loc=args.titlePos,
         text_size=args.legSize,
     )
+    
+    ax.set_xlabel(varying_params[1])
+    ax.set_ylabel(varying_params[0])
 
-    if len(h_stack) < 10:
-        plot_tools.addLegend(
-            ax1,
-            ncols=args.legCols,
-            loc=args.legPos,
-            text_size=args.legSize,
-            extra_text=text_pieces,
-            extra_text_loc=None if args.extraTextLoc is None else args.extraTextLoc[:2],
-            padding_loc=args.legPadding,
-        )
-
-    if ratio or diff:
-        plot_tools.addLegend(
-            ax2,
-            ncols=args.lowerLegCols,
-            loc=args.lowerLegPos,
-            text_size=args.legSize,
-            extra_handles=extra_handles,
-            extra_labels=extra_labels,
-            custom_handlers=["stacked"],
-            padding_loc=args.lowerLegPadding,
-        )
-
-    to_join = [fittype, args.postfix, *axes_names, suffix]
-    outfile = "_".join(filter(lambda x: x, to_join))
-    if is_normalized:
-        outfile += "_normalized"
-    if args.subtitle == "Preliminary":
-        outfile += "_preliminary"
-
+    if args.prefit:
+        outfile += "_prefit"
+    
+    if args.useData == True:
+        ax.set_title("Data")
+        outfile += "_data"
+    else:
+        ax.set_title("MC") 
+        outfile += "_mc"
     plot_tools.save_pdf_and_png(outdir, outfile)
 
     analysis_meta_info = None
@@ -980,12 +489,10 @@ def make_plot(
         outdir,
         outfile,
         analysis_meta_info={
-            "Stacked processes": yield_tables["stacked"],
-            "Unstacked processes": yield_tables["unstacked"],
             **analysis_meta_info,
-        },
-        args=args,
-    )
+            },
+            args=args,
+        )
 
 
 def make_plots(
@@ -998,7 +505,7 @@ def make_plots(
     args=None,
     channel="",
     lumi=1,
-    fittype="postit",
+    fittype="postfit",
     varNames=None,
     varLabels=None,
     varColors=None,
@@ -1006,40 +513,37 @@ def make_plots(
     *opts,
     **kwopts,
 ):
-
+    
+    
     hist_data_stat = None
-
-    if args.unfoldedXsec:
-        hist_data = result[f"hist_{fittype}_inclusive"].get()
-        name_impacts = f"hist_global_impacts_grouped_{fittype}_inclusive"
-        if name_impacts in result.keys():
-            hist_data_stat = result[name_impacts].get()[{"impacts": "stat"}]
-        hist_inclusive = result[f"hist_prefit_inclusive"].get()
+    if args.prefit:
+        fittype = "prefit"
+    if args.unfoldedXsec: ### should go through this
+        if args.useData:
+            hist = result[f"hist_{fittype}_inclusive"].get()
+            name_impacts = f"hist_global_impacts_grouped_{fittype}_inclusive"
+            if name_impacts in result.keys():
+                hist_data_stat = result[name_impacts].get()[{"impacts": "stat"}]
+        else: 
+            hist = result[f"hist_prefit_inclusive"].get()
         hist_stack = []
+
+        
     else:
-        if f"hist_{args.dataHist}" in result.keys():
-            hist_data = result[f"hist_{args.dataHist}"].get()
-        else:
-            hist_data = None
-
-        hist_inclusive = result[f"hist_{fittype}_inclusive"].get()
-        if f"hist_{fittype}" in result.keys():
-            hist_stack = result[f"hist_{fittype}"].get()
-            hist_stack = [hist_stack[{"processes": p}] for p in procs]
-        else:
-            hist_stack = []
-
-    axes = [a for a in hist_inclusive.axes]
+        print("NEED TO DO CROSS SECTION")
+        
+    
+    axes = [a for a in hist.axes]
 
     # vary poi by postfit uncertainty
     if varNames is not None:
         hist_var = result[
             f"hist_{fittype}_inclusive_variations{'_correlated' if args.correlatedVariations else ''}"
         ].get()
-    else:
+    else: ## goes in here, i should have a variation plot though
         hist_var = None
 
-    if args.processGrouping is not None:
+    if args.processGrouping is not None: ## this should be none
         hist_stack, labels, colors, procs = config.process_grouping(
             args.processGrouping, hist_stack, procs
         )
@@ -1057,19 +561,19 @@ def make_plots(
             hist_var[{"downUpVar": 1, "vars": n}].project(*[a.name for a in axes])
             for n in varNames
         ]
-    else:
+    else: ### here
         hists_down = None
         hists_up = None
 
-    if args.unfoldedXsec:
+    if args.unfoldedXsec: ### i set this to 1
         # convert number in cross section in pb
         if lumi is not None and binwnorm is not None:
             to_xsc = lambda h: hh.scaleHist(h, 1.0 / (lumi * 1000))
         else:
             to_xsc = lambda h: h
 
-        hist_data = to_xsc(hist_data)
-        hist_inclusive = to_xsc(hist_inclusive)
+        
+        hist = to_xsc(hist)
         hist_stack = [to_xsc(h) for h in hist_stack]
         if hist_data_stat is not None:
             hist_data_stat = to_xsc(hist_data_stat)
@@ -1078,8 +582,8 @@ def make_plots(
             hists_down = [to_xsc(h) for h in hists_down]
 
     # make plots in slices (e.g. for charge plus an minus separately)
-    selection_axes = [a for a in axes if a.name in args.selectionAxes]
-    if len(selection_axes) > 0:
+    selection_axes = [a for a in axes if a.name in args.selectionAxes] ### i have none of these
+    if len(selection_axes) > 0: ## this is 0
         selection_bins = [
             np.arange(a.size) for a in axes if a.name in args.selectionAxes
         ]
@@ -1110,14 +614,10 @@ def make_plots(
                 for a, i in zip(selection_axes, bins)
             }
 
-            h_inclusive = hist_inclusive[idxs]
+            h = hist[idxs]
             h_stack = [h[idxs] for h in hist_stack]
 
-            if hist_data is not None:
-                h_data = hist_data[idxs]
-            else:
-                h_data = None
-
+            
             if hist_data_stat is not None:
                 h_data_stat = hist_data_stat[idxs]
             else:
@@ -1165,8 +665,7 @@ def make_plots(
                 f"Make plot for axes {[a.name for a in other_axes]}, in bins {idxs}"
             )
             make_plot(
-                h_data,
-                h_inclusive,
+                h,
                 h_stack,
                 other_axes,
                 outdir,
@@ -1188,10 +687,9 @@ def make_plots(
                 *opts,
                 **kwopts,
             )
-    else:
+    else: #### okay go to this
         make_plot(
-            hist_data,
-            hist_inclusive,
+            hist,
             hist_stack,
             axes,
             outdir,

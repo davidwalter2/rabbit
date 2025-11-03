@@ -414,14 +414,12 @@ def make_plot(
 
 
     histtype_data = "errorbar"
-    histtype_mc = "fill" if not args.unfoldedXsec else "errorbar"
+    # histtype_mc = "fill" if not args.unfoldedXsec else "errorbar"
+    histtype_mc = "step"
 
-   
     #len(h_inclusive.axes)): ## the first axis should be time. should implement time into this but for now am only going to take the average
     h_data = h_data[{f"{args.fixed_param}": 1}]
     h_inclusive = h_inclusive[{f"{args.fixed_param}": 1}]
-    
-    
     
     if args.normToData and h_data is not None:
         scale = h_data.values().sum() / h_inclusive.values().sum()
@@ -455,8 +453,6 @@ def make_plot(
             automatic_scale=args.customFigureWidth is None,
         )
         
-        histtype_data = "errorbar"
-
         for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
             
             this_color = colormaps["tab20"](j)
@@ -465,7 +461,7 @@ def make_plot(
 
             hep.histplot(
                 h_inclusive[{f"{axis_name}": j}],
-                histtype = "step",
+                histtype = histtype_mc,
                 xerr=False,
                 yerr=False,
                 color=this_color,
@@ -475,16 +471,19 @@ def make_plot(
                 zorder = 1,
                 flow="none",
             )
-            
+            data_color = "black"
+            if args.fixed_param != "time":
+                data_color = this_color
             if data:
                 hscale = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}], rel_unc=True)
                 # print(True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5) ### so this is the only thing that changes but this is supposedly data which shouldnt change. crap.
+
                 if j == 0:
                     hep.histplot(
                         h_data[{f"{axis_name}": j}],
                         yerr=True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5,
                         histtype=histtype_data,
-                        color="black",
+                        color=data_color,
                         label=args.dataName,
                         binwnorm=binwnorm,
                         ax=ax1,
@@ -496,7 +495,7 @@ def make_plot(
                         h_data[{f"{axis_name}": j}],
                         yerr=True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5,
                         histtype=histtype_data,
-                        color="black",
+                        color=data_color,
                         binwnorm=binwnorm,
                         ax=ax1,
                         alpha=1.0,
@@ -513,7 +512,7 @@ def make_plot(
                         h_data_stat,
                         yerr=True if counts else h_data_stat.variances() ** 0.5,
                         histtype=histtype_data,
-                        color="black",
+                        color=data_color,
                         binwnorm=binwnorm,
                         capsize=2,
                         ax=ax1,
@@ -544,7 +543,7 @@ def make_plot(
                     np.append((nom + std), ((nom + std))[-1]),
                     np.append((nom - std), ((nom - std))[-1]),
                     step="step",
-                    facecolor=this_color,
+                    facecolor="black",
                     zorder=0,
                     hatch=hatchstyle,
                     edgecolor="k",
@@ -572,9 +571,9 @@ def make_plot(
                 ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
         if args.title == "ID":
             if other_axis == "eta_probe":
-                ax1.set_ylim(0.99, 1.0)
+                ax1.set_ylim(0.65, 1.05)
             else:
-                ax1.set_ylim(0.99, 1.0)
+                ax1.set_ylim(0.65, 1.05)
             
         outfile = f"{other_axis}_{axis_name}_{args.title}"
 
@@ -615,9 +614,8 @@ def make_plot(
             args=args,
         )
         
-        
-        
-        
+
+        ### scale factor ### 
         fig, ax1 = plot_tools.figure(
             h_inclusive[{f"{axis_name}": 0}], ### just to make the right dimensions
             xlabel,
@@ -632,16 +630,13 @@ def make_plot(
             automatic_scale=args.customFigureWidth is None,
         )
                 
-                
-                
-        
         for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
             
             this_color = colormaps["tab20"](j)
             if other_axis == "pt":
                 this_color = colormaps["tab10"](j)
 
-            scale_hist = hh.divideHists(h_inclusive[{f"{axis_name}": j}], h_data[{f"{axis_name}": j}])
+            scale_hist = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}])
             hep.histplot(
                 scale_hist,
                 histtype = "step",
@@ -654,7 +649,30 @@ def make_plot(
                 zorder = 1,
                 flow="none",
             )
+            if args.title == "ID":
+                ax1.set_ylim(0.8, 1.05)
+            else:
+                ax1.set_ylim(0.9, 1.1)
+            
+            plot_tools.add_decor(
+            ax1,
+            args.title,
+            args.subtitle,
+            data=data or "Nonprompt" in labels,
+            lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
+            loc=args.titlePos,
+            text_size=args.legSize,
+        )
+
+            ax1.legend(loc='upper right', ncols = 3, fontsize = 16)
+            ax1.set_ylabel("scale factor")
+
+
         outfile += "_scale"
+        
+        
+        
+        
             
         plot_tools.save_pdf_and_png(outdir, outfile)
    
