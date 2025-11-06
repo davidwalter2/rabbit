@@ -39,7 +39,10 @@ class FitDebugData:
                 data_obs_hist.values()[...] = memoryview(
                     tf.reshape(self.indata.data_obs[ibin:stop], shape)
                 )
-                if hasattr(self.indata, "data_var"):
+                if (
+                    hasattr(self.indata, "data_var")
+                    and self.indata.data_var is not None
+                ):
                     data_obs_hist.variances()[...] = memoryview(
                         tf.reshape(self.indata.data_var[ibin:stop], shape)
                     )
