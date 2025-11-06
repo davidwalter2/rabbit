@@ -46,6 +46,8 @@ class FitDebugData:
                     data_obs_hist.variances()[...] = memoryview(
                         tf.reshape(self.indata.data_var[ibin:stop], shape)
                     )
+                else:
+                    data_obs_hist.variances()[...] = data_obs_hist.values()[...]
 
             nominal_hist = hist.Hist(*axes, self.axis_procs, name=f"{channel}_nominal")
             nominal_hist.values()[...] = memoryview(
