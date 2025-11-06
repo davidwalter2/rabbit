@@ -77,7 +77,7 @@ class TensorWriter:
         return values.flatten().astype(self.dtype)
 
     def get_flat_variances(self, h, flow=False):
-        if hasattr(h, "values"):
+        if hasattr(h, "variances"):
             variances = h.variances(flow=flow)
         else:
             variances = h

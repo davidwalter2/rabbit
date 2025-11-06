@@ -33,10 +33,21 @@ class FitDebugData:
                 shape_logk = [*shape, self.indata.nproc, 2, self.indata.nsyst]
 
             if not info.get("masked", False):
-                data_obs_hist = hist.Hist(*axes, name=f"{channel}_data_obs")
+                data_obs_hist = hist.Hist(
+                    *axes, name=f"{channel}_data_obs", storage=hist.storage.Weight()
+                )
                 data_obs_hist.values()[...] = memoryview(
                     tf.reshape(self.indata.data_obs[ibin:stop], shape)
                 )
+                if (
+                    hasattr(self.indata, "data_var")
+                    and self.indata.data_var is not None
+                ):
+                    data_obs_hist.variances()[...] = memoryview(
+                        tf.reshape(self.indata.data_var[ibin:stop], shape)
+                    )
+                else:
+                    data_obs_hist.variances()[...] = data_obs_hist.values()[...]
 
             nominal_hist = hist.Hist(*axes, self.axis_procs, name=f"{channel}_nominal")
             nominal_hist.values()[...] = memoryview(
