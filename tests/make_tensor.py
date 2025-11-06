@@ -415,6 +415,7 @@ writer.add_systematic(
     "ch1",
     add_to_data_covariance=args.addSystToDataCovariance,
     groups=["slopes", "slopes_background"],
+    constrained=False,
 )
 
 h2_sig_syst1_up = h2_sig.copy()
