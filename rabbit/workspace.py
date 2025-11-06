@@ -70,7 +70,7 @@ class Workspace:
 
         self.parms = fitter.parms
         self.npoi = fitter.npoi
-        self.noigroupidxs = fitter.indata.noigroupidxs
+        self.noiidxs = fitter.indata.noiidxs
 
         self.extension = "hdf5"
         self.file_path = self.get_file_path(outdir, outname, postfix)
@@ -363,7 +363,7 @@ class Workspace:
     ):
         # store impacts for all POIs and NOIs
         parms = np.concatenate(
-            [self.parms[: self.npoi], self.parms[self.npoi :][self.noigroupidxs]]
+            [self.parms[: self.npoi], self.parms[self.npoi :][self.noiidxs]]
         )
 
         # write out histograms

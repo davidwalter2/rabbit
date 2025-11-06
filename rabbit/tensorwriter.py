@@ -34,7 +34,6 @@ class TensorWriter:
         self.nbinschan = {}
         self.pseudodata_names = set()
 
-        self.dict_noigroups = defaultdict(lambda: set())
         self.dict_systgroups = defaultdict(lambda: set())
 
         self.systsstandard = set()
@@ -476,13 +475,8 @@ class TensorWriter:
             if groups is None:
                 groups = [name]
 
-            if noi:
-                target_dict = self.dict_noigroups
-            else:
-                target_dict = self.dict_systgroups
-
             for group in groups:
-                target_dict[group].add(name)
+                self.dict_systgroups[group].add(name)
 
     def write(self, outfolder="./", outfilename="rabbit_input.hdf5", args={}):
 
@@ -783,8 +777,8 @@ class TensorWriter:
 
         ioutils.pickle_dump_h5py("meta", meta, f)
 
+        noiidxs = self.get_noiidxs()
         systsnoconstraint = self.get_systsnoconstraint()
-        noigroups, noigroupidxs = self.get_noigroups()
         systgroups, systgroupidxs = self.get_systgroups()
 
         # save some lists of strings to the file for later use
@@ -811,8 +805,7 @@ class TensorWriter:
             systgroupidxs,
             dtype=h5py.special_dtype(vlen=np.dtype("int32")),
         )
-        create_dataset("noigroups", noigroups)
-        create_dataset("noigroupidxs", noigroupidxs, dtype="int32")
+        create_dataset("noiidxs", noiidxs, dtype="int32")
         create_dataset("pseudodatanames", [n for n in self.pseudodata_names])
 
         # create h5py datasets with optimized chunk shapes
@@ -949,16 +942,13 @@ class TensorWriter:
             idxs.append(idx)
         return groups, idxs
 
-    def get_noigroups(self):
-        # list of groups of systematics to be treated as additional outputs for impacts, etc (aka "nuisances of interest")
+    def get_noiidxs(self):
+        # list of indeces of nois w.r.t. systs
         systs = self.get_systs()
-        groups = []
         idxs = []
-        for group, members in common.natural_sort_dict(self.dict_noigroups).items():
-            groups.append(group)
-            for syst in members:
-                idxs.append(systs.index(syst))
-        return groups, idxs
+        for noi in self.get_systsnoi():
+            idxs.append(systs.index(noi))
+        return idxs
 
     def get_systgroups(self):
         # list of groups of systematics (nuisances) and lists of indexes
