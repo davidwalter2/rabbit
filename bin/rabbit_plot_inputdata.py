@@ -432,7 +432,7 @@ def make_plot(
         if hist_data is not None:
             hep.histplot(
                 h_data,
-                yerr=True,
+                yerr=h_data.variances()**0.5,
                 histtype="errorbar",
                 color="black",
                 label=args.dataName,
@@ -682,7 +682,7 @@ def main():
             # poisson errors on data hist for correct errors in ratio plot
             hist_data = hist.Hist(*hist_data_tmp.axes, storage=hist.storage.Weight())
             hist_data.values(flow=True)[...] = hist_data_tmp.values(flow=True)
-            hist_data.variances(flow=True)[...] = hist_data_tmp.values(flow=True)
+            hist_data.variances(flow=True)[...] = hist_data_tmp.variances(flow=True)
 
         info = dict(
             channel=channel,
