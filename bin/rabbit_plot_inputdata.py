@@ -432,7 +432,7 @@ def make_plot(
         if hist_data is not None:
             hep.histplot(
                 h_data,
-                yerr=h_data.variances()**0.5,
+                yerr=True,
                 histtype="errorbar",
                 color="black",
                 label=args.dataName,
