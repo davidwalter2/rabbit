@@ -255,9 +255,6 @@ def plotImpacts(
                 col=1,
             )
 
-        print(df["impact_down"])
-        print(df["impact_down"] > 0)
-        print(any(df["impact_down"] > 0))
         if (oneSidedImpacts and any(df["impact_down"] > 0)) or not oneSidedImpacts:
             fig.add_trace(
                 make_bar(

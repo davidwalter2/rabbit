@@ -1,3 +1,5 @@
+import re
+
 import h5py
 import numpy as np
 
@@ -85,7 +87,52 @@ def read_impacts_poi(
     return impacts, labels
 
 
-def get_pulls_and_constraints(fitresult, prefit=False, asym=False):
+def _filter_nuisance_data(
+    labels,
+    pulls,
+    constraints,
+    keep_patterns=None,
+    exclude_patterns=None,
+):
+    if keep_patterns is None and exclude_patterns is None:
+        return labels, pulls, constraints
+
+    if isinstance(keep_patterns, str):
+        keep_patterns = [keep_patterns]
+    if isinstance(exclude_patterns, str):
+        exclude_patterns = [exclude_patterns]
+
+    keep_patterns = keep_patterns or []
+    exclude_patterns = exclude_patterns or []
+
+    def matches_any(patterns, label):
+        return any(re.search(pattern, label) for pattern in patterns)
+
+    mask = np.ones(len(labels), dtype=bool)
+    if keep_patterns:
+        mask &= np.array([matches_any(keep_patterns, label) for label in labels])
+    if exclude_patterns:
+        mask &= ~np.array([matches_any(exclude_patterns, label) for label in labels])
+
+    filtered_labels = labels[mask]
+    filtered_pulls = pulls[mask]
+
+    if np.ndim(constraints) == 0:
+        filtered_constraints = constraints
+    else:
+        indices = np.nonzero(mask)[0]
+        filtered_constraints = np.take(constraints, indices, axis=0)
+
+    return filtered_labels, filtered_pulls, filtered_constraints
+
+
+def get_pulls_and_constraints(
+    fitresult,
+    prefit=False,
+    asym=False,
+    keep_nuisances=None,
+    exclude_nuisances=None,
+):
     hist_name = "parms_prefit" if prefit else "parms"
     h_parms = fitresult[hist_name].get()
     labels = np.array(h_parms.axes["parms"])
@@ -97,6 +144,14 @@ def get_pulls_and_constraints(fitresult, prefit=False, asym=False):
         constraints = np.einsum("i j i -> i j", intervals)
     else:
         constraints = np.sqrt(h_parms.variances())
+
+    labels, pulls, constraints = _filter_nuisance_data(
+        labels,
+        pulls,
+        constraints,
+        keep_patterns=keep_nuisances,
+        exclude_patterns=exclude_nuisances,
+    )
 
     return labels, pulls, constraints
 

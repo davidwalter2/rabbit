@@ -82,6 +82,13 @@ def parseArgs():
         type=str,
         help="Subtitle to be printed after title",
     )
+    parser.add_argument(
+        "--xlim",
+        type=float,
+        nargs=2,
+        default=None,
+        help="x axis limits",
+    )
     parser.add_argument("--titlePos", type=int, default=2, help="title position")
     return parser.parse_args()
 
@@ -95,6 +102,7 @@ def plot_scan(
     title=None,
     subtitle=None,
     titlePos=0,
+    xlim=None,
 ):
 
     x = np.array(h_scan.axes["scan"]).astype(float)
@@ -152,6 +160,8 @@ def plot_scan(
 
     ax.set_xlabel(param)
     ax.set_ylabel(r"$-2\,\Delta \log L$")
+    if xlim is not None:
+        ax.set_xlim(xlim)
 
     return fig
 
@@ -191,6 +201,7 @@ def main():
             title=args.title,
             subtitle=args.subtitle,
             titlePos=args.titlePos,
+            xlim=args.xlim,
         )
         os.makedirs(args.outpath, exist_ok=True)
         outfile = os.path.join(args.outpath, f"nll_scan_{param}")
