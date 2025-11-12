@@ -101,6 +101,13 @@ def parseArgs():
         type=str,
         help="Subtitle to be printed after title",
     )
+    parser.add_argument(
+        "--xlim",
+        type=float,
+        nargs=2,
+        default=None,
+        help="x axis limits",
+    )
     parser.add_argument("--titlePos", type=int, default=2, help="title position")
     parser.add_argument(
         "--config",
@@ -120,6 +127,7 @@ def plot_scan(
     title=None,
     subtitle=None,
     titlePos=0,
+    xlim=None,
     ylabel=r"$-2\,\Delta \log L$",
     config={},
     combine=None,
@@ -258,6 +266,7 @@ def main():
             title=args.title,
             subtitle=args.subtitle,
             titlePos=args.titlePos,
+            xlim=args.xlim,
             config=config,
             combine=(vals, nlls) if args.combine is not None else None,
         )
