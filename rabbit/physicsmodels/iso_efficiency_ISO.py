@@ -14,22 +14,22 @@ class HLT(PhysicsModel):
     Parameters
     ----------
         indata: Input data used for analysis (e.g., histograms or data structures).
-        h2_channel: str
+        h3_channel: str
             Name of the numerator channel.
-        h1_channel: str
+        h2_channel: str
             Name of the denominator channel.
-        h2_processes: list of str, optional
+        h3_processes: list of str, optional
             List of process names for the numerator channel. Defaults to None, meaning all processes will be considered.
             Selected processes are summed before the ratio is computed.
-        h1_processes: list of str, optional
-            Same as h2_processes but for denumerator
-        h2_selection: dict, optional
+        h2_processes: list of str, optional
+            Same as h3_processes but for denumerator
+        h3_selection: dict, optional
             Dictionary specifying selection criteria for the numerator. Keys are axis names, and values are slices or conditions.
             Defaults to an empty dictionary meaning no selection.
             E.g. {"charge":0, "ai":slice(0,2)}
             Selected axes are summed before the ratio is computed. To integrate over one axis before the ratio, use `slice(None)`
-        h1_selection: dict, optional
-            Same as h2_selection but for denumerator
+        h2_selection: dict, optional
+            Same as h3_selection but for denumerator
         normalize: bool, optional
             Whether to normalize the numerator and denominator before the ratio. Defaults to False.
     """
@@ -38,19 +38,27 @@ class HLT(PhysicsModel):
         self,
         indata,
         key,
+        h3_channel,
         h2_channel,
-        h1_channel,
+        h3_processes=[],
         h2_processes=[],
-        h1_processes=[],
+        h3_selection={},
         h2_selection={},
-        h1_selection={},
+        h3_axes_rebin=[],
         h2_axes_rebin=[],
-        h1_axes_rebin=[],
+        h3_axes_sum=[],
         h2_axes_sum=[],
-        h1_axes_sum=[],
     ):
         self.key = key
 
+        self.h3 = helpers.Term(
+            indata,
+            h3_channel,
+            h3_processes,
+            h3_selection,
+            h3_axes_rebin,
+            h3_axes_sum,
+        )
         self.h2 = helpers.Term(
             indata,
             h2_channel,
@@ -59,38 +67,30 @@ class HLT(PhysicsModel):
             h2_axes_rebin,
             h2_axes_sum,
         )
-        self.h1 = helpers.Term(
-            indata,
-            h1_channel,
-            h1_processes,
-            h1_selection,
-            h1_axes_rebin,
-            h1_axes_sum,
-        )
 
-        self.has_data = self.h2.has_data and self.h1.has_data
+        self.has_data = self.h3.has_data and self.h2.has_data
 
-        self.need_processes = len(h2_processes) or len(
-            h1_processes
+        self.need_processes = len(h3_processes) or len(
+            h2_processes
         )  # the fun_flat will be by processes
 
         # The output of ratios will always be without process axis
         self.skip_per_process = True
 
-        # if [a.size for a in self.h2.channel_axes] != [
-        #     a.size for a in self.h1.channel_axes
+        # if [a.size for a in self.h3.channel_axes] != [
+        #     a.size for a in self.h2.channel_axes
         # ]:
         #     raise RuntimeError(
         #         "Channel axes for numerator and denominator must have the same number of bins"
         #     )
         
-        hist_axes = self.h2.channel_axes
+        hist_axes = self.h3.channel_axes
 
-        if h2_channel == h1_channel:
-            channel = h2_channel
+        if h3_channel == h2_channel:
+            channel = h3_channel
             flow = indata.channel_info[channel].get("flow", False)
         else:
-            channel = f"{h2_channel}_{h1_channel}"
+            channel = f"{h3_channel}_{h2_channel}"
             flow = False
 
         self.has_processes = False  # The result has no process axis
@@ -108,8 +108,8 @@ class HLT(PhysicsModel):
         parsing the input arguments into the ratio constructor, is has to be called as
         -m Ratio
             <ch num> <ch den>
-            <proc_h2_0>,<proc_h2_1>,... <proc_h2_0>,<proc_h2_1>,...
-            <axis_h2_0>:<slice_h2_0>,<axis_h2_1>,<slice_h2_1>... <axis_h1_0>,<slice_h1_0>,<axis_h1_1>,<slice_h1_1>...
+            <proc_h3_0>,<proc_h3_1>,... <proc_h3_0>,<proc_h3_1>,...
+            <axis_h3_0>:<slice_h3_0>,<axis_h3_1>,<slice_h3_1>... <axis_h2_0>,<slice_h2_0>,<axis_h2_1>,<slice_h2_1>...
 
         Processes selections are optional. But in case on is given for the numerator, the denominator must be specified as well and vice versa.
         Use 'None' if you don't want to select any for either numerator xor denominator.
@@ -118,11 +118,11 @@ class HLT(PhysicsModel):
         Use 'None:None' if you don't want to do any for either numerator xor denominator.
         """
         if len(args) > 2 and ":" not in args[2]:
-            procs_h2 = [p for p in args[2].split(",") if p != "None"]
-            procs_h1 = [p for p in args[3].split(",") if p != "None"]
+            procs_h3 = [p for p in args[2].split(",") if p != "None"]
+            procs_h2 = [p for p in args[3].split(",") if p != "None"]
         else:
+            procs_h3 = []
             procs_h2 = []
-            procs_h1 = []
 
         # find axis selections
         if any(a for a in args if ":" in a):
@@ -130,10 +130,10 @@ class HLT(PhysicsModel):
         else:
             sel_args = ["None:None", "None:None"]
 
-        axis_selection_h2, axes_rebin_h2, axes_sum_h2 = helpers.parse_axis_selection(
+        axis_selection_h3, axes_rebin_h3, axes_sum_h3 = helpers.parse_axis_selection(
             sel_args[0]
         )
-        axis_selection_h1, axes_rebin_h1, axes_sum_h1 = helpers.parse_axis_selection(
+        axis_selection_h2, axes_rebin_h2, axes_sum_h2 = helpers.parse_axis_selection(
             sel_args[1]
         )
 
@@ -145,20 +145,20 @@ class HLT(PhysicsModel):
             key,
             args[0],
             args[1],
+            procs_h3,
             procs_h2,
-            procs_h1,
+            axis_selection_h3,
             axis_selection_h2,
-            axis_selection_h1,
+            axes_rebin_h3,
             axes_rebin_h2,
-            axes_rebin_h1,
+            axes_sum_h3,
             axes_sum_h2,
-            axes_sum_h1,
         )
 
     def compute_flat(self, params, observables):
-        h2 = self.h2.select(observables, inclusive=True)
-        h1_hlt = self.h1.select(observables, inclusive=True)[:, 1:, :]
-        eps_hlt = 2*h2/(h1_hlt + 2*h2)
+        h3 = self.h3.select(observables, inclusive=True)
+        h2_hlt = self.h2.select(observables, inclusive=True)[:, 1:, :]
+        eps_hlt = 2*h3/(h2_hlt + 2*h3)
         eps_hlt = tf.reshape(eps_hlt, [-1])
 
         return eps_hlt
@@ -178,9 +178,9 @@ class NormHLT(HLT):
         super().__init__(*args, **kwargs)
 
     def compute_flat(self, params, observables):
-        h2 = self.h2.select(observables, normalize = True, inclusive=True)
-        h1_hlt = self.h1.select(observables, normalize = True, inclusive=True)[:, 1:, :]
-        eps_hlt = 2*h2/(h1_hlt + 2*h2)
+        h3 = self.h3.select(observables, normalize = True, inclusive=True)
+        h2_hlt = self.h2.select(observables, normalize = True, inclusive=True)[:, 1:, :]
+        eps_hlt = 2*h3/(h2_hlt + 2*h3)
         # pdb.set_trace()
         eps_hlt = tf.reshape(eps_hlt, [-1])
 

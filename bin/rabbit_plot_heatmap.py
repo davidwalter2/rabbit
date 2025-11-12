@@ -382,6 +382,7 @@ def parseArgs():
 
 def make_plot(
     h_data,
+    h_inclusive,
     h_stack,
     axes,
     outdir,
@@ -420,37 +421,27 @@ def make_plot(
     ### NEED TO FIX THIS
     # pdb.set_trace()
     h_data = h_data[{f"{args.fixed_param}": 1}]
+    h_inclusive = h_inclusive[{f"{args.fixed_param}": 1}]
+
     if len(h_data.shape) > 2:
         flat = np.prod(h_data.shape[: len(h_data.shape) // 2])
         h_data = h_data.reshape((flat, flat))
+
+        h_inclusive = h_inclusive.reshape((flat, flat))
+        
         
     fig, ax = plt.subplots(figsize=(8, 6))
     # sns.color_palette("Spectral", as_cmap=True)
-
     
-    mesh = ax.pcolormesh(axis_2, axis_1, h_data.values(), cmap='Spectral_r')
-
-    # sns.heatmap(
-    #     h_data.values(),
-    #     cmap="Spectral_r",
-    #     annot=args.annot,
-    #     annot_kws={"fontsize":6},
-    #     # fmt=".2g",
-    #     cbar=True,
-    #     linewidths=0.5,
-    #     ax=ax,
-    #     xticklabels = axis_2, 
-    #     yticklabels = axis_1,
-    #     fmt = ".3f"
-    # )
+    if args.useData  == True:
+        mesh = ax.pcolormesh(axis_2, axis_1, h_data.values(), cmap='Spectral_r')
+    else:
+        mesh = ax.pcolormesh(axis_2, axis_1, h_inclusive.values(), cmap='Spectral_r')
+    
     ax.set_aspect('auto')
     plt.colorbar(mesh, ax=ax, label='efficiency')
-
-
         
     outfile = f"{varying_params[0]}_{varying_params[1]}_{args.title}"
-
-
 
     plot_tools.add_decor(
         ax,
@@ -474,6 +465,33 @@ def make_plot(
         ax.set_title("MC") 
         outfile += "_mc"
     plot_tools.save_pdf_and_png(outdir, outfile)
+
+
+
+    ### scale factor
+    h_scale = hh.divideHists(h_data, h_inclusive, rel_unc = True, cutoff = 1e-8)
+    mesh = ax.pcolormesh(axis_2, axis_1, h_scale.values(), cmap='Spectral_r')
+
+
+    plot_tools.add_decor(
+        ax,
+        outfile,
+        args.subtitle,
+        lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
+        loc=args.titlePos,
+        text_size=args.legSize,
+    )
+    
+    ax.set_xlabel(varying_params[1])
+    ax.set_ylabel(varying_params[0])
+
+    if args.prefit:
+        outfile += "_prefit"
+    
+    ax.set_title("Scale factor")
+    outfile += "_SF"
+    plot_tools.save_pdf_and_png(outdir, outfile)
+
 
     analysis_meta_info = None
     if meta is not None:
@@ -519,13 +537,20 @@ def make_plots(
     if args.prefit:
         fittype = "prefit"
     if args.unfoldedXsec: ### should go through this
-        if args.useData:
-            hist = result[f"hist_{fittype}_inclusive"].get()
-            name_impacts = f"hist_global_impacts_grouped_{fittype}_inclusive"
-            if name_impacts in result.keys():
-                hist_data_stat = result[name_impacts].get()[{"impacts": "stat"}]
-        else: 
-            hist = result[f"hist_prefit_inclusive"].get()
+        # if args.useData:
+        #     hist = result[f"hist_{fittype}_inclusive"].get()
+        #     name_impacts = f"hist_global_impacts_grouped_{fittype}_inclusive"
+        #     if name_impacts in result.keys():
+        #         hist_data_stat = result[name_impacts].get()[{"impacts": "stat"}]
+        # else: 
+        #     hist = result[f"hist_prefit_inclusive"].get()
+        hist_data = result[f"hist_{fittype}_inclusive"].get()
+        name_impacts = f"hist_global_impacts_grouped_{fittype}_inclusive"
+        if name_impacts in result.keys():
+            hist_data_stat = result[name_impacts].get()[{"impacts": "stat"}]
+        hist_inclusive = result[f"hist_prefit_inclusive"].get()
+        hist_stack = []
+        
         hist_stack = []
 
         
@@ -533,7 +558,7 @@ def make_plots(
         print("NEED TO DO CROSS SECTION")
         
     
-    axes = [a for a in hist.axes]
+    axes = [a for a in hist_inclusive.axes]
 
     # vary poi by postfit uncertainty
     if varNames is not None:
@@ -573,7 +598,9 @@ def make_plots(
             to_xsc = lambda h: h
 
         
-        hist = to_xsc(hist)
+        hist_inclusive = to_xsc(hist_inclusive)
+        hist_data = to_xsc(hist_data)
+
         hist_stack = [to_xsc(h) for h in hist_stack]
         if hist_data_stat is not None:
             hist_data_stat = to_xsc(hist_data_stat)
@@ -614,7 +641,9 @@ def make_plots(
                 for a, i in zip(selection_axes, bins)
             }
 
-            h = hist[idxs]
+            h_inclusive = hist_inclusive[idxs]
+            h_data = hist_data[idxs]
+
             h_stack = [h[idxs] for h in hist_stack]
 
             
@@ -665,7 +694,8 @@ def make_plots(
                 f"Make plot for axes {[a.name for a in other_axes]}, in bins {idxs}"
             )
             make_plot(
-                h,
+                h_data,
+                h_inclusive,
                 h_stack,
                 other_axes,
                 outdir,
@@ -689,7 +719,8 @@ def make_plots(
             )
     else: #### okay go to this
         make_plot(
-            hist,
+            hist_data,
+            hist_inclusive,
             hist_stack,
             axes,
             outdir,

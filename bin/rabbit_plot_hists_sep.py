@@ -412,7 +412,7 @@ def make_plot(
     params = list(h_data.axes.name)
     varying_params = [p for p in params if p != args.fixed_param]
 
-
+    eta_colormap = ["C0", "C1", "C2", "C3", "C4", "C5"]
     histtype_data = "errorbar"
     # histtype_mc = "fill" if not args.unfoldedXsec else "errorbar"
     histtype_mc = "step"
@@ -457,7 +457,8 @@ def make_plot(
             
             this_color = colormaps["tab20"](j)
             if other_axis == "pt":
-                this_color = colormaps["tab10"](j)
+                this_color = eta_colormap[j]
+            
 
             hep.histplot(
                 h_inclusive[{f"{axis_name}": j}],
@@ -471,7 +472,7 @@ def make_plot(
                 zorder = 1,
                 flow="none",
             )
-            data_color = "black"
+            data_color = this_color
             if args.fixed_param != "time":
                 data_color = this_color
             if data:
@@ -536,7 +537,6 @@ def make_plot(
             if args.uncertaintyLabel:
                 label_unc = args.uncertaintyLabel
                 
-            print(np.append((nom + std), ((nom + std))[-1])) ### so this doesnt chant
             if args.upperPanelUncertaintyBand:
                 ax1.fill_between(
                     edges,
@@ -551,7 +551,7 @@ def make_plot(
                     label=label_unc,
                 )
                     
-        ax1.legend(loc='upper right', ncols = 3, fontsize = 16)
+        ax1.legend(loc='upper right', ncols = 2, fontsize = 14)
         # need to divide by bin width
         
         if args.ylim is None and binwnorm is None:
@@ -566,14 +566,14 @@ def make_plot(
         
         if args.title == "HLT":
             if other_axis == "eta_probe":
-                ax1.set_ylim(min_y - range_y * 0.1, max_y + range_y * 0.6)
+                ax1.set_ylim(min_y - range_y * 0.1, max_y + range_y * 0.35)
             else:
                 ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
         if args.title == "ID":
             if other_axis == "eta_probe":
-                ax1.set_ylim(0.65, 1.05)
+                ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
             else:
-                ax1.set_ylim(0.65, 1.05)
+                ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
             
         outfile = f"{other_axis}_{axis_name}_{args.title}"
 
@@ -631,17 +631,32 @@ def make_plot(
         )
                 
         for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
-            
+            cutoff = 0.01
+
             this_color = colormaps["tab20"](j)
             if other_axis == "pt":
-                this_color = colormaps["tab10"](j)
+                this_color = eta_colormap[j]
+        
+            
+            
+            scale_hist = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}], rel_unc = True, cutoff = 1e-8)
+            
+            vals = scale_hist.values()
+            unc = scale_hist.variances()**0.5
 
-            scale_hist = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}])
+            avg = np.average(vals, weights =unc)
+            chi_squared = np.sum([(vals[i]-avg)**2/unc[i]**2 for i in range(len(vals))])
+            print(f"CHI SQUARED/DOF: {chi_squared/len(vals)}, DOF: {len(vals)}")
+            # edges = scale_hist[{f"{axis_name}": j}].axes[0].edges
+            # binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
+            # nom = scale_hist[{f"{axis_name}": j}].values() / binwidth
+            # std = np.sqrt(scale_hist[{f"{axis_name}": j}].variances()) / binwidth
+            
             hep.histplot(
                 scale_hist,
                 histtype = "step",
-                xerr=False,
-                yerr=False,
+                # xerr=False,
+                yerr=True,
                 color=this_color,
                 label = f"{axis_name} bin {j}",
                 binwnorm=binwnorm,
@@ -650,9 +665,11 @@ def make_plot(
                 flow="none",
             )
             if args.title == "ID":
-                ax1.set_ylim(0.8, 1.05)
+                # ax1.set_ylim(0.8, 1.05)
+                ax1.set_ylim(0.97, 1.02)
+
             else:
-                ax1.set_ylim(0.9, 1.1)
+                ax1.set_ylim(0.9, 1.02)
             
             plot_tools.add_decor(
             ax1,
@@ -664,7 +681,7 @@ def make_plot(
             text_size=args.legSize,
         )
 
-            ax1.legend(loc='upper right', ncols = 3, fontsize = 16)
+            ax1.legend(loc='upper right', ncols = 2, fontsize = 14)
             ax1.set_ylabel("scale factor")
 
 

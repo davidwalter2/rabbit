@@ -217,14 +217,13 @@ class NormID(ID):
         h1 = self.h1.select(observables, normalize = True, inclusive=True)
         h0 = self.h0.select(observables, normalize = True, inclusive=True)
 
-
         eps_hlt = 2*h2/(h1_hlt + 2*h2)
         
-        eps_hlt_expanded = tf.zeros(shape=[2, 1, 3], dtype = tf.float64)  # or tf.ones, or any values you want
+        ### expanding the axis but setting hlt efficiency to 0
+        eps_hlt_expanded = tf.zeros(shape=[2, 1, 3], dtype = tf.float64)  
         eps_hlt_expanded = tf.concat([eps_hlt_expanded, eps_hlt], axis = 1)
        
         eps_id = h1/(h1 + h0*(1-eps_hlt_expanded))
-        # pdb.set_trace()
         eps_id = tf.reshape(eps_id, [-1])
 
         return eps_id

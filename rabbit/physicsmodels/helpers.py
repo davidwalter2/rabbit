@@ -20,7 +20,9 @@ baseline_models = {
     "AngularCoefficients": "angular_coefficients",
     "LamTung": "angular_coefficients",
     "HLT": "hlt_efficiency", 
-    "ID": "id_efficiency"
+    "ID": "id_efficiency", 
+    "ISO": "iso_efficiency", 
+
 }
 
 
