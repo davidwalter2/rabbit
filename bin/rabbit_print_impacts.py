@@ -23,9 +23,12 @@ def parseArgs():
         "--globalImpacts", action="store_true", help="Print global impacts"
     )
     parser.add_argument(
+        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
+    )
+    parser.add_argument(
         "--asymImpacts",
         action="store_true",
-        help="Print asymmetric impacts from likelihood confidence intervals",
+        help="Print asymmetric impacts from likelihood, otherwise symmetric from hessian",
     )
     parser.add_argument(
         "inputFile",
@@ -51,10 +54,16 @@ def parseArgs():
         action="store_true",
         help="Print relative uncertainty, only for '--hist'",
     )
+    parser.add_argument(
+        "--scale",
+        default=1,
+        type=float,
+        help="Scale impacts",
+    )
     return parser.parse_args()
 
 
-def printImpactsHist(args, hist_bin, hist_total_bin, ibin, lumi=None):
+def printImpactsHist(args, hist_bin, hist_total_bin, ibin):
     labels = np.array(hist_bin.axes["impacts"])
     impacts = hist_bin.values()
 
@@ -66,10 +75,6 @@ def printImpactsHist(args, hist_bin, hist_total_bin, ibin, lumi=None):
         unit = "rel. unc. in %"
         impacts /= hist_total_bin.value
         scale = 100
-    elif lumi is not None:
-        unit = "bin/lumi unc. in /pb"
-        impacts /= lumi
-        scale = 1
     else:
         unit = "bin unc."
         scale = 1
@@ -81,17 +86,25 @@ def printImpactsParm(args, fitresult, poi):
     if args.relative:
         raise NotImplementedError("Relative uncertainty for POIs not implemented")
 
+    if args.globalImpacts:
+        impact_type = "global"
+    elif args.nonprofiledImpacts:
+        impact_type = "nonprofiled"
+    else:
+        impact_type = "traditional"
+
     impacts, labels = io_tools.read_impacts_poi(
         fitresult,
         poi,
+        add_total=not args.nonprofiledImpacts,
         asym=args.asymImpacts,
         grouped=not args.ungroup,
-        global_impacts=args.globalImpacts,
+        impact_type=impact_type,
     )
     printImpacts(args, impacts, labels, poi)
 
 
-def printImpacts(args, impacts, labels, poi, scale=100, unit="nuisance unc. %"):
+def printImpacts(args, impacts, labels, poi, scale=1, unit="unit"):
     if args.sort:
 
         def is_scalar(val):
@@ -101,10 +114,12 @@ def printImpacts(args, impacts, labels, poi, scale=100, unit="nuisance unc. %"):
         labels = labels[order]
         impacts = impacts[order]
 
+    scale = scale * args.scale
+
     nround = 5
     if args.asymImpacts:
         fimpact = (
-            lambda x: f"{round(max(x)*scale, nround)} / {round(min(x)*100, nround)}"
+            lambda x: f"{round(max(x)*scale, nround)} / {round(min(x)*scale, nround)}"
         )
     else:
         fimpact = lambda x: round(x * scale, nround)
@@ -146,17 +161,12 @@ def main():
 
             hist = hists[key].get()
 
-            # lumi in pb-1
-            lumi = (
-                meta["meta_info_input"]["channel_info"]["ch0"].get("lumi", 0.001) * 1000
-            )
-
             for idxs in itertools.product(
                 *[np.arange(a.size) for a in hist_total.axes]
             ):
                 ibin = {a: i for a, i in zip(hist_total.axes.name, idxs)}
-                print(f"Now at {ibin}")
-                printImpactsHist(args, hist[ibin], hist_total[ibin], ibin, lumi)
+                print(f"Now at {ibin} with {hist_total[ibin]}")
+                printImpactsHist(args, hist[ibin], hist_total[ibin], ibin)
     else:
         for poi in io_tools.get_poi_names(meta):
             print(f"Now at {poi}")

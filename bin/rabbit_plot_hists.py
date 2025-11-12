@@ -70,6 +70,11 @@ def parseArgs():
         help="Luminosity used in the fit, needed to get the absolute cross section",
     )
     parser.add_argument(
+        "--noEnergy",
+        action="store_true",
+        help="Don't include the energy in the upper right corner of the plot",
+    )
+    parser.add_argument(
         "--title",
         default="Rabbit",
         type=str,
@@ -367,10 +372,11 @@ def parseArgs():
         """,
     )
     parser.add_argument(
-        "--colorVarFromExtFile",
+        "--externalRatio",
         type=str,
-        default=None,
-        help="To overlay the inclusive histogram taken from this external file",
+        default="num",
+        choices=["num", "den"],
+        help="For the ratio, use this external variation as alternative denominator (den, for example to do Data/alt.pred.) or numerator (num, alt.pred./nom.pred.)",
     )
     args = parser.parse_args()
 
@@ -528,7 +534,10 @@ def make_plot(
                 rlabel += r"\,-\,"
             else:
                 rlabel += r"\,/\,"
-            rlabel = f"${rlabel} Pred.$"
+            if h_inclusive_alt is not None and args.externalRatio == "den":
+                rlabel = f"${rlabel} Any\\,pred.$"
+            else:
+                rlabel = f"${rlabel} Pred.$"
 
         fig, ax1, ratio_axes = plot_tools.figureWithRatio(
             h_inclusive,
@@ -748,10 +757,16 @@ def make_plot(
                     h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
                 )
             if h_inclusive_alt is not None:
-                h3 = hh.addHists(h_data, h_inclusive_alt, scale2=-1)
-                if h_data_stat is not None:
+                if args.externalRatio == "den":
+                    h3 = hh.addHists(h_data, h_inclusive_alt, scale2=-1)
+                    if h_data_stat is not None:
+                        h3_stat = hh.divideHists(
+                            h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                        )
+                else:
+                    h3 = hh.addHists(h_inclusive_alt, h_inclusive, scale2=-1)
                     h3_stat = hh.divideHists(
-                        h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
                     )
 
         else:
@@ -769,12 +784,20 @@ def make_plot(
                     h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
                 )
             if h_inclusive_alt is not None:
-                h3 = hh.divideHists(
-                    h_data, h_inclusive_alt, cutoff=cutoff, rel_unc=True
-                )
-                if h_data_stat is not None:
+                if args.externalRatio == "den":
+                    h3 = hh.divideHists(
+                        h_data, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                    )
+                    if h_data_stat is not None:
+                        h3_stat = hh.divideHists(
+                            h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                        )
+                else:
+                    h3 = hh.divideHists(
+                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
+                    )
                     h3_stat = hh.divideHists(
-                        h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
+                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
                     )
 
         hep.histplot(
@@ -812,7 +835,7 @@ def make_plot(
             if h_inclusive_alt is not None:
                 hep.histplot(
                     h3,
-                    histtype="errorbar",
+                    histtype="errorbar" if args.externalRatio == "den" else "step",
                     color=args.addVarFromExternalFile[1],
                     yerr=True if counts else h2.variances() ** 0.5,
                     linewidth=2,
@@ -1024,6 +1047,7 @@ def make_plot(
         lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
         loc=args.titlePos,
         text_size=args.legSize,
+        no_energy=args.noEnergy,
     )
 
     if len(h_stack) < 10:
@@ -1157,24 +1181,6 @@ def make_plots(
     else:
         hists_down = None
         hists_up = None
-
-    if args.unfoldedXsec:
-        # convert number in cross section in pb
-        if lumi is not None and binwnorm is not None:
-            to_xsc = lambda h: hh.scaleHist(h, 1.0 / (lumi * 1000))
-        else:
-            to_xsc = lambda h: h
-
-        hist_data = to_xsc(hist_data)
-        hist_inclusive = to_xsc(hist_inclusive)
-        if hist_inclusive_alt is not None:
-            hist_inclusive_alt = to_xsc(hist_inclusive_alt)
-        hist_stack = [to_xsc(h) for h in hist_stack]
-        if hist_data_stat is not None:
-            hist_data_stat = to_xsc(hist_data_stat)
-        if hist_var is not None:
-            hists_up = [to_xsc(h) for h in hists_up]
-            hists_down = [to_xsc(h) for h in hists_down]
 
     # make plots in slices (e.g. for charge plus an minus separately)
     selection_axes = [a for a in axes if a.name in args.selectionAxes]

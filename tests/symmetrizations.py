@@ -52,7 +52,8 @@ outdir = output_tools.make_plot_dir(args.outpath)
 
 h = hist.Hist(hist.axis.Regular(10, -0.5, 9.5, name="x"), storage=hist.storage.Double())
 
-x = np.random.uniform(0, 10, 100000)
+rng = np.random.default_rng(seed=42)
+x = rng.uniform(0, 10, 100000)
 
 h.fill(x)
 
@@ -88,11 +89,10 @@ h_syst1_up = h.copy()
 h_syst1_up.values()[...] = h.values() * (1 + weights_asym) ** 2
 
 # add poisson fluctuations on systematics
-np.random.seed(42)
 if args.fluctuate:
-    h_syst0_up.values()[...] = np.random.poisson(h_syst0_up.values())
-    h_syst0_down.values()[...] = np.random.poisson(h_syst0_down.values())
-    h_syst1_up.values()[...] = np.random.poisson(h_syst1_up.values())
+    h_syst0_up.values()[...] = rng.poisson(h_syst0_up.values())
+    h_syst0_down.values()[...] = rng.poisson(h_syst0_down.values())
+    h_syst1_up.values()[...] = rng.poisson(h_syst1_up.values())
 
 
 writer.add_systematic(
