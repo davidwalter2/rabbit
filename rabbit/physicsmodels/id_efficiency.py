@@ -38,24 +38,36 @@ class ID(PhysicsModel):
         self,
         indata,
         key,
+        h3_channel,
         h2_channel,
         h1_channel,
         h0_channel,
+        h3_processes=[],
         h2_processes=[],
         h1_processes=[],
         h0_processes = [],
+        h3_selection={},
         h2_selection={},
         h1_selection={},
         h0_selection={},
+        h3_axes_rebin=[],
         h2_axes_rebin=[],
         h1_axes_rebin=[],
         h0_axes_rebin = [],
+        h3_axes_sum=[],
         h2_axes_sum=[],
         h1_axes_sum=[],
         h0_axes_sum= [],
     ):
         self.key = key
-
+        self.h3 = helpers.Term(
+            indata,
+            h3_channel,
+            h3_processes,
+            h3_selection,
+            h3_axes_rebin,
+            h3_axes_sum,
+        )
         self.h2 = helpers.Term(
             indata,
             h2_channel,
@@ -82,7 +94,7 @@ class ID(PhysicsModel):
             h0_axes_sum,
         )
 
-        self.has_data = self.h2.has_data and self.h1.has_data and self.h0.has_data
+        self.has_data = self.h2.has_data and self.h1.has_data and self.h0.has_data and self.h3.has_data
 
         self.need_processes = len(h2_processes) or len(
             h1_processes
@@ -131,12 +143,14 @@ class ID(PhysicsModel):
         Axes selections are optional. But in case one is given for the numerator, the denominator must be specified as well and vice versa.
         Use 'None:None' if you don't want to do any for either numerator xor denominator.
         """
-        if len(args) > 3 and ":" not in args[2]:
-            procs_h2 = [p for p in args[2].split(",") if p != "None"]
-            procs_h1 = [p for p in args[3].split(",") if p != "None"]
-            procs_h0 = [p for p in args[4].split(",") if p != "None"]
+        if len(args) > 4 and ":" not in args[2]:
+            procs_h3 = [p for p in args[2].split(",") if p != "None"]
+            procs_h2 = [p for p in args[3].split(",") if p != "None"]
+            procs_h1 = [p for p in args[4].split(",") if p != "None"]
+            procs_h0 = [p for p in args[5].split(",") if p != "None"]
 
         else:
+            procs_h3 = []
             procs_h2 = []
             procs_h1 = []
             procs_h0 = []
@@ -145,17 +159,19 @@ class ID(PhysicsModel):
         if any(a for a in args if ":" in a):
             sel_args = [a for a in args if ":" in a]
         else:
-            sel_args = ["None:None", "None:None", "None:None"]
+            sel_args = ["None:None", "None:None", "None:None",  "None:None"]
 
-        axis_selection_h2, axes_rebin_h2, axes_sum_h2 = helpers.parse_axis_selection(
+        axis_selection_h3, axes_rebin_h3, axes_sum_h3 = helpers.parse_axis_selection(
             sel_args[0]
         )
-        axis_selection_h1, axes_rebin_h1, axes_sum_h1 = helpers.parse_axis_selection(
+        axis_selection_h2, axes_rebin_h2, axes_sum_h2 = helpers.parse_axis_selection(
             sel_args[1]
         )
-
-        axis_selection_h0, axes_rebin_h0, axes_sum_h0 = helpers.parse_axis_selection(
+        axis_selection_h1, axes_rebin_h1, axes_sum_h1 = helpers.parse_axis_selection(
             sel_args[2]
+        )
+        axis_selection_h0, axes_rebin_h0, axes_sum_h0 = helpers.parse_axis_selection(
+            sel_args[3]
         )
         
         key = " ".join([cls.__name__, *args])
@@ -167,34 +183,44 @@ class ID(PhysicsModel):
             args[0],
             args[1],
             args[2],
+            args[3],
+            procs_h3,
             procs_h2,
             procs_h1,
             procs_h0,
+            axis_selection_h3,
             axis_selection_h2,
             axis_selection_h1,
             axis_selection_h0,
+            axes_rebin_h3,
             axes_rebin_h2,
             axes_rebin_h1,
             axes_rebin_h0,
+            axes_sum_h3,
             axes_sum_h2,
             axes_sum_h1,
             axes_sum_h0,
         )
 
     def compute_flat(self, params, observables):
+        h3 = self.h3.select(observables, inclusive=True)
+
         h2 = self.h2.select(observables, inclusive=True)
         h1_hlt = self.h1.select(observables, inclusive=True)[:, 1:, :]
         h1 = self.h1.select(observables, inclusive=True)
         h0 = self.h0.select(observables, inclusive=True)
 
-        eps_hlt = 2*h2/(h1_hlt + 2*h2)
+        eps_iso = 2*h3/(h2 + 2*h3)
+        
+        eps_hlt = h2/(h2 + h1_hlt*(1-eps_iso))
+        # eps_hlt = tf.reshape(eps_hlt, [-1])
+        
         eps_hlt_expanded = tf.zeros(shape=[24, 1, 6], dtype = tf.float64)  # or tf.ones, or any values you want
         # eps_hlt_expanded = tf.zeros(shape=[24, 1, 6], dtype = tf.float64)
         eps_hlt_expanded = tf.concat([eps_hlt_expanded, eps_hlt], axis = 1)
        
         eps_id = h1/(h1 + h0*(1-eps_hlt_expanded))
         eps_id = tf.reshape(eps_id, [-1])
-
         return eps_id
 
     def compute_flat_per_process(self, params, observables):
@@ -217,13 +243,14 @@ class NormID(ID):
         h1 = self.h1.select(observables, normalize = True, inclusive=True)
         h0 = self.h0.select(observables, normalize = True, inclusive=True)
 
+
         eps_hlt = 2*h2/(h1_hlt + 2*h2)
         
-        ### expanding the axis but setting hlt efficiency to 0
-        eps_hlt_expanded = tf.zeros(shape=[2, 1, 3], dtype = tf.float64)  
+        eps_hlt_expanded = tf.zeros(shape=[2, 1, 3], dtype = tf.float64)  # or tf.ones, or any values you want
         eps_hlt_expanded = tf.concat([eps_hlt_expanded, eps_hlt], axis = 1)
        
         eps_id = h1/(h1 + h0*(1-eps_hlt_expanded))
+        # pdb.set_trace()
         eps_id = tf.reshape(eps_id, [-1])
 
         return eps_id

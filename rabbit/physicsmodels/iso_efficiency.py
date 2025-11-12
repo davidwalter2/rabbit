@@ -6,7 +6,7 @@ from rabbit.physicsmodels.physicsmodel import PhysicsModel
 
 import pdb
 
-class HLT(PhysicsModel):
+class ISO(PhysicsModel):
     """
     A class to compute ratios of channels, processes, or bins.
     Optionally the numerator and denominator can be normalized.
@@ -40,19 +40,14 @@ class HLT(PhysicsModel):
         key,
         h3_channel,
         h2_channel,
-        h1_channel,
         h3_processes=[],
         h2_processes=[],
-        h1_processes = [],
         h3_selection={},
         h2_selection={},
-        h1_selection={},
         h3_axes_rebin=[],
         h2_axes_rebin=[],
-        h1_axes_rebin = [],
         h3_axes_sum=[],
         h2_axes_sum=[],
-        h1_axes_sum= [],
     ):
         self.key = key
 
@@ -72,17 +67,8 @@ class HLT(PhysicsModel):
             h2_axes_rebin,
             h2_axes_sum,
         )
-        
-        self.h1 = helpers.Term(
-            indata,
-            h1_channel,
-            h1_processes,
-            h1_selection,
-            h1_axes_rebin,
-            h1_axes_sum,
-        )
 
-        self.has_data = self.h3.has_data and self.h2.has_data and self.h1.has_data
+        self.has_data = self.h3.has_data and self.h2.has_data
 
         self.need_processes = len(h3_processes) or len(
             h2_processes
@@ -98,7 +84,7 @@ class HLT(PhysicsModel):
         #         "Channel axes for numerator and denominator must have the same number of bins"
         #     )
         
-        hist_axes = self.h2.channel_axes
+        hist_axes = self.h3.channel_axes
 
         if h3_channel == h2_channel:
             channel = h3_channel
@@ -131,21 +117,18 @@ class HLT(PhysicsModel):
         Axes selections are optional. But in case one is given for the numerator, the denominator must be specified as well and vice versa.
         Use 'None:None' if you don't want to do any for either numerator xor denominator.
         """
-        if len(args) > 3 and ":" not in args[2]:
+        if len(args) > 2 and ":" not in args[2]:
             procs_h3 = [p for p in args[2].split(",") if p != "None"]
             procs_h2 = [p for p in args[3].split(",") if p != "None"]
-            procs_h1 = [p for p in args[4].split(",") if p != "None"]
-
         else:
             procs_h3 = []
             procs_h2 = []
-            procs_h1 = []
 
         # find axis selections
         if any(a for a in args if ":" in a):
             sel_args = [a for a in args if ":" in a]
         else:
-            sel_args = ["None:None", "None:None", "None:None"]
+            sel_args = ["None:None", "None:None"]
 
         axis_selection_h3, axes_rebin_h3, axes_sum_h3 = helpers.parse_axis_selection(
             sel_args[0]
@@ -154,10 +137,6 @@ class HLT(PhysicsModel):
             sel_args[1]
         )
 
-        axis_selection_h1, axes_rebin_h1, axes_sum_h1 = helpers.parse_axis_selection(
-            sel_args[2]
-        )
-        
         key = " ".join([cls.__name__, *args])
 
 
@@ -166,55 +145,43 @@ class HLT(PhysicsModel):
             key,
             args[0],
             args[1],
-            args[2],
             procs_h3,
             procs_h2,
-            procs_h1,
             axis_selection_h3,
             axis_selection_h2,
-            axis_selection_h1,
             axes_rebin_h3,
             axes_rebin_h2,
-            axes_rebin_h1,
             axes_sum_h3,
             axes_sum_h2,
-            axes_sum_h1,
         )
 
     def compute_flat(self, params, observables):
         h3 = self.h3.select(observables, inclusive=True)
         h2 = self.h2.select(observables, inclusive=True)
-        h1_hlt = self.h1.select(observables, inclusive=True)[:, 1:, :]
-
         eps_iso = 2*h3/(h2 + 2*h3)
-        # pdb.set_trace()
-        eps_hlt = h2/(h2 + h1_hlt*(1-eps_iso))
-        eps_hlt = tf.reshape(eps_hlt, [-1])
+        eps_iso = tf.reshape(eps_iso, [-1])
 
-        return eps_hlt
+        return eps_iso
 
     def compute_flat_per_process(self, params, observables):
         return self.compute_flat(params, observables)
 
 
-class NormHLT(HLT):
+class NormISO(ISO):
     """
     Same as Ratio but the numerator and denominator are normalized
     """
 
-    ndf_reduction = 1  
+    ndf_reduction = 1
 
     def init(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def compute_flat(self, params, observables):
         h3 = self.h3.select(observables, normalize = True, inclusive=True)
-        h2_hlt = self.h2.select(observables,normalize = True,  inclusive=True)[:, 1:, :]
         h2 = self.h2.select(observables, normalize = True, inclusive=True)
-        h1 = self.h1.select(observables, normalize = True, inclusive=True)
+        eps_iso = 2*h3/(h2 + 2*h3)
+        # pdb.set_trace()
+        eps_iso = tf.reshape(eps_iso, [-1])
 
-        eps_iso = 2*h3/(h2_hlt + 2*h3)
-        eps_hlt = h2/(h2 + h1*(1-eps_iso))
-        eps_hlt = tf.reshape(eps_hlt, [-1])
-
-        return eps_hlt
+        return eps_iso

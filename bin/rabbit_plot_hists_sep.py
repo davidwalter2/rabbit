@@ -574,6 +574,9 @@ def make_plot(
                 ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
             else:
                 ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
+        if args.title == "ISO":
+            # ax1.set_ylim(0.8, 1.05)
+            ax1.set_ylim(0.95, 1.02)
             
         outfile = f"{other_axis}_{axis_name}_{args.title}"
 
@@ -667,9 +670,12 @@ def make_plot(
             if args.title == "ID":
                 # ax1.set_ylim(0.8, 1.05)
                 ax1.set_ylim(0.97, 1.02)
-
+            elif args.title == "ISO":
+                # ax1.set_ylim(0.8, 1.05)
+                ax1.set_ylim(0.98, 1.01)
             else:
                 ax1.set_ylim(0.9, 1.02)
+
             
             plot_tools.add_decor(
             ax1,
