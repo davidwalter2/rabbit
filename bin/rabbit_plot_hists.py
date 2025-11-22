@@ -290,7 +290,36 @@ def parseArgs():
         help="Location in (x,y) for additional text, aligned to upper left",
     )
     parser.add_argument(
-        "--varNames", type=str, nargs="*", default=None, help="Name of variation hist"
+        "--varFiles",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Fitresult files with the variation hist",
+    )
+    parser.add_argument(
+        "--varFilesFitTypes",
+        type=str,
+        nargs="*",
+        default=["prefit"],
+        choices=["prefit", "postfit"],
+        help="Fit types for the fitresult files with the variation hist",
+    )
+    parser.add_argument(
+        "--varMarkers",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Use markers for variations, if provided plot variations using errorbar instead of step plots",
+    )
+    parser.add_argument(
+        "--varNames",
+        type=str,
+        nargs="*",
+        default=None,
+        help="""
+        Name of variation hist; for each varFile one varName has to be specified. 
+        Additional varNames can be specified to add variations from the nominal input.
+        """,
     )
     parser.add_argument(
         "--varLabels",
@@ -361,23 +390,6 @@ def parseArgs():
         default=None,
         help="Label for uncertainty shown in the (ratio) plot",
     )
-    parser.add_argument(
-        "--addVarFromExternalFile",
-        type=str,
-        default=None,
-        nargs=3,
-        help="""
-        To overlay the inclusive histogram taken from this external file.
-        Pass file name followed by histogram color and legend text
-        """,
-    )
-    parser.add_argument(
-        "--externalRatio",
-        type=str,
-        default="num",
-        choices=["num", "den"],
-        help="For the ratio, use this external variation as alternative denominator (den, for example to do Data/alt.pred.) or numerator (num, alt.pred./nom.pred.)",
-    )
     args = parser.parse_args()
 
     return args
@@ -407,9 +419,9 @@ def make_plot(
     varNames=None,
     varLabels=None,
     varColors=None,
+    varMarkers=None,
     is_normalized=False,
     binwnorm=1.0,
-    h_inclusive_alt=None,
     counts=True,
 ):
     ratio = not args.noLowerPanel and h_data is not None
@@ -456,8 +468,8 @@ def make_plot(
                     np.sum(h.project(*axes_names).variances()) ** 0.5,
                 )
                 for k, h in zip(
-                    [args.dataName, "Inclusive", "Incl_ext_file"],
-                    [h_data, h_inclusive, h_inclusive_alt],
+                    [args.dataName, "Inclusive"],
+                    [h_data, h_inclusive],
                 )
                 if h is not None
             ],
@@ -497,10 +509,6 @@ def make_plot(
             h_data = hh.unrolledHist(h_data, binwnorm=binwnorm, obs=axes_names)
 
         h_inclusive = hh.unrolledHist(h_inclusive, binwnorm=binwnorm, obs=axes_names)
-        if h_inclusive_alt is not None:
-            h_inclusive_alt = hh.unrolledHist(
-                h_inclusive_alt, binwnorm=binwnorm, obs=axes_names
-            )
         h_stack = [
             hh.unrolledHist(h, binwnorm=binwnorm, obs=axes_names) for h in h_stack
         ]
@@ -519,9 +527,6 @@ def make_plot(
         scale = h_data.values().sum() / h_inclusive.values().sum()
         h_stack = [hh.scaleHist(h, scale) for h in h_stack]
         h_inclusive = hh.scaleHist(h_inclusive, scale)
-        if h_inclusive_alt is not None:
-            scale_alt = h_data.values().sum() / h_inclusive_alt.values().sum()
-            h_inclusive_alt = hh.scaleHist(h_inclusive_alt, scale_alt)
 
     xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel)
 
@@ -534,10 +539,8 @@ def make_plot(
                 rlabel += r"\,-\,"
             else:
                 rlabel += r"\,/\,"
-            if h_inclusive_alt is not None and args.externalRatio == "den":
-                rlabel = f"${rlabel} Any\\,pred.$"
-            else:
-                rlabel = f"${rlabel} Pred.$"
+
+            rlabel = f"${rlabel} Pred.$"
 
         fig, ax1, ratio_axes = plot_tools.figureWithRatio(
             h_inclusive,
@@ -597,51 +600,68 @@ def make_plot(
             flow="none",
         )
 
-    if h_inclusive_alt is not None:
-        hep.histplot(
-            h_inclusive_alt,
-            histtype="step",
-            color=[args.addVarFromExternalFile[1]],
-            linestyle="-",
-            yerr=False,
-            linewidth=2,
-            label=[args.addVarFromExternalFile[2]],
-            binwnorm=binwnorm,
-            ax=ax1,
-            flow="none",
-        )
-
     if args.showVariations in ["upper", "both"]:
         linewidth = 2
-        if hup is not None:
-            hep.histplot(
-                hup,
-                histtype="step",
-                color=varColors,
-                linestyle="-",
-                yerr=False,
-                linewidth=linewidth,
-                label=varLabels,
-                binwnorm=binwnorm,
-                ax=ax1,
-                flow="none",
-            )
-        if (
-            hdown is not None
-            and any(h is not None for h in hdown)
-            and len(args.varOneSided) == 0
-        ):
-            hep.histplot(
-                hdown,
-                histtype="step",
-                color=varColors,
-                linestyle="--",
-                yerr=False,
-                linewidth=linewidth,
-                binwnorm=binwnorm,
-                ax=ax1,
-                flow="none",
-            )
+        for i, l in enumerate(varLabels):
+
+            if (
+                varMarkers is not None
+                and len(varMarkers) > i
+                and varMarkers[i] not in ["none", None]
+            ):
+                # plot errorbar if varMarkers are provided
+                hvar = hup[i].copy()
+                hvar.values()[...] = (hup[i].values() + hdown[i].values()) / 2.0
+
+                # plot markers slightly shifted
+                step = -1 + (i + 1) * 2 / (len(varMarkers) + 1)
+                x = hvar.axes.centers[0]
+                x_diff = np.diff(hvar.axes.edges[0])
+                x = x + step * x_diff / 2
+
+                ax1.errorbar(
+                    x,
+                    hvar.values(),
+                    color=varColors[i],
+                    marker=varMarkers[i],
+                    linestyle="none",
+                    yerr=[
+                        abs(hdown[i].values() - hvar.values()),
+                        abs(hup[i].values() - hvar.values()),
+                    ],
+                    label=l,
+                )
+                continue
+
+            if hup is not None:
+                hep.histplot(
+                    hup[i],
+                    histtype="step",
+                    color=varColors,
+                    linestyle="-",
+                    yerr=False,
+                    linewidth=linewidth,
+                    label=varLabels,
+                    binwnorm=binwnorm,
+                    ax=ax1,
+                    flow="none",
+                )
+            if (
+                hdown is not None
+                and hdown[i] is not None
+                and len(args.varOneSided) == 0
+            ):
+                hep.histplot(
+                    hdown[i],
+                    histtype="step",
+                    color=varColors,
+                    linestyle="--",
+                    yerr=False,
+                    linewidth=linewidth,
+                    binwnorm=binwnorm,
+                    ax=ax1,
+                    flow="none",
+                )
 
     if data:
         hep.histplot(
@@ -756,19 +776,6 @@ def make_plot(
                 h2_stat = hh.divideHists(
                     h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
                 )
-            if h_inclusive_alt is not None:
-                if args.externalRatio == "den":
-                    h3 = hh.addHists(h_data, h_inclusive_alt, scale2=-1)
-                    if h_data_stat is not None:
-                        h3_stat = hh.divideHists(
-                            h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
-                        )
-                else:
-                    h3 = hh.addHists(h_inclusive_alt, h_inclusive, scale2=-1)
-                    h3_stat = hh.divideHists(
-                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
-                    )
-
         else:
             h1 = hh.divideHists(
                 h_inclusive,
@@ -783,22 +790,6 @@ def make_plot(
                 h2_stat = hh.divideHists(
                     h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
                 )
-            if h_inclusive_alt is not None:
-                if args.externalRatio == "den":
-                    h3 = hh.divideHists(
-                        h_data, h_inclusive_alt, cutoff=cutoff, rel_unc=True
-                    )
-                    if h_data_stat is not None:
-                        h3_stat = hh.divideHists(
-                            h_data_stat, h_inclusive_alt, cutoff=cutoff, rel_unc=True
-                        )
-                else:
-                    h3 = hh.divideHists(
-                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
-                    )
-                    h3_stat = hh.divideHists(
-                        h_inclusive_alt, h_inclusive, cutoff=cutoff, rel_unc=True
-                    )
 
         hep.histplot(
             h1,
@@ -819,6 +810,7 @@ def make_plot(
                 yerr=True if counts else h2.variances() ** 0.5,
                 linewidth=2,
                 ax=ax2,
+                zorder=2,
                 flow="none",
             )
             if h_data_stat is not None:
@@ -830,29 +822,9 @@ def make_plot(
                     linewidth=2,
                     capsize=2,
                     ax=ax2,
+                    zorder=2,
                     flow="none",
                 )
-            if h_inclusive_alt is not None:
-                hep.histplot(
-                    h3,
-                    histtype="errorbar" if args.externalRatio == "den" else "step",
-                    color=args.addVarFromExternalFile[1],
-                    yerr=True if counts else h2.variances() ** 0.5,
-                    linewidth=2,
-                    ax=ax2,
-                    flow="none",
-                )
-                if h_data_stat is not None:
-                    hep.histplot(
-                        h3_stat,
-                        histtype="errorbar",
-                        color=args.addVarFromExternalFile[1],
-                        yerr=True if counts else h2.variances() ** 0.5,
-                        linewidth=2,
-                        capsize=2,
-                        ax=ax2,
-                        flow="none",
-                    )
 
         # for uncertaity bands
         edges = h_inclusive.axes[0].edges
@@ -975,6 +947,36 @@ def make_plot(
                     ]
                     linestyles = ["-", "--"]
 
+                if (
+                    varMarkers is not None
+                    and len(varMarkers) > i
+                    and varMarkers[i] not in ["none", None]
+                ):
+                    # plot errorbar if varMarkers are provided
+                    hvar = hvars[0].copy()
+                    hvar.values()[...] = (hvars[0].values() + hvars[1].values()) / 2.0
+
+                    # plot markers slightly shifted
+                    step = -1 + (i + 1) * 2 / (len(varMarkers) + 1)
+                    x = hvar.axes.centers[0]
+                    x_diff = np.diff(hvar.axes.edges[0])
+                    x = x + step * x_diff / 2
+
+                    ax2.errorbar(
+                        x,
+                        hvar.values(),
+                        color=varColors[i],
+                        marker=varMarkers[i],
+                        linestyle="none",
+                        yerr=[
+                            abs(hvars[1].values() - hvar.values()),
+                            abs(hvar.values() - hvars[0].values()),
+                        ],
+                        label=varLabels[i] if args.showVariations != "both" else None,
+                        zorder=0,
+                    )
+                    continue
+
                 hep.histplot(
                     hvars,
                     histtype="step",
@@ -982,11 +984,15 @@ def make_plot(
                     linestyle=linestyles,
                     yerr=False,
                     linewidth=linewidth,
-                    label=varLabels[i] if varOneSided[i] else None,
+                    label=(
+                        varLabels[i]
+                        if varOneSided[i] and args.showVariations != "both"
+                        else None
+                    ),
                     ax=ax2,
                     flow="none",
                 )
-                if not varOneSided[i]:
+                if not varOneSided[i] and args.showVariations != "both":
                     extra_handles.append(
                         Line2D([0], [0], color=varColors[i], linewidth=linewidth)
                     )
@@ -1115,11 +1121,13 @@ def make_plots(
     channel="",
     lumi=1,
     fittype="postit",
+    varResults=None,
+    varFilesFitTypes=None,
+    varMarkers=None,
     varNames=None,
     varLabels=None,
     varColors=None,
     binwnorm=None,
-    resFromExtFile=None,
     *opts,
     **kwopts,
 ):
@@ -1146,19 +1154,7 @@ def make_plots(
         else:
             hist_stack = []
 
-    hist_inclusive_alt = None
-    if resFromExtFile is not None:
-        hist_inclusive_alt = resFromExtFile[f"hist_{fittype}_inclusive"].get()
-
     axes = [a for a in hist_inclusive.axes]
-
-    # vary poi by postfit uncertainty
-    if varNames is not None:
-        hist_var = result[
-            f"hist_{fittype}_inclusive_variations{'_correlated' if args.correlatedVariations else ''}"
-        ].get()
-    else:
-        hist_var = None
 
     if args.processGrouping is not None:
         hist_stack, labels, colors, procs = config.process_grouping(
@@ -1169,15 +1165,51 @@ def make_plots(
         l if p not in args.suppressProcsLabel else None for l, p in zip(labels, procs)
     ]
 
-    if hist_var is not None:
-        hists_down = [
-            hist_var[{"downUpVar": 0, "vars": n}].project(*[a.name for a in axes])
-            for n in varNames
-        ]
-        hists_up = [
-            hist_var[{"downUpVar": 1, "vars": n}].project(*[a.name for a in axes])
-            for n in varNames
-        ]
+    if varNames is not None:
+        # take the first variations from the varFiles, empty if no varFiles are provided
+        if len(varFilesFitTypes) == 1:
+            varFilesFitTypes = varFilesFitTypes * len(varResults)
+
+        hists_down = []
+        hists_up = []
+        for r, t in zip(varResults, varFilesFitTypes):
+            h = r[f"hist_{t}_inclusive"].get()
+
+            hist_up = h.copy()
+            hist_down = h.copy()
+            hist_up.values()[...] = (
+                hist_up.values()[...] + hist_up.variances()[...] ** 0.5
+            )
+            hist_down.values()[...] = (
+                hist_down.values()[...] - hist_down.variances()[...] ** 0.5
+            )
+
+            hists_down.append(hist_down)
+            hists_up.append(hist_up)
+
+        # take the next variations from the nominal input file
+        if len(varNames) > len(varResults):
+            # variations from the nominal input file
+            hist_var = result[
+                f"hist_{fittype}_inclusive_variations{'_correlated' if args.correlatedVariations else ''}"
+            ].get()
+
+            hists_down.extend(
+                [
+                    hist_var[{"downUpVar": 0, "vars": n}].project(
+                        *[a.name for a in axes]
+                    )
+                    for n in varNames[len(varResults) :]
+                ]
+            )
+            hists_up.extend(
+                [
+                    hist_var[{"downUpVar": 1, "vars": n}].project(
+                        *[a.name for a in axes]
+                    )
+                    for n in varNames[len(varResults) :]
+                ]
+            )
     else:
         hists_down = None
         hists_up = None
@@ -1216,9 +1248,6 @@ def make_plots(
             }
 
             h_inclusive = hist_inclusive[idxs]
-            h_inclusive_alt = None
-            if hist_inclusive_alt is not None:
-                h_inclusive_alt = hist_inclusive_alt[idxs]
             h_stack = [h[idxs] for h in hist_stack]
 
             if hist_data is not None:
@@ -1292,8 +1321,8 @@ def make_plots(
                 varNames=varNames,
                 varLabels=varLabels,
                 varColors=varColors,
+                varMarkers=varMarkers,
                 binwnorm=binwnorm,
-                h_inclusive_alt=h_inclusive_alt,
                 *opts,
                 **kwopts,
             )
@@ -1317,8 +1346,8 @@ def make_plots(
             varNames=varNames,
             varLabels=varLabels,
             varColors=varColors,
+            varMarkers=varMarkers,
             binwnorm=binwnorm,
-            h_inclusive_alt=hist_inclusive_alt,
             *opts,
             **kwopts,
         )
@@ -1345,6 +1374,7 @@ def main():
 
     config = plot_tools.load_config(args.config)
 
+    varFiles = args.varFiles
     varNames = args.varNames
     varLabels = args.varLabels
     varColors = args.varColors
@@ -1367,11 +1397,8 @@ def main():
 
     # load .hdf5 file first, must exist in combinetf and rabbit
     fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
-    fitresult_alt = None
-    if args.addVarFromExternalFile is not None:
-        fitresult_alt = rabbit.io_tools.get_fitresult(
-            args.addVarFromExternalFile[0], args.result
-        )
+
+    varFitresults = [rabbit.io_tools.get_fitresult(f, args.result) for f in varFiles]
 
     plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
 
@@ -1401,6 +1428,7 @@ def main():
         varNames=varNames,
         varLabels=varLabels,
         varColors=varColors,
+        varMarkers=args.varMarkers,
     )
 
     results = fitresult["physics_models"]
@@ -1480,13 +1508,12 @@ def main():
 
                 opts["counts"] = counts
 
-                result_alt = (
-                    None
-                    if fitresult_alt is None
-                    else fitresult_alt["physics_models"][instance_key]["channels"][
-                        channel
-                    ]
-                )
+                varResults = [
+                    r["physics_models"][instance_key.replace("_masked", "")][
+                        "channels"
+                    ][channel.replace("_masked", "")]
+                    for r in varFitresults
+                ]
 
                 make_plots(
                     result,
@@ -1498,7 +1525,8 @@ def main():
                     lumi=info.get("lumi", None),
                     is_normalized=is_normalized,
                     binwnorm=binwnorm,
-                    resFromExtFile=result_alt,
+                    varResults=varResults,
+                    varFilesFitTypes=args.varFilesFitTypes,
                     **opts,
                 )
 
