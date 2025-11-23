@@ -431,6 +431,7 @@ def make_plot(
     axes_names = [a.name for a in axes]
     if len(axes_names) == 0:
         axes_names = ["yield"]
+        return
 
     if args.density:
         ylabel = "Density"
@@ -610,25 +611,29 @@ def make_plot(
                 and varMarkers[i] not in ["none", None]
             ):
                 # plot errorbar if varMarkers are provided
-                hvar = hup[i].copy()
-                hvar.values()[...] = (hup[i].values() + hdown[i].values()) / 2.0
+
+                x = hup[i].axes.centers[0]
+                x_diff = np.diff(hup[i].axes.edges[0])
+
+                y_up = hup[i].values()
+                y_dn = hdown[i].values()
+                if binwnorm:
+                    y_up = y_up / x_diff
+                    y_dn = y_dn / x_diff
+
+                y = (y_dn + y_up) / 2.0
 
                 # plot markers slightly shifted
                 step = -1 + (i + 1) * 2 / (len(varMarkers) + 1)
-                x = hvar.axes.centers[0]
-                x_diff = np.diff(hvar.axes.edges[0])
                 x = x + step * x_diff / 2
 
                 ax1.errorbar(
                     x,
-                    hvar.values(),
+                    y,
                     color=varColors[i],
                     marker=varMarkers[i],
                     linestyle="none",
-                    yerr=[
-                        abs(hdown[i].values() - hvar.values()),
-                        abs(hup[i].values() - hvar.values()),
-                    ],
+                    yerr=[y - y_dn, y_up - y],
                     label=l,
                 )
                 continue
@@ -1173,13 +1178,16 @@ def make_plots(
         hists_down = []
         hists_up = []
         for r, t in zip(varResults, varFilesFitTypes):
-            h = r[f"hist_{t}_inclusive"].get()
+            h = r[0][f"hist_{t}_inclusive"].get()
+
+            # varLumi = r[1].get("lumi", 1.0)
+            # h = hh.scaleHist(h, lumi/varLumi)
 
             hist_up = h.copy()
-            hist_down = h.copy()
             hist_up.values()[...] = (
                 hist_up.values()[...] + hist_up.variances()[...] ** 0.5
             )
+            hist_down = h.copy()
             hist_down.values()[...] = (
                 hist_down.values()[...] - hist_down.variances()[...] ** 0.5
             )
@@ -1398,7 +1406,9 @@ def main():
     # load .hdf5 file first, must exist in combinetf and rabbit
     fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
 
-    varFitresults = [rabbit.io_tools.get_fitresult(f, args.result) for f in varFiles]
+    varFitresults = [
+        rabbit.io_tools.get_fitresult(f, args.result, meta=True) for f in varFiles
+    ]
 
     plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
 
@@ -1509,10 +1519,15 @@ def main():
                 opts["counts"] = counts
 
                 varResults = [
-                    r["physics_models"][instance_key.replace("_masked", "")][
-                        "channels"
-                    ][channel.replace("_masked", "")]
-                    for r in varFitresults
+                    (
+                        r["physics_models"][instance_key.replace("_masked", "")][
+                            "channels"
+                        ][channel.replace("_masked", "")],
+                        m["meta_info_input"]["channel_info"][
+                            channel.replace("_masked", "")
+                        ],
+                    )
+                    for r, m in varFitresults
                 ]
 
                 make_plots(
@@ -1522,7 +1537,7 @@ def main():
                     channel=suffix,
                     chi2=[chi2, ndf],
                     saturated_chi2=saturated_chi2,
-                    lumi=info.get("lumi", None),
+                    lumi=channel_info[channel.replace("_masked", "")].get("lumi", None),
                     is_normalized=is_normalized,
                     binwnorm=binwnorm,
                     varResults=varResults,
