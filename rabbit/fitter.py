@@ -293,7 +293,7 @@ class Fitter:
             unblind_parameter_expressions,
             [
                 *self.indata.signals,
-                *[self.indata.systs[i] for i in self.indata.noigroupidxs],
+                *[self.indata.systs[i] for i in self.indata.noiidxs],
             ],
         )
 
@@ -321,7 +321,7 @@ class Fitter:
 
         # multiply offset to nois
         self._blinding_values_theta = np.zeros(self.indata.nsyst, dtype=np.float64)
-        for i in self.indata.noigroupidxs:
+        for i in self.indata.noiidxs:
             param = self.indata.systs[i]
             if param in unblind_parameters:
                 continue
@@ -718,12 +718,28 @@ class Fitter:
         v_invC_v = tf.einsum("ij,ji->i", v_reduced, invC_v)
         return tf.sqrt(v_invC_v)
 
+    def _gather_poi_noi_vector(self, v):
+        v_poi = v[: self.npoi]
+        # protection for constained NOIs, set them to 0
+        mask = (self.indata.noiidxs >= 0) & (
+            self.indata.noiidxs < tf.shape(v[self.npoi :])[0]
+        )
+        safe_idxs = tf.where(mask, self.indata.noiidxs, 0)
+        mask = tf.cast(mask, v.dtype)
+        mask = tf.reshape(
+            mask,
+            tf.concat(
+                [tf.shape(mask), tf.ones(tf.rank(v) - 1, dtype=tf.int32)], axis=0
+            ),
+        )
+        v_noi = tf.gather(v[self.npoi :], safe_idxs) * mask
+        v_gathered = tf.concat([v_poi, v_noi], axis=0)
+        return v_gathered
+
     @tf.function
     def impacts_parms(self, hess):
         # impact for poi at index i in covariance matrix from nuisance with index j is C_ij/sqrt(C_jj) = <deltax deltatheta>/sqrt(<deltatheta^2>)
-        cov_poi = self.cov[: self.npoi]
-        cov_noi = tf.gather(self.cov[self.npoi :], self.indata.noigroupidxs)
-        v = tf.concat([cov_poi, cov_noi], axis=0)
+        v = self._gather_poi_noi_vector(self.cov)
         impacts = v / tf.reshape(tf.sqrt(tf.linalg.diag_part(self.cov)), [1, -1])
 
         nstat = self.npoi + self.indata.nsystnoconstraint
@@ -738,16 +754,18 @@ class Fitter:
 
             hess_stat_no_bbb = hess_no_bbb[:nstat, :nstat]
             inv_hess_stat_no_bbb = tf.linalg.inv(hess_stat_no_bbb)
-
             impacts_data_stat = tf.sqrt(tf.linalg.diag_part(inv_hess_stat_no_bbb))
+            impacts_data_stat = self._gather_poi_noi_vector(impacts_data_stat)
             impacts_data_stat = tf.reshape(impacts_data_stat, (-1, 1))
 
             impacts_bbb_sq = tf.linalg.diag_part(inv_hess_stat - inv_hess_stat_no_bbb)
+            impacts_bbb_sq = self._gather_poi_noi_vector(impacts_bbb_sq)
             impacts_bbb = tf.sqrt(tf.nn.relu(impacts_bbb_sq))  # max(0,x)
             impacts_bbb = tf.reshape(impacts_bbb, (-1, 1))
             impacts_grouped = tf.concat([impacts_data_stat, impacts_bbb], axis=1)
         else:
             impacts_data_stat = tf.sqrt(tf.linalg.diag_part(inv_hess_stat))
+            impacts_data_stat = self._gather_poi_noi_vector(impacts_data_stat)
             impacts_data_stat = tf.reshape(impacts_data_stat, (-1, 1))
             impacts_grouped = impacts_data_stat
 
@@ -774,7 +792,7 @@ class Fitter:
         # TODO migrate this to a physics model to avoid the below code which is largely duplicated
 
         idxs_poi = tf.range(self.npoi, dtype=tf.int64)
-        idxs_noi = tf.constant(self.npoi + self.indata.noigroupidxs, dtype=tf.int64)
+        idxs_noi = tf.constant(self.npoi + self.indata.noiidxs, dtype=tf.int64)
         idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
 
         dexpdx = tf.one_hot(idxsout, depth=self.cov.shape[0], dtype=self.cov.dtype)

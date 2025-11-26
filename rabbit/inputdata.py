@@ -18,8 +18,9 @@ class FitInputData:
             self.systgroups = f["hsystgroups"][...]
             self.systgroupidxs = f["hsystgroupidxs"][...]
 
-            self.noigroups = f["hnoigroups"][...]
-            self.noigroupidxs = f["hnoigroupidxs"][...]
+            self.noiidxs = (
+                f["hnoiidxs"][...] if "hnoiidxs" in f.keys() else f["hnoigroupidxs"]
+            )
             if "hpseudodatanames" in f.keys():
                 self.pseudodatanames = f["hpseudodatanames"][...].astype(str)
             else:
@@ -97,7 +98,6 @@ class FitInputData:
             self.nsystnoconstraint = len(self.systsnoconstraint)
             self.nsignals = len(self.signals)
             self.nsystgroups = len(self.systgroups)
-            self.nnoigroups = len(self.noigroups)
 
             # reference meta data if available
             self.metadata = {}
