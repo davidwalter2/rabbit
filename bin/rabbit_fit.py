@@ -669,7 +669,7 @@ def main():
         "meta_info_input": ifitter.indata.metadata,
         "signals": ifitter.indata.signals,
         "procs": ifitter.indata.procs,
-        "nois": ifitter.parms[ifitter.npoi :][indata.noigroupidxs],
+        "nois": ifitter.parms[ifitter.npoi :][indata.noiidxs],
     }
 
     with workspace.Workspace(
