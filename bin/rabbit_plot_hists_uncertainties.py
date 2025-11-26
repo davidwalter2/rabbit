@@ -218,6 +218,11 @@ def parseArgs():
         default=None,
         help="Location in (x,y) for additional text, aligned to upper left",
     )
+    parser.add_argument(
+        "--noSciy",
+        action="store_true",
+        help="Don't allow scientific notation for y axis",
+    )
     args = parser.parse_args()
 
     return args
@@ -262,10 +267,10 @@ def make_plot(
 
     translate_label = getattr(config, "systematics_labels", {})
     grouping = getattr(config, "nuisance_grouping", {}).get(args.grouping, None)
-    h_impacts[{"impacts": "binByBinStatWmunu"}].values(flow=True)[...] = (
-        h_impacts[{"impacts": "binByBinStatW"}].values(flow=True) ** 2
-        + h_impacts[{"impacts": "binByBinStatWmunu"}].values(flow=True) ** 2
-    ) ** 0.5
+    # h_impacts[{"impacts": "binByBinStatWmunu"}].values(flow=True)[...] = (
+    #     h_impacts[{"impacts": "binByBinStatW"}].values(flow=True) ** 2
+    #     + h_impacts[{"impacts": "binByBinStatWmunu"}].values(flow=True) ** 2
+    # ) ** 0.5
 
     labels = labels[uncertainties != "binByBinStatW"]
     uncertainties = uncertainties[uncertainties != "binByBinStatW"]
@@ -329,15 +334,7 @@ def make_plot(
     if selection is not None:
         text_pieces.extend(selection)
 
-    plot_tools.addLegend(
-        ax1,
-        ncols=args.legCols,
-        loc=args.legPos,
-        text_size=args.legSize,
-        extra_text=text_pieces,
-        extra_text_loc=None if args.extraTextLoc is None else args.extraTextLoc[:2],
-        padding_loc=args.legPadding,
-    )
+    plot_tools.fix_axes(ax1, None, fig, yscale=args.yscale, noSci=args.noSciy)
 
     plot_tools.add_decor(
         ax1,
@@ -348,7 +345,15 @@ def make_plot(
         text_size=args.legSize,
     )
 
-    plot_tools.fix_axes(ax1, None, fig, yscale=args.yscale, noSci=True)
+    plot_tools.addLegend(
+        ax1,
+        ncols=args.legCols,
+        loc=args.legPos,
+        text_size=args.legSize,
+        extra_text=text_pieces,
+        extra_text_loc=None if args.extraTextLoc is None else args.extraTextLoc[:2],
+        padding_loc=args.legPadding,
+    )
 
     to_join = ["uncertainties", args.postfix, *axes_names, suffix]
     outfile = "_".join(filter(lambda x: x, to_join))

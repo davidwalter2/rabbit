@@ -264,6 +264,17 @@ def parseArgs():
         "--dataName", type=str, default="Data", help="Data name for plot labeling"
     )
     parser.add_argument(
+        "--predName",
+        type=str,
+        default="Pred.",
+        help="Name for nominal prediction in plot labeling",
+    )
+    parser.add_argument(
+        "--ratioToData",
+        action="store_true",
+        help="Make the ratio or diff w.r.t. prediction, (default is data)",
+    )
+    parser.add_argument(
         "--xlabel", type=str, default=None, help="x-axis label for plot labeling"
     )
     parser.add_argument(
@@ -532,7 +543,15 @@ def make_plot(
     xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel)
 
     if ratio or diff:
-        if args.noData:
+        if args.ratioToData:
+            rlabel = r"Pred\ "
+            if diff:
+                rlabel += r"\,-\,"
+            else:
+                rlabel += r"\,/\,"
+
+            rlabel = f"${rlabel} {args.dataName}$"
+        elif args.noData:
             rlabel = ("Diff." if diff else "Ratio") + " to nominal"
         else:
             rlabel = args.dataName.replace(" ", r"\ ")
@@ -541,7 +560,7 @@ def make_plot(
             else:
                 rlabel += r"\,/\,"
 
-            rlabel = f"${rlabel} Pred.$"
+            rlabel = f"${rlabel} {args.predName}$"
 
         fig, ax1, ratio_axes = plot_tools.figureWithRatio(
             h_inclusive,
@@ -603,6 +622,7 @@ def make_plot(
 
     if args.showVariations in ["upper", "both"]:
         linewidth = 2
+        step_offset = 0
         for i, l in enumerate(varLabels):
 
             if (
@@ -624,7 +644,12 @@ def make_plot(
                 y = (y_dn + y_up) / 2.0
 
                 # plot markers slightly shifted
-                step = -1 + (i + 1) * 2 / (len(varMarkers) + 1)
+                step_size = 2 / (len(varMarkers) + 2)
+                step = -1 + (i + 1.5) * step_size
+                # make sure top make space to plot the data in the center
+                if step == 0:
+                    step_offset = step_size
+                step += step_offset
                 x = x + step * x_diff / 2
 
                 ax1.errorbar(
@@ -705,7 +730,7 @@ def make_plot(
             yerr=False,
             histtype="step",
             color="black",
-            label="Prefit model" if args.unfoldedXsec else "Prediction",
+            label="Prefit model" if args.unfoldedXsec else args.predName,
             binwnorm=binwnorm,
             ax=ax1,
             alpha=1.0,
@@ -774,26 +799,34 @@ def make_plot(
             cutoff = 0.5 * np.stack((h_data.values(), h_inclusive.values())).min()
         else:
             cutoff = 0.01
+
+        if args.ratioToData:
+            h_num = h_inclusive
+            h_den = h_data
+        else:
+            h_num = h_data
+            h_den = h_inclusive
+
         if diff:
-            h1 = hh.addHists(h_inclusive, h_inclusive, scale2=-1)
-            h2 = hh.addHists(h_data, h_inclusive, scale2=-1)
+            h1 = hh.addHists(h_inclusive, h_den, scale2=-1)
+            h2 = hh.addHists(h_data, h_den, scale2=-1)
             if h_data_stat is not None:
                 h2_stat = hh.divideHists(
-                    h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
+                    h_data_stat, h_den, cutoff=cutoff, rel_unc=True
                 )
         else:
             h1 = hh.divideHists(
                 h_inclusive,
-                h_inclusive,
+                h_den,
                 cutoff=1e-8,
                 rel_unc=True,
                 flow=False,
                 by_ax_name=False,
             )
-            h2 = hh.divideHists(h_data, h_inclusive, cutoff=cutoff, rel_unc=True)
+            h2 = hh.divideHists(h_data, h_den, cutoff=cutoff, rel_unc=True)
             if h_data_stat is not None:
                 h2_stat = hh.divideHists(
-                    h_data_stat, h_inclusive, cutoff=cutoff, rel_unc=True
+                    h_data_stat, h_den, cutoff=cutoff, rel_unc=True
                 )
 
         hep.histplot(
@@ -832,11 +865,11 @@ def make_plot(
                 )
 
         # for uncertaity bands
-        edges = h_inclusive.axes[0].edges
+        edges = h_den.axes[0].edges
 
         # need to divide by bin width
         binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
-        if h_inclusive.storage_type != hist.storage.Weight:
+        if h_den.storage_type != hist.storage.Weight:
             raise ValueError(
                 f"Did not find uncertainties in {fittype} hist. Make sure you run rabbit_fit with --computeHistErrors!"
             )
@@ -849,7 +882,7 @@ def make_plot(
             facecolor = "silver"
             # label_unc = "Pred. unc."
             default_unc_label = (
-                "Normalized model unc." if is_normalized else "Model unc."
+                "Normalized model unc." if is_normalized else f"{args.predName} unc."
             )
             label_unc = default_unc_label if not args.unfoldedXsec else "Prefit unc."
             if args.uncertaintyLabel:
@@ -858,8 +891,8 @@ def make_plot(
             if diff:
                 ax2.fill_between(
                     edges,
-                    np.append((+std), ((+std))[-1]),
-                    np.append((-std), ((-std))[-1]),
+                    np.append((nom + std), ((nom + std))[-1]),
+                    np.append((nom - std), ((nom - std))[-1]),
                     step="post",
                     facecolor=facecolor,
                     zorder=0,
@@ -923,22 +956,23 @@ def make_plot(
                 for i in range(len(varNames))
             ]
 
+            step_offset = 0
             for i, (hu, hd) in enumerate(zip(hup, hdown)):
 
                 if scaleVariation[i] != 1:
-                    hdiff = hh.addHists(hu, h_inclusive, scale2=-1)
+                    hdiff = hh.addHists(hu, h_den, scale2=-1)
                     hdiff = hh.scaleHist(hdiff, scaleVariation[i])
-                    hu = hh.addHists(hdiff, h_inclusive)
+                    hu = hh.addHists(hdiff, h_den)
 
                     if not varOneSided[i]:
-                        hdiff = hh.addHists(hd, h_inclusive, scale2=-1)
+                        hdiff = hh.addHists(hd, h_den, scale2=-1)
                         hdiff = hh.scaleHist(hdiff, scaleVariation[i])
-                        hd = hh.addHists(hdiff, h_inclusive)
+                        hd = hh.addHists(hdiff, h_den)
 
                 if diff:
-                    op = lambda h, hI=h_inclusive: hh.addHists(h, hI, scale2=-1)
+                    op = lambda h, hI=h_den: hh.addHists(h, hI, scale2=-1)
                 else:
-                    op = lambda h, hI=h_inclusive: hh.divideHists(
+                    op = lambda h, hI=h_den: hh.divideHists(
                         h, hI, cutoff=cutoff, rel_unc=True
                     )
 
@@ -962,7 +996,13 @@ def make_plot(
                     hvar.values()[...] = (hvars[0].values() + hvars[1].values()) / 2.0
 
                     # plot markers slightly shifted
-                    step = -1 + (i + 1) * 2 / (len(varMarkers) + 1)
+                    step_size = 2 / (len(varMarkers) + 2)
+                    step = -1 + (i + 1.5) * step_size
+                    # make sure top make space to plot the data in the center
+                    if step == 0:
+                        step_offset = step_size
+                    step += step_offset
+
                     x = hvar.axes.centers[0]
                     x_diff = np.diff(hvar.axes.edges[0])
                     x = x + step * x_diff / 2
