@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rabbit-fit"
-version = "0.2.2"
+version = "0.2.3"
 description = "."
 readme = { file = "README.md", content-type = "text/markdown" }
 license = { text = "MIT" }
@@ -25,7 +25,7 @@ requires-python = ">=3.8"
 dependencies = [
     "tensorflow",
     "tensorflow-probability",
-    "wums",
+    "wums[pickling]",
     "numpy",
     "h5py",
     "hist",
@@ -33,9 +33,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-plotting = ["matplotlib", "mplhep", "seaborn", "pandas", "plotly", "kaleido"]
-convsersion = ["uproot"]
-all = ["plotting", "convsersion"]
+plotting = ["matplotlib", "mplhep", "seaborn", "pandas", "plotly", "kaleido", "wums[plotting]"]
+conversion = ["uproot"]
+all = ["plotting", "conversion"]
 
 [project.scripts]
 rabbit_fit = "bin.rabbit_fit:main"
