@@ -66,8 +66,8 @@ def parseArgs():
     parser.add_argument(
         "--lumi",
         type=float,
-        default=16.8,
-        help="Luminosity used in the fit, needed to get the absolute cross section",
+        default=None,
+        help="Luminosity used in the fit, only for plot labeling",
     )
     parser.add_argument(
         "--noEnergy",
@@ -1218,7 +1218,7 @@ def make_plots(
         hists_down = []
         hists_up = []
         for r, t in zip(varResults, varFilesFitTypes):
-            h = r[0][f"hist_{t}_inclusive"].get()
+            h = r[f"hist_{t}_inclusive"].get()
 
             # varLumi = r[1].get("lumi", 1.0)
             # h = hh.scaleHist(h, lumi/varLumi)
@@ -1447,7 +1447,7 @@ def main():
     fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
 
     varFitresults = [
-        rabbit.io_tools.get_fitresult(f, args.result, meta=True) for f in varFiles
+        rabbit.io_tools.get_fitresult(f, args.result, meta=False) for f in varFiles
     ]
 
     plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
@@ -1559,16 +1559,26 @@ def main():
                 opts["counts"] = counts
 
                 varResults = [
-                    (
-                        r["physics_models"][instance_key.replace("_masked", "")][
-                            "channels"
-                        ][channel.replace("_masked", "")],
-                        m["meta_info_input"]["channel_info"][
-                            channel.replace("_masked", "")
-                        ],
-                    )
-                    for r, m in varFitresults
+                    r["physics_models"][instance_key.replace("_masked", "")][
+                        "channels"
+                    ][channel.replace("_masked", "")]
+                    for r in varFitresults
                 ]
+
+                if args.lumi is None:
+                    # try to automatically find lumi
+                    lumi = set(
+                        [c["lumi"] for c in channel_info.values() if "lumi" in c.keys()]
+                    )
+                    lumi = [l for l in lumi]
+                    if len(lumi) == 1:
+                        lumi = lumi[0]
+                    elif len(lumi) == 0:
+                        lumi = None
+                    else:
+                        lumi = list(lumi)
+                else:
+                    lumi = args.lumi
 
                 make_plots(
                     result,
@@ -1577,7 +1587,7 @@ def main():
                     channel=suffix,
                     chi2=[chi2, ndf],
                     saturated_chi2=saturated_chi2,
-                    lumi=channel_info[channel.replace("_masked", "")].get("lumi", None),
+                    lumi=lumi,
                     is_normalized=is_normalized,
                     binwnorm=binwnorm,
                     varResults=varResults,

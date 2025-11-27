@@ -50,6 +50,13 @@ def parseArgs():
         "--xvals", type=float, nargs="+", default=None, help="x-axis ticks for plotting"
     )
     parser.add_argument(
+        "--biases",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Add additional line to highlight the bias in each point",
+    )
+    parser.add_argument(
         "--scale", type=float, default=1.0, help="Scale limits by this value"
     )
     parser.add_argument(
@@ -217,6 +224,21 @@ def main():
             linewidth=1.5,
             label="Median expected",
         )
+
+        if args.biases is not None:
+            color_bias = "tab:red"
+            # add right y-axis
+            ax2 = ax.twinx()
+            ax2.plot(
+                x,
+                args.biases,
+                linestyle="--",
+                color=color_bias,
+                linewidth=1.5,
+                label="Expected bias",
+            )
+            ax2.set_ylabel("1 - relative expected bias", color=color_bias)
+            ax2.tick_params(axis="y", labelcolor=color_bias)
 
         if len(limits) > 0:
             # Observed
