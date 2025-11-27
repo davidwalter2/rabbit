@@ -108,9 +108,7 @@ class Fitter:
 
         if options.POIMode == "mu":
             self.npoi = self.indata.nsignals
-            poidefault = options.expectSignal * tf.ones(
-                [self.npoi], dtype=self.indata.dtype
-            )
+            poidefault = tf.ones([self.npoi], dtype=self.indata.dtype)
             for signal in self.indata.signals:
                 self.pois.append(signal)
 
