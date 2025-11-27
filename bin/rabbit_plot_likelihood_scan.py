@@ -146,11 +146,14 @@ def plot_scan(
     x = np.array(h_scan.axes["scan"]).astype(float)[mask]
     y = h_scan.values()[mask] * 2
 
+    if xlim is None:
+        xlim = (min(x), max(x))
+
     fig, ax = plot_tools.figure(
         x,
         xlabel,
         ylabel,
-        xlim=(min(x), max(x)),
+        xlim=xlim,
         ylim=(min(y), max(y)),  # logy=args.logy
     )
 
@@ -180,15 +183,6 @@ def plot_scan(
         label="Likelihood scan" if combine is None else "Rabbit",
         markeredgewidth=2,
         linewidth=2,
-    )
-
-    ax.plot(
-        x,
-        y,
-        marker="x",
-        color="blue",
-        label="Likelihood scan",
-        markeredgewidth=2,
     )
 
     if combine is not None:
