@@ -124,6 +124,7 @@ def main():
     clb_list = set()
     limits = []
     limits_asimov = []
+    lumi = None
     for infile in args.infiles:
         fitresult_asimov, meta = io_tools.get_fitresult(
             infile, result="asimov", meta=True
@@ -136,11 +137,23 @@ def main():
 
         limits_asimov.append(h_limits_asimov)
 
-        fitresult = io_tools.get_fitresult(infile, meta=False)
+        fitresult, meta = io_tools.get_fitresult(infile, meta=True)
         if fitresult != fitresult_asimov and not args.noObs:
-            h_limits = fitresult["asymptoticLimits"].get()
-            cls_list = cls_list.union(set([cls for cls in h_limits.axes["cls"]]))
-            limits.append(h_limits)
+            if (
+                "asymptoticLimits" in fitresult.keys()
+                and "clb" not in fitresult["asymptoticLimits"].get().axes.name
+            ):
+                h_limits = fitresult["asymptoticLimits"].get()
+                cls_list = cls_list.union(set([cls for cls in h_limits.axes["cls"]]))
+                limits.append(h_limits)
+            else:
+                limits.append(h_limits_asimov[{"clb": "0.5"}])
+
+        channel_info = meta["meta_info_input"]["channel_info"]
+        lumis = set([c.get("lumi", None) for c in channel_info.values()])
+        if len(lumis) > 1 or (lumi is not None and tuple(lumis)[0] != lumi):
+            raise ValueError("Different channels with different luminosity values")
+        lumi = tuple(lumis)[0]
 
     if args.xvals is not None:
         x = np.array(args.xvals)
@@ -214,7 +227,7 @@ def main():
             args.title,
             args.subtitle,
             data=len(limits) > 0,
-            lumi=None,  # if args.dataName == "Data" and not args.noData else None,
+            lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
             loc=args.titlePos,
             text_size=args.legSize,
         )
