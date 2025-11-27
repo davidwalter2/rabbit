@@ -127,7 +127,6 @@ def make_parser():
         action="store_true",
         help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
     )
-    parser.add_argument("--POIDefault", default=1.0, type=float, help="mode for POI's")
     parser.add_argument(
         "--asymptoticLimits",
         nargs="+",
@@ -506,31 +505,9 @@ def fit(args, fitter, ws, dofit=True):
         if not args.noHessian:
 
             val, grad, hess = fitter.loss_val_grad_hess()
-
-            if len(fitter.frozen_params) > 0:
-                # Only keep parameters that were floating in the fit
-                subgrad = tf.gather(grad, fitter.floating_indices, axis=0)
-                subhess = tf.gather(hess, fitter.floating_indices, axis=0)
-                subhess = tf.gather(subhess, fitter.floating_indices, axis=1)
-                edmval, cov = edmval_cov(subgrad, subhess)
-            else:
-                edmval, cov = edmval_cov(grad, hess)
+            edmval, cov = edmval_cov(grad, hess)
 
             logger.info(f"edmval: {edmval}")
-
-            if len(fitter.frozen_params) > 0:
-                # update only the covariance entries for parameters that were floating in the fit
-                coords = tf.stack(
-                    tf.meshgrid(
-                        fitter.floating_indices, fitter.floating_indices, indexing="ij"
-                    ),
-                    axis=-1,
-                )
-                coords = tf.reshape(coords, [-1, 2])
-
-                updates = tf.reshape(cov, [-1])
-
-                cov = tf.tensor_scatter_nd_update(fitter.cov, coords, updates)
 
             fitter.cov.assign(cov)
 
@@ -542,11 +519,6 @@ def fit(args, fitter, ws, dofit=True):
                 # It should be near-zero by construction as long as the analytic profiling is
                 # correct
                 _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
-                if len(fitter.frozen_params) > 0:
-                    # Only keep parameters that were floating in the fit
-                    gradbeta = tf.gather(gradbeta, fitter.floating_indices, axis=0)
-                    hessbeta = tf.gather(hessbeta, fitter.floating_indices, axis=0)
-                    hessbeta = tf.gather(hessbeta, fitter.floating_indices, axis=1)
                 edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
                 logger.info(f"edmvalbeta: {edmvalbeta}")
 
@@ -677,6 +649,7 @@ def fit(args, fitter, ws, dofit=True):
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
 
         for param in parms:
+            logger.info(f"-delta log(L) scan for {param}")
             x_scan, dnll_values = fitter.nll_scan(
                 param, args.scanRange, args.scanPoints, args.scanRangeUsePrefit
             )
@@ -705,7 +678,9 @@ def fit(args, fitter, ws, dofit=True):
 
         contours = np.zeros((len(parms), len(args.contourLevels), 2, len(fitter.parms)))
         for i, param in enumerate(parms):
+            logger.info(f"Contour scan for {param}")
             for j, cl in enumerate(args.contourLevels):
+                logger.info(f"    Now at CL {cl}")
 
                 # find confidence interval
                 contour = fitter.contour_scan(
@@ -783,7 +758,7 @@ def main():
         "meta_info_input": ifitter.indata.metadata,
         "signals": ifitter.indata.signals,
         "procs": ifitter.indata.procs,
-        "nois": ifitter.parms[ifitter.npoi :][indata.noigroupidxs],
+        "nois": ifitter.parms[ifitter.npoi :][indata.noiidxs],
     }
 
     with workspace.Workspace(

@@ -342,6 +342,7 @@ weights = a * bin_centers + b  # Compute weights
 h1_bkg_syst0 = h1_bkg.copy()
 h1_bkg_syst0.values()[...] = h1_bkg.values() * (1 + weights)
 
+# unconstrained systematic that is not an NOI
 writer.add_systematic(
     h1_bkg_syst0,
     "slope_background",
@@ -349,6 +350,7 @@ writer.add_systematic(
     "ch0",
     add_to_data_covariance=args.addSystToDataCovariance,
     groups=["slopes", "slopes_background"],
+    constrained=False,
 )
 
 h1_sig_syst1_up = h1_sig.copy()
@@ -356,6 +358,7 @@ h1_sig_syst1_dn = h1_sig.copy()
 h1_sig_syst1_up.values()[...] = h1_sig.values() * (1 + weights)
 h1_sig_syst1_dn.values()[...] = h1_sig.values() * (1 - weights)
 
+# constrained systematic that is an NOI
 writer.add_systematic(
     [h1_sig_syst1_up, h1_sig_syst1_dn],
     "slope_signal_ch0",
@@ -365,8 +368,11 @@ writer.add_systematic(
     groups=["slopes", "slopes_signal"],
     symmetrize="average",
     kfactor=1.2,
+    constrained=True,
+    noi=True,
 )
 
+# unconstrained systematic that is an NOI
 writer.add_systematic(
     [h1_sig_syst1_up, h1_sig_syst1_dn],
     "slope_signal",
@@ -439,6 +445,7 @@ writer.add_systematic(
     "ch1",
     add_to_data_covariance=args.addSystToDataCovariance,
     groups=["slopes", "slopes_background"],
+    constrained=False,
 )
 
 h2_sig_syst1_up = h2_sig.copy()

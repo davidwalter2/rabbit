@@ -34,13 +34,11 @@ class TensorWriter:
         self.nbinschan = {}
         self.pseudodata_names = set()
 
-        self.dict_noigroups = defaultdict(lambda: set())
         self.dict_systgroups = defaultdict(lambda: set())
 
         self.systsstandard = set()
         self.systsnoi = set()
         self.systsnoconstraint = set()
-        self.systsnoprofile = set()
         self.systscovariance = set()
 
         self.sparse = sparse
@@ -78,7 +76,7 @@ class TensorWriter:
         return values.flatten().astype(self.dtype)
 
     def get_flat_variances(self, h, flow=False):
-        if hasattr(h, "values"):
+        if hasattr(h, "variances"):
             variances = h.variances(flow=flow)
         else:
             variances = h
@@ -267,7 +265,6 @@ class TensorWriter:
         process,
         channel,
         uncertainty,
-        profile=True,
         add_to_data_covariance=False,
         groups=None,
         symmetrize="average",
@@ -327,7 +324,6 @@ class TensorWriter:
         self.book_systematic(
             var_name_out,
             groups=groups,
-            profile=profile,
             add_to_data_covariance=add_to_data_covariance,
             **kargs,
         )
@@ -461,7 +457,6 @@ class TensorWriter:
     def book_systematic(
         self,
         name,
-        profile=True,
         noi=False,
         constrained=True,
         add_to_data_covariance=False,
@@ -470,8 +465,6 @@ class TensorWriter:
 
         if add_to_data_covariance:
             self.systscovariance.add(name)
-        elif not profile:
-            self.systsnoprofile.add(name)
         elif not constrained:
             self.systsnoconstraint.add(name)
         else:
@@ -482,13 +475,8 @@ class TensorWriter:
             if groups is None:
                 groups = [name]
 
-            if noi:
-                target_dict = self.dict_noigroups
-            else:
-                target_dict = self.dict_systgroups
-
             for group in groups:
-                target_dict[group].add(name)
+                self.dict_systgroups[group].add(name)
 
     def write(self, outfolder="./", outfilename="rabbit_input.hdf5", args={}):
 
@@ -789,9 +777,8 @@ class TensorWriter:
 
         ioutils.pickle_dump_h5py("meta", meta, f)
 
-        systsnoprofile = self.get_systsnoprofile()
+        noiidxs = self.get_noiidxs()
         systsnoconstraint = self.get_systsnoconstraint()
-        noigroups, noigroupidxs = self.get_noigroups()
         systgroups, systgroupidxs = self.get_systgroups()
 
         # save some lists of strings to the file for later use
@@ -811,7 +798,6 @@ class TensorWriter:
         create_dataset("procs", procs)
         create_dataset("signals", sorted(list(self.signals)))
         create_dataset("systs", systs)
-        create_dataset("systsnoprofile", systsnoprofile)
         create_dataset("systsnoconstraint", systsnoconstraint)
         create_dataset("systgroups", systgroups)
         create_dataset(
@@ -819,8 +805,7 @@ class TensorWriter:
             systgroupidxs,
             dtype=h5py.special_dtype(vlen=np.dtype("int32")),
         )
-        create_dataset("noigroups", noigroups)
-        create_dataset("noigroupidxs", noigroupidxs, dtype="int32")
+        create_dataset("noiidxs", noiidxs, dtype="int32")
         create_dataset("pseudodatanames", [n for n in self.pseudodata_names])
 
         # create h5py datasets with optimized chunk shapes
@@ -929,9 +914,6 @@ class TensorWriter:
     def get_systsstandard(self):
         return list(common.natural_sort(self.systsstandard))
 
-    def get_systsnoprofile(self):
-        return list(common.natural_sort(self.systsnoprofile))
-
     def get_systsnoi(self):
         return list(common.natural_sort(self.systsnoi))
 
@@ -939,11 +921,7 @@ class TensorWriter:
         return list(common.natural_sort(self.systsnoconstraint))
 
     def get_systs(self):
-        return (
-            self.get_systsnoconstraint()
-            + self.get_systsstandard()
-            + self.get_systsnoprofile()
-        )
+        return self.get_systsnoconstraint() + self.get_systsstandard()
 
     def get_constraintweights(self, dtype):
         systs = self.get_systs()
@@ -964,16 +942,13 @@ class TensorWriter:
             idxs.append(idx)
         return groups, idxs
 
-    def get_noigroups(self):
-        # list of groups of systematics to be treated as additional outputs for impacts, etc (aka "nuisances of interest")
+    def get_noiidxs(self):
+        # list of indeces of nois w.r.t. systs
         systs = self.get_systs()
-        groups = []
         idxs = []
-        for group, members in common.natural_sort_dict(self.dict_noigroups).items():
-            groups.append(group)
-            for syst in members:
-                idxs.append(systs.index(syst))
-        return groups, idxs
+        for noi in self.get_systsnoi():
+            idxs.append(systs.index(noi))
+        return idxs
 
     def get_systgroups(self):
         # list of groups of systematics (nuisances) and lists of indexes

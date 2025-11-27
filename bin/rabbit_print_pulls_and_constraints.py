@@ -51,6 +51,18 @@ def parseArgs():
         action="store_true",
         help="Print asymmetric constraints from contour scans",
     )
+    parser.add_argument(
+        "--keepNuisances",
+        type=str,
+        default=None,
+        help="Match nuisances by regular expression",
+    )
+    parser.add_argument(
+        "--excludeNuisances",
+        type=str,
+        default=None,
+        help="Exclude nuisances by regular expression",
+    )
     return parser.parse_args()
 
 
@@ -58,14 +70,24 @@ def main():
     args = parseArgs()
     fitresult = io_tools.get_fitresult(args.inputFile, args.result)
 
-    labels, pulls, constraints = io_tools.get_pulls_and_constraints(fitresult)
+    labels, pulls, constraints = io_tools.get_pulls_and_constraints(
+        fitresult,
+        keep_nuisances=args.keepNuisances,
+        exclude_nuisances=args.excludeNuisances,
+    )
     labels, pulls_prefit, constraints_prefit = io_tools.get_pulls_and_constraints(
-        fitresult, prefit=True
+        fitresult,
+        prefit=True,
+        keep_nuisances=args.keepNuisances,
+        exclude_nuisances=args.excludeNuisances,
     )
 
     if args.asym:
         _0, _1, constraints_asym = io_tools.get_pulls_and_constraints(
-            fitresult, asym=True
+            fitresult,
+            keep_nuisances=args.keepNuisances,
+            exclude_nuisances=args.excludeNuisances,
+            asym=True,
         )
 
     if args.sort is not None:

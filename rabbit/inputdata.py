@@ -14,13 +14,13 @@ class FitInputData:
             self.procs = f["hprocs"][...]
             self.signals = f["hsignals"][...]
             self.systs = f["hsysts"][...]
-            self.systsnoprofile = f["hsystsnoprofile"][...]
             self.systsnoconstraint = f["hsystsnoconstraint"][...]
             self.systgroups = f["hsystgroups"][...]
             self.systgroupidxs = f["hsystgroupidxs"][...]
 
-            self.noigroups = f["hnoigroups"][...]
-            self.noigroupidxs = f["hnoigroupidxs"][...]
+            self.noiidxs = (
+                f["hnoiidxs"][...] if "hnoiidxs" in f.keys() else f["hnoigroupidxs"]
+            )
             if "hpseudodatanames" in f.keys():
                 self.pseudodatanames = f["hpseudodatanames"][...].astype(str)
             else:
@@ -95,11 +95,9 @@ class FitInputData:
             self.nbinsmasked = self.nbinsfull - self.nbins
             self.nproc = len(self.procs)
             self.nsyst = len(self.systs)
-            self.nsystnoprofile = len(self.systsnoprofile)
             self.nsystnoconstraint = len(self.systsnoconstraint)
             self.nsignals = len(self.signals)
             self.nsystgroups = len(self.systgroups)
-            self.nnoigroups = len(self.noigroups)
 
             # reference meta data if available
             self.metadata = {}

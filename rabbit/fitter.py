@@ -108,7 +108,7 @@ class Fitter:
 
         if options.POIMode == "mu":
             self.npoi = self.indata.nsignals
-            poidefault = options.POIDefault * tf.ones(
+            poidefault = options.expectSignal * tf.ones(
                 [self.npoi], dtype=self.indata.dtype
             )
             for signal in self.indata.signals:
@@ -297,11 +297,6 @@ class Fitter:
         )
         self.frozen_params_mask = np.isin(self.parms, self.frozen_params)
         self.frozen_indices = np.where(self.frozen_params_mask)[0]
-        self.floating_indices = np.where(~self.frozen_params_mask)[0]
-
-        keep = tf.cast(~self.frozen_params_mask, dtype=self.indata.dtype)
-        # Outer product of keep vectors masks both rows & columns
-        self.frozen_params_mask2d = tf.tensordot(keep, keep, axes=0)  # shape [n, n]
 
     def init_blinding_values(self, unblind_parameter_expressions=[]):
 
@@ -309,7 +304,7 @@ class Fitter:
             unblind_parameter_expressions,
             [
                 *self.indata.signals,
-                *[self.indata.systs[i] for i in self.indata.noigroupidxs],
+                *[self.indata.systs[i] for i in self.indata.noiidxs],
             ],
         )
 
@@ -337,7 +332,7 @@ class Fitter:
 
         # multiply offset to nois
         self._blinding_values_theta = np.zeros(self.indata.nsyst, dtype=np.float64)
-        for i in self.indata.noigroupidxs:
+        for i in self.indata.noiidxs:
             param = self.indata.systs[i]
             if param in unblind_parameters:
                 continue
@@ -647,28 +642,46 @@ class Fitter:
                     )
                 )
 
-    def nonprofiled_impacts_parms(self):
+    def nonprofiled_impacts_parms(self, unconstrained_err=1.0):
         x_tmp = tf.identity(self.x.value())
         x_tmp_tiled = tf.tile(
             tf.reshape(x_tmp, [1, 1, -1]), [len(self.frozen_indices), 2, 1]
         )
         nonprofiled_impacts = tf.Variable(x_tmp_tiled)
 
+        theta0_tmp = tf.identity(self.theta0.value())
+
+        err_theta = tf.where(
+            self.indata.constraintweights == 0.0,
+            unconstrained_err,
+            tf.math.reciprocal(self.indata.constraintweights),
+        )
+
         for i, idx in enumerate(self.frozen_indices):
             logger.info(f"Now at parameter {self.frozen_params[i]}")
 
-            for j, variation in enumerate((1, -1)):
-                self.x.assign(x_tmp)
+            for j, sign in enumerate((1, -1)):
+                variation = (
+                    sign * err_theta[idx - self.npoi] + theta0_tmp[idx - self.npoi]
+                )
                 # vary the non-profile parameter
-                self.x[idx].assign(variation)
+                self.theta0[idx - self.npoi].assign(variation)
+                self.x[idx].assign(
+                    variation
+                )  # this should not be needed but should accelerates the minimization
                 # minimize
                 self.minimize()
+                if self.diagnostics:
+                    val, grad, hess = self.loss_val_grad_hess()
+                    edmval, cov = tfh.edmval_cov(grad, hess)
+                    logger.info(f"edmval: {edmval}")
                 # difference w.r.t. nominal fit
                 diff = x_tmp - self.x.value()
                 nonprofiled_impacts[i, j].assign(diff)
+                self.x.assign(x_tmp)
 
             # back to original value
-            self.x[idx].assign(x_tmp[idx])
+            self.theta0[idx - self.npoi].assign(theta0_tmp[idx - self.npoi])
 
         # grouped nonprofiled impacts
         @tf.function
@@ -716,12 +729,28 @@ class Fitter:
         v_invC_v = tf.einsum("ij,ji->i", v_reduced, invC_v)
         return tf.sqrt(v_invC_v)
 
+    def _gather_poi_noi_vector(self, v):
+        v_poi = v[: self.npoi]
+        # protection for constained NOIs, set them to 0
+        mask = (self.indata.noiidxs >= 0) & (
+            self.indata.noiidxs < tf.shape(v[self.npoi :])[0]
+        )
+        safe_idxs = tf.where(mask, self.indata.noiidxs, 0)
+        mask = tf.cast(mask, v.dtype)
+        mask = tf.reshape(
+            mask,
+            tf.concat(
+                [tf.shape(mask), tf.ones(tf.rank(v) - 1, dtype=tf.int32)], axis=0
+            ),
+        )
+        v_noi = tf.gather(v[self.npoi :], safe_idxs) * mask
+        v_gathered = tf.concat([v_poi, v_noi], axis=0)
+        return v_gathered
+
     @tf.function
     def impacts_parms(self, hess):
         # impact for poi at index i in covariance matrix from nuisance with index j is C_ij/sqrt(C_jj) = <deltax deltatheta>/sqrt(<deltatheta^2>)
-        cov_poi = self.cov[: self.npoi]
-        cov_noi = tf.gather(self.cov[self.npoi :], self.indata.noigroupidxs)
-        v = tf.concat([cov_poi, cov_noi], axis=0)
+        v = self._gather_poi_noi_vector(self.cov)
         impacts = v / tf.reshape(tf.sqrt(tf.linalg.diag_part(self.cov)), [1, -1])
 
         nstat = self.npoi + self.indata.nsystnoconstraint
@@ -736,16 +765,18 @@ class Fitter:
 
             hess_stat_no_bbb = hess_no_bbb[:nstat, :nstat]
             inv_hess_stat_no_bbb = tf.linalg.inv(hess_stat_no_bbb)
-
             impacts_data_stat = tf.sqrt(tf.linalg.diag_part(inv_hess_stat_no_bbb))
+            impacts_data_stat = self._gather_poi_noi_vector(impacts_data_stat)
             impacts_data_stat = tf.reshape(impacts_data_stat, (-1, 1))
 
             impacts_bbb_sq = tf.linalg.diag_part(inv_hess_stat - inv_hess_stat_no_bbb)
+            impacts_bbb_sq = self._gather_poi_noi_vector(impacts_bbb_sq)
             impacts_bbb = tf.sqrt(tf.nn.relu(impacts_bbb_sq))  # max(0,x)
             impacts_bbb = tf.reshape(impacts_bbb, (-1, 1))
             impacts_grouped = tf.concat([impacts_data_stat, impacts_bbb], axis=1)
         else:
             impacts_data_stat = tf.sqrt(tf.linalg.diag_part(inv_hess_stat))
+            impacts_data_stat = self._gather_poi_noi_vector(impacts_data_stat)
             impacts_data_stat = tf.reshape(impacts_data_stat, (-1, 1))
             impacts_grouped = impacts_data_stat
 
@@ -772,7 +803,7 @@ class Fitter:
         # TODO migrate this to a physics model to avoid the below code which is largely duplicated
 
         idxs_poi = tf.range(self.npoi, dtype=tf.int64)
-        idxs_noi = tf.constant(self.npoi + self.indata.noigroupidxs, dtype=tf.int64)
+        idxs_noi = tf.constant(self.npoi + self.indata.noiidxs, dtype=tf.int64)
         idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
 
         dexpdx = tf.one_hot(idxsout, depth=self.cov.shape[0], dtype=self.cov.dtype)
@@ -1186,6 +1217,10 @@ class Fitter:
         # full: compute yields inclduing masked channels
         poi = self.get_blinded_poi()
         theta = self.get_blinded_theta()
+
+        theta = tf.where(
+            self.frozen_params_mask[self.npoi :], tf.stop_gradient(theta), theta
+        )
 
         rnorm = tf.concat(
             [poi, tf.ones([self.indata.nproc - poi.shape[0]], dtype=self.indata.dtype)],
@@ -1898,51 +1933,28 @@ class Fitter:
         with tf.GradientTape() as t:
             val = self._compute_loss()
         grad = t.gradient(val, self.x)
-
-        grad = tf.where(
-            self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
-        )
-
         return val, grad
 
     # FIXME in principle this version of the function is preferred
     # but seems to introduce some small numerical non-reproducibility
     @tf.function
     def loss_val_grad_hessp_fwdrev(self, p):
-        p = tf.where(self.frozen_params_mask, tf.constant(0.0, dtype=p.dtype), p)
         p = tf.stop_gradient(p)
         with tf.autodiff.ForwardAccumulator(self.x, p) as acc:
             with tf.GradientTape() as grad_tape:
                 val = self._compute_loss()
             grad = grad_tape.gradient(val, self.x)
         hessp = acc.jvp(grad)
-
-        grad = tf.where(
-            self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
-        )
-        hessp = tf.where(
-            self.frozen_params_mask, tf.constant(0.0, dtype=hessp.dtype), hessp
-        )
-
         return val, grad, hessp
 
     @tf.function
     def loss_val_grad_hessp_revrev(self, p):
-        p = tf.where(self.frozen_params_mask, tf.constant(0.0, dtype=p.dtype), p)
         p = tf.stop_gradient(p)
         with tf.GradientTape() as t2:
             with tf.GradientTape() as t1:
                 val = self._compute_loss()
             grad = t1.gradient(val, self.x)
         hessp = t2.gradient(grad, self.x, output_gradients=p)
-
-        grad = tf.where(
-            self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
-        )
-        hessp = tf.where(
-            self.frozen_params_mask, tf.constant(0.0, dtype=hessp.dtype), hessp
-        )
-
         return val, grad, hessp
 
     loss_val_grad_hessp = loss_val_grad_hessp_revrev
@@ -1954,12 +1966,6 @@ class Fitter:
                 val = self._compute_loss(profile=profile)
             grad = t1.gradient(val, self.x)
         hess = t2.jacobian(grad, self.x)
-
-        grad = tf.where(
-            self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
-        )
-        hess = self.frozen_params_mask2d * hess
-
         return val, grad, hess
 
     @tf.function

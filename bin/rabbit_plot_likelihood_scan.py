@@ -106,6 +106,13 @@ def parseArgs():
         type=str,
         help="Subtitle to be printed after title",
     )
+    parser.add_argument(
+        "--xlim",
+        type=float,
+        nargs=2,
+        default=None,
+        help="x axis limits",
+    )
     parser.add_argument("--titlePos", type=int, default=2, help="title position")
     parser.add_argument(
         "--config",
@@ -125,16 +132,19 @@ def plot_scan(
     title=None,
     subtitle=None,
     titlePos=0,
+    xlim=None,
     combine=None,
     ylabel=r"$-2\,\Delta \log L$",
     config={},
     no_hessian=False,
 ):
 
-    xlabel = config.get("systematics_labels", {}).get(param, param)
+    xlabel = getattr(config, "systematics_labels", {}).get(param, param)
 
-    x = np.array(h_scan.axes["scan"]).astype(float)
-    y = h_scan.values() * 2
+    mask = np.isfinite(h_scan.values())
+
+    x = np.array(h_scan.axes["scan"]).astype(float)[mask]
+    y = h_scan.values()[mask] * 2
 
     fig, ax = plot_tools.figure(
         x,
@@ -170,6 +180,15 @@ def plot_scan(
         label="Likelihood scan" if combine is None else "Rabbit",
         markeredgewidth=2,
         linewidth=2,
+    )
+
+    ax.plot(
+        x,
+        y,
+        marker="x",
+        color="blue",
+        label="Likelihood scan",
+        markeredgewidth=2,
     )
 
     if combine is not None:
@@ -266,8 +285,9 @@ def main():
             title=args.title,
             subtitle=args.subtitle,
             titlePos=args.titlePos,
-            combine=(vals, nlls) if args.combine is not None else None,
+            xlim=args.xlim,
             config=config,
+            combine=(vals, nlls) if args.combine is not None else None,
             no_hessian=args.noHessian,
         )
         os.makedirs(args.outpath, exist_ok=True)
