@@ -462,6 +462,128 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
                 fitter.cov.assign(tf.constant(cov_prefit))
 
 
+def asymptotic_limits(
+    args, fitter, ws, bkg_only_fit=False, observed=False, from_xsec=True
+):
+    if bkg_only_fit or observed:
+        if bkg_only_fit:
+            # perform background only fit
+            # set process to zero and freeze
+            fitter.freeze_params(args.asymptoticLimits)
+
+        fitter.minimize()
+
+        if bkg_only_fit:
+            # defreeze process again to evaluate it's dependencies
+            fitter.defreeze_params(args.asymptoticLimits)
+
+    if not args.noHessian:
+        # compute the covariance matrix and estimated distance to minimum
+
+        val, grad, hess = fitter.loss_val_grad_hess()
+        edmval, cov = edmval_cov(grad, hess)
+
+        logger.info(f"edmval: {edmval}")
+
+        fitter.cov.assign(cov)
+
+        del cov
+
+    # asymptotic limits (CLs)
+    #  see:
+    #  - combine tutorial https://indico.cern.ch/event/976099/contributions/4138520/
+    #  - paper: https://arxiv.org/abs/1007.1727
+
+    # axes for output histogram: params, cls, clb
+    limits_shape = [len(args.asymptoticLimits), len(args.cls)]
+    if observed:
+        clb_list = None
+    else:
+        clb_list = np.array([0.025, 0.16, 0.5, 0.84, 0.975])
+        limits_shape.append(len(clb_list))
+
+    limits = np.full(limits_shape, np.nan)
+    for i, param in enumerate(args.asymptoticLimits):
+        if param not in fitter.indata.signals.astype(str):
+            raise RuntimeError(
+                f"Can not compute asymptotic limits for parameter {param}, no such signal process found, signal processe are: {fitter.indata.signals.astype(str)}"
+            )
+
+        if from_xsec:
+            # we now need to get the cross section
+            # TODO: make channel generic
+            model = ph.instance_from_class("Select", fitter.indata, f"{param}_masked")
+            fun = model.compute_flat
+
+            exp, exp_var, _0, _1, _2 = fitter.expected_with_variance(
+                fun,
+                profile=True,
+                compute_cov=False,
+                compute_global_impacts=False,
+                need_observables=True,
+                inclusive=True,
+            )
+            xbest = exp.numpy()[0]
+            xerr = exp_var.numpy()[0] ** 0.5
+
+        else:
+            # otherwise do it on the signal strength
+            idx = np.where(fitter.parms.astype(str) == param)[0][0]
+            xbest = fitter.get_blinded_poi()[idx]
+            xerr = fitter.cov[idx, idx] ** 0.5
+
+            if not args.allowNegativePOI:
+                xerr = 2 * xerr * xbest**0.5
+
+        logger.debug(f"Best fit {param} = {xbest} +/- {xerr}")
+
+        # this is the denominator of q
+        nllvalreduced = fitter.reduced_nll().numpy()
+
+        if xbest < 0:
+            # need modified test statistic q~ = [0 for mu < mu^, q for mu < mu^ and mu^ > 0, q0 for mu^<0]
+            raise NotImplementedError(
+                "Need modified test statistic here or run without '--allowNegativePOI'"
+            )
+
+        for j, cls in enumerate(args.cls):
+            logger.info(f" -- AsymptoticLimits ( CLs={round(cls*100,1):4.1f}% ) -- ")
+
+            if observed:
+                # observed limit
+                # TODO: this is not correct, we need to take into account CLb (from the asimov)
+                q = scipy.stats.norm.ppf(1 - cls / 2, loc=0, scale=1) ** 2
+                logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {q}")
+                r = fitter.contour_scan(param, nllvalreduced, q, signs=[1])[0]
+                logger.info(f"Observed Limit: {param} < {r}")
+                limits[i, j] = r
+            else:
+                # now we need to find the values for mu where q_{mu,A} = -2ln(L)
+                for k, clb in enumerate(clb_list):
+                    clsb = cls * clb
+                    qmuA = (
+                        scipy.stats.norm.ppf(clb, loc=0, scale=1)
+                        + scipy.stats.norm.ppf(1 - clsb, loc=0, scale=1)
+                    ) ** 2
+                    logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmuA}")
+
+                    ### Gaussian approximation
+                    r = xbest + xerr * qmuA**0.5
+
+                    # r = fitter.contour_scan(param, nllvalreduced, qmuA, signs=[1])[
+                    #     0
+                    # ]
+                    logger.info(f"Expected {round(clb*100,1):4.1f}%: {param} < {r}")
+                    limits[i, j, k] = r
+
+    ws.add_limits_hist(
+        limits,
+        args.asymptoticLimits,
+        args.cls,
+        clb_list,
+    )
+
+
 def fit(args, fitter, ws, dofit=True):
 
     edmval = None
@@ -500,9 +622,8 @@ def fit(args, fitter, ws, dofit=True):
         if dofit:
             fitter.minimize()
 
-        # compute the covariance matrix and estimated distance to minimum
-
         if not args.noHessian:
+            # compute the covariance matrix and estimated distance to minimum
 
             val, grad, hess = fitter.loss_val_grad_hess()
             edmval, cov = edmval_cov(grad, hess)
@@ -570,83 +691,6 @@ def fit(args, fitter, ws, dofit=True):
     if args.nonProfiledImpacts:
         # TODO: based on covariance
         ws.add_nonprofiled_impacts_hist(*fitter.nonprofiled_impacts_parms())
-
-    # asymptotic limits (CLs)
-    #  see:
-    #  - combine tutorial https://indico.cern.ch/event/976099/contributions/4138520/
-    #  - paper: https://arxiv.org/abs/1007.1727
-    if args.asymptoticLimits is not None:
-        # axes for output histogram: params, cls, clb
-        limits_shape = [len(args.asymptoticLimits), len(args.cls)]
-        if dofit:
-            clb_list = None
-        else:
-            clb_list = np.array([0.025, 0.16, 0.5, 0.84, 0.975])
-            limits_shape.append(len(clb_list))
-
-        limits = np.full(limits_shape, np.nan)
-        for i, param in enumerate(args.asymptoticLimits):
-            if param not in fitter.indata.signals.astype(str):
-                raise RuntimeError(
-                    f"Can not compute asymptotic limits for parameter {param}, no such signal process found, signal processe are: {fitter.indata.signals.astype(str)}"
-                )
-
-            # best fit
-            idx = np.where(fitter.parms.astype(str) == param)[0][0]
-            xval = tf.identity(fitter.x)
-            xbest = fitter.get_blinded_poi()[idx]
-            xerr = fitter.cov[idx, idx] ** 0.5
-
-            if not args.allowNegativePOI:
-                xerr = 2 * xerr * xbest**0.5
-
-            logger.debug(f"Best fit {param} = {xbest} +/- {xerr}")
-
-            # this is the denominator of q
-            nllvalreduced = fitter.reduced_nll().numpy()
-
-            if xbest < 0:
-                # need modified test statistic q~ = [0 for mu < mu^, q for mu < mu^ and mu^ > 0, q0 for mu^<0]
-                raise NotImplementedError(
-                    "Need modified test statistic here or run without '--allowNegativePOI'"
-                )
-
-            for j, cls in enumerate(args.cls):
-                logger.info(
-                    f" -- AsymptoticLimits ( CLs={round(cls*100,1):4.1f}% ) -- "
-                )
-                if dofit:
-                    # TODO: this is not correct, we need to take into account CLb (from the asimov)
-                    q = scipy.stats.norm.ppf(1 - cls / 2, loc=0, scale=1) ** 2
-                    logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {q}")
-                    r = fitter.contour_scan(param, nllvalreduced, q, signs=[1])[0]
-                    logger.info(f"Observed Limit: {param} < {r}")
-                    limits[i, j] = r
-                else:
-                    # now we need to find the values for mu where q_{mu,A} = -2ln(L)
-                    for k, clb in enumerate(clb_list):
-                        clsb = cls * clb
-                        qmuA = (
-                            scipy.stats.norm.ppf(clb, loc=0, scale=1)
-                            + scipy.stats.norm.ppf(1 - clsb, loc=0, scale=1)
-                        ) ** 2
-                        logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmuA}")
-
-                        ### Gaussian approximation
-                        r = xval[idx] + xerr * qmuA**0.5
-
-                        # r = fitter.contour_scan(param, nllvalreduced, qmuA, signs=[1])[
-                        #     0
-                        # ]
-                        logger.info(f"Expected {round(clb*100,1):4.1f}%: {param} < {r}")
-                        limits[i, j, k] = r
-
-        ws.add_limits_hist(
-            limits,
-            args.asymptoticLimits,
-            args.cls,
-            clb_list,
-        )
 
     # Likelihood scans
     if args.scan is not None:
@@ -833,6 +877,12 @@ def main():
                     save_observed_hists(args, models, ifitter, ws)
                     save_hists(args, models, ifitter, ws, prefit=True)
                 prefit_time.append(time.time())
+
+                if args.asymptoticLimits:
+                    ifitter.set_nobs(data_values)
+                    asymptotic_limits(
+                        args, ifitter, ws, bkg_only_fit=True, observed=ifit >= 0
+                    )
 
                 if not args.prefitOnly:
                     ifitter.set_blinding_offsets(blind=blinded_fits[i])

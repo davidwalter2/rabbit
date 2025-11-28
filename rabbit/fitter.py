@@ -144,7 +144,10 @@ class Fitter:
 
         self.parms = np.concatenate([self.pois, self.indata.systs])
 
-        self.init_frozen_params(options.freezeParameters)
+        self.frozen_params = []
+        self.frozen_params_mask = np.zeros(len(self.parms), dtype=bool)
+        self.frozen_indices = np.array([])
+        self.freeze_params(options.freezeParameters)
 
         self.allowNegativePOI = options.allowNegativePOI
 
@@ -289,10 +292,21 @@ class Fitter:
             and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
         )
 
-    def init_frozen_params(self, frozen_parmeter_expressions):
-        self.frozen_params = match_regexp_params(
-            frozen_parmeter_expressions, self.parms
+    def freeze_params(self, frozen_parmeter_expressions):
+        self.frozen_params.extend(
+            match_regexp_params(frozen_parmeter_expressions, self.parms)
         )
+        self.frozen_params_mask = np.isin(self.parms, self.frozen_params)
+        self.frozen_indices = np.where(self.frozen_params_mask)[0]
+
+    def defreeze_params(self, unfrozen_parmeter_expressions):
+        unfrozen_parmeter = match_regexp_params(
+            unfrozen_parmeter_expressions, self.parms
+        )
+        self.frozen_params = [
+            x for x in self.frozen_params if x not in unfrozen_parmeter
+        ]
+
         self.frozen_params_mask = np.isin(self.parms, self.frozen_params)
         self.frozen_indices = np.where(self.frozen_params_mask)[0]
 
@@ -1216,6 +1230,7 @@ class Fitter:
         poi = self.get_blinded_poi()
         theta = self.get_blinded_theta()
 
+        poi = tf.where(self.frozen_params_mask[: self.npoi], tf.stop_gradient(poi), poi)
         theta = tf.where(
             self.frozen_params_mask[self.npoi :], tf.stop_gradient(theta), theta
         )
