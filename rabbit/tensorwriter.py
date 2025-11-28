@@ -470,6 +470,9 @@ class TensorWriter:
         else:
             self.systsstandard.add(name)
 
+        if noi:
+            self.systsnoi.add(name)
+
         # below only makes sense if this is an explicit nuisance parameter
         if not add_to_data_covariance:
             if groups is None:
