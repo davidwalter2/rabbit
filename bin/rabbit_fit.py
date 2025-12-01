@@ -466,16 +466,14 @@ def asymptotic_limits(
     args, fitter, ws, bkg_only_fit=False, observed=False, from_xsec=True
 ):
     if bkg_only_fit or observed:
-        if bkg_only_fit:
-            # perform background only fit
-            # set process to zero and freeze
-            fitter.freeze_params(args.asymptoticLimits)
+        # perform background only fit
+        # set process to zero and freeze
+        fitter.freeze_params(args.asymptoticLimits)
 
         fitter.minimize()
 
-        if bkg_only_fit:
-            # defreeze process again to evaluate it's dependencies
-            fitter.defreeze_params(args.asymptoticLimits)
+        # defreeze process again to evaluate it's dependencies
+        fitter.defreeze_params(args.asymptoticLimits)
 
     if not args.noHessian:
         # compute the covariance matrix and estimated distance to minimum
@@ -509,9 +507,8 @@ def asymptotic_limits(
                 f"Can not compute asymptotic limits for parameter {param}, no such signal process found, signal processe are: {fitter.indata.signals.astype(str)}"
             )
 
-        if from_xsec:
-            # we now need to get the cross section
-            # TODO: make channel generic
+        if f"{param}_masked" in fitter.indata.channel_info.keys():
+            # Get the limit on the cross section
             model = ph.instance_from_class("Select", fitter.indata, f"{param}_masked")
             fun = model.compute_flat
 
@@ -537,8 +534,8 @@ def asymptotic_limits(
 
         logger.debug(f"Best fit {param} = {xbest} +/- {xerr}")
 
-        # this is the denominator of q
-        nllvalreduced = fitter.reduced_nll().numpy()
+        # # this is the denominator of q for likelihood based limits
+        # nllvalreduced = fitter.reduced_nll().numpy()
 
         if xbest < 0:
             # need modified test statistic q~ = [0 for mu < mu^, q for mu < mu^ and mu^ > 0, q0 for mu^<0]
@@ -546,34 +543,41 @@ def asymptotic_limits(
                 "Need modified test statistic here or run without '--allowNegativePOI'"
             )
 
-        for j, cls in enumerate(args.cls):
-            logger.info(f" -- AsymptoticLimits ( CLs={round(cls*100,1):4.1f}% ) -- ")
+        for j, cl_s in enumerate(args.cls):
+            logger.info(f" -- AsymptoticLimits ( CLs={round(cl_s*100,1):4.1f}% ) -- ")
 
             if observed:
                 # observed limit
                 # TODO: this is not correct, we need to take into account CLb (from the asimov)
-                q = scipy.stats.norm.ppf(1 - cls / 2, loc=0, scale=1) ** 2
-                logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {q}")
-                r = fitter.contour_scan(param, nllvalreduced, q, signs=[1])[0]
+
+                # logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmu}")
+                # # TODO: implement likelihood based limit
+
+                # r = fitter.contour_scan(param, nllvalreduced, q, signs=[1])[0]
+
+                # Gaussian approximation
+                r = xbest  # + xerr * qmuA**0.5
+
                 logger.info(f"Observed Limit: {param} < {r}")
                 limits[i, j] = r
             else:
                 # now we need to find the values for mu where q_{mu,A} = -2ln(L)
-                for k, clb in enumerate(clb_list):
-                    clsb = cls * clb
+                for k, cl_b in enumerate(clb_list):
+                    cl_sb = cl_s * cl_b
                     qmuA = (
-                        scipy.stats.norm.ppf(clb, loc=0, scale=1)
-                        + scipy.stats.norm.ppf(1 - clsb, loc=0, scale=1)
+                        scipy.stats.norm.ppf(cl_s, loc=0, scale=1)
+                        + scipy.stats.norm.ppf(1 - cl_sb, loc=0, scale=1)
                     ) ** 2
                     logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmuA}")
 
-                    ### Gaussian approximation
+                    # Gaussian approximation
                     r = xbest + xerr * qmuA**0.5
 
+                    # # TODO: implement likelihood based limit
                     # r = fitter.contour_scan(param, nllvalreduced, qmuA, signs=[1])[
                     #     0
                     # ]
-                    logger.info(f"Expected {round(clb*100,1):4.1f}%: {param} < {r}")
+                    logger.info(f"Expected {round(cl_sb*100,1):4.1f}%: {param} < {r}")
                     limits[i, j, k] = r
 
     ws.add_limits_hist(
@@ -873,33 +877,37 @@ def main():
                     hist_name="parms_prefit",
                 )
 
-                if args.saveHists:
-                    save_observed_hists(args, models, ifitter, ws)
-                    save_hists(args, models, ifitter, ws, prefit=True)
-                prefit_time.append(time.time())
-
                 if args.asymptoticLimits:
                     ifitter.set_nobs(data_values)
+                    prefit_time.append(time.time())
+
                     asymptotic_limits(
                         args, ifitter, ws, bkg_only_fit=True, observed=ifit >= 0
                     )
-
-                if not args.prefitOnly:
-                    ifitter.set_blinding_offsets(blind=blinded_fits[i])
-                    fit(args, ifitter, ws, dofit=ifit >= 0)
                     fit_time.append(time.time())
 
-                    if args.saveHists:
-                        save_hists(
-                            args,
-                            models,
-                            ifitter,
-                            ws,
-                            prefit=False,
-                            profile=args.externalPostfit is None,
-                        )
                 else:
-                    fit_time.append(time.time())
+                    if args.saveHists:
+                        save_observed_hists(args, models, ifitter, ws)
+                        save_hists(args, models, ifitter, ws, prefit=True)
+                    prefit_time.append(time.time())
+
+                    if not args.prefitOnly:
+                        ifitter.set_blinding_offsets(blind=blinded_fits[i])
+                        fit(args, ifitter, ws, dofit=ifit >= 0)
+                        fit_time.append(time.time())
+
+                        if args.saveHists:
+                            save_hists(
+                                args,
+                                models,
+                                ifitter,
+                                ws,
+                                prefit=False,
+                                profile=args.externalPostfit is None,
+                            )
+                    else:
+                        fit_time.append(time.time())
 
                 ws.dump_and_flush("_".join(group))
                 postfit_time.append(time.time())
