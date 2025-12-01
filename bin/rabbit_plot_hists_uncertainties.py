@@ -267,13 +267,6 @@ def make_plot(
 
     translate_label = getattr(config, "systematics_labels", {})
     grouping = getattr(config, "nuisance_grouping", {}).get(args.grouping, None)
-    # h_impacts[{"impacts": "binByBinStatWmunu"}].values(flow=True)[...] = (
-    #     h_impacts[{"impacts": "binByBinStatW"}].values(flow=True) ** 2
-    #     + h_impacts[{"impacts": "binByBinStatWmunu"}].values(flow=True) ** 2
-    # ) ** 0.5
-
-    labels = labels[uncertainties != "binByBinStatW"]
-    uncertainties = uncertainties[uncertainties != "binByBinStatW"]
 
     ncols = len(grouping) if grouping is not None else len(labels)
     cmap = plt.get_cmap("tab10" if ncols <= 10 else "tab20")
