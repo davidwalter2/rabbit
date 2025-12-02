@@ -226,7 +226,7 @@ class Fitter:
 
             if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
                 self.kstat = self.sumw**2 / self.varbeta
-                self.betamask = self.varbeta == 0.0
+                self.betamask = (self.varbeta == 0.0) | (self.kstat == 0.0)
                 self.kstat = tf.where(self.betamask, 1.0, self.kstat)
             elif self.binByBinStatType == "normal-additive":
                 # precompute decomposition of composite matrix to speed up
