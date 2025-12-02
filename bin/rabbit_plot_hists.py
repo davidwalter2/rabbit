@@ -1062,10 +1062,6 @@ def make_plot(
         else:
             chi2_name = r"$\mathit{\chi}^2/\mathit{ndf}$"
 
-        # chi2_text = [
-        #     chi2_name,
-        #     rf"$= {round(chi2[0],1)}/{chi2[1]}\ (\mathit{{p}}={p_val}\%)$",
-        # ]
         chi2_text = [
             rf"{chi2_name} = ${np.round(chi2[0],1)}/{chi2[1]}$",
             rf"$(\mathit{{p}}={p_val}\%)$",
@@ -1219,9 +1215,6 @@ def make_plots(
         hists_up = []
         for r, t in zip(varResults, varFilesFitTypes):
             h = r[f"hist_{t}_inclusive"].get()
-
-            # varLumi = r[1].get("lumi", 1.0)
-            # h = hh.scaleHist(h, lumi/varLumi)
 
             hist_up = h.copy()
             hist_up.values()[...] = (
