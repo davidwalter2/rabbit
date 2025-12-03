@@ -312,6 +312,15 @@ def make_parser():
         help="compute impacts in terms of variations of global observables (as opposed to nuisance parameters directly)",
     )
     parser.add_argument(
+        "--globalImpactsDisableJVP",
+        default=False,
+        action="store_true",
+        help="""
+        Compute global impacts on parameters and observables in the traditional 'backward mode' 
+        and not using the more memory efficient 'forward mode' implementation using jacobian vector products (JVP)
+        """,
+    )
+    parser.add_argument(
         "--nonProfiledImpacts",
         default=False,
         action="store_true",
