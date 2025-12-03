@@ -787,6 +787,17 @@ class Fitter:
         d_squared_summed = tf.reduce_sum(gathered, axis=-1)
         return tf.sqrt(d_squared_summed)
 
+    def jvp_fn(self, tangent_vector):
+        """
+        Computes JVP for a single tangent vector (column of cov_dexpdx).
+        """
+        # Setup Forward Accumulator for this tangent
+        with tf.autodiff.ForwardAccumulator(self.x, tangent_vector) as acc:
+            _1, _2, beta = self._compute_yields_with_beta(
+                profile=True, compute_norm=False, full=False
+            )
+        return acc.jvp(beta)
+
     @tf.function
     def global_impacts_parms(self):
         # TODO migrate this to a physics model to avoid the below code which is largely duplicated
@@ -820,16 +831,16 @@ class Fitter:
             # this the cholesky decomposition of pd2lbetadbeta2
             sbeta = tf.linalg.LinearOperatorDiag(tf.sqrt(pd2lbetadbeta2_diag))
 
-            tangent_vector = tf.squeeze(cov_dexpdx, axis=1)
-            with tf.autodiff.ForwardAccumulator(self.x, tangent_vector) as acc:
-                _1, _2, beta = self._compute_yields_with_beta(
-                    profile=True, compute_norm=False, full=False
-                )
+            tangents = tf.transpose(cov_dexpdx)
+            dbetadx_cov_dexpdx = tf.vectorized_map(self.jvp_fn, tangents)
 
-            dbetadx_cov_dexpdx = acc.jvp(beta)
+            # vectorized map always puts the tangents axis first, but we want it last
+            rank = tf.rank(dbetadx_cov_dexpdx)
+            new_start = tf.range(1, rank)
+            perm = tf.concat([new_start, tf.constant([0])], axis=0)
+            dbetadx_cov_dexpdx = tf.transpose(dbetadx_cov_dexpdx, perm=perm)
 
-            # impacts_beta0 = sbeta @ dbetadx @ cov_dexpdx
-            impacts_beta0 = sbeta.matmul(dbetadx_cov_dexpdx[..., None])
+            impacts_beta0 = sbeta.matmul(dbetadx_cov_dexpdx)
 
             var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
 
