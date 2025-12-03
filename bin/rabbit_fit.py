@@ -126,7 +126,6 @@ def make_parser():
         action="store_true",
         help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
     )
-    parser.add_argument("--POIDefault", default=1.0, type=float, help="mode for POI's")
     parser.add_argument(
         "--contourScan",
         default=None,
@@ -141,7 +140,7 @@ def make_parser():
         ],
         type=float,
         nargs="+",
-        help="Confidence level in standard deviations for contour scans (1 = 1 sigma = 68%)",
+        help="Confidence level in standard deviations for contour scans (1 = 1 sigma = 68%%)",
     )
     parser.add_argument(
         "--contourScan2D",
@@ -253,8 +252,14 @@ def make_parser():
     parser.add_argument(
         "--binByBinStatType",
         default="automatic",
-        choices=["automatic", "gamma", "normal"],
+        choices=["automatic", *fitter.Fitter.valid_bin_by_bin_stat_types],
         help="probability density for bin-by-bin statistical uncertainties, ('automatic' is 'gamma' except for data covariance where it is 'normal')",
+    )
+    parser.add_argument(
+        "--binByBinStatMode",
+        default="lite",
+        choices=["lite", "full"],
+        help="Barlow-Beeston mode bin-by-bin statistical uncertainties",
     )
     parser.add_argument(
         "--externalPostfit",
@@ -286,7 +291,7 @@ def make_parser():
         specifying the model defined in rabbit/physicsmodels/ followed by arguments passed in the model __init__, 
         e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.  
         This argument can be called multiple times.
-        Custom models can be specified with the full path to the custom model e.g. '-m custom_modesl.MyCustomModel'.
+        Custom models can be specified with the full path to the custom model e.g. '-m custom_models.MyCustomModel'.
         """,
     )
     parser.add_argument(
@@ -307,16 +312,22 @@ def make_parser():
         help="compute impacts in terms of variations of global observables (as opposed to nuisance parameters directly)",
     )
     parser.add_argument(
+        "--nonProfiledImpacts",
+        default=False,
+        action="store_true",
+        help="compute impacts of frozen (non-profiled) systematics",
+    )
+    parser.add_argument(
         "--chisqFit",
         default=False,
         action="store_true",
-        help="Perform chi-square fit instead of likelihood fit",
+        help="Perform diagonal chi-square fit instead of poisson likelihood fit",
     )
     parser.add_argument(
-        "--externalCovariance",
+        "--covarianceFit",
         default=False,
         action="store_true",
-        help="Using an external covariance matrix for the observations in the chi-square fit",
+        help="Perform chi-square fit using covariance matrix for the observations",
     )
     parser.add_argument(
         "--prefitUnconstrainedNuisanceUncertainty",
@@ -333,6 +344,15 @@ def make_parser():
         help="""
         Specify list of regex to unblind matching parameters of interest. 
         E.g. use '--unblind ^signal$' to unblind a parameter named signal or '--unblind' to unblind all.
+        """,
+    )
+    parser.add_argument(
+        "--freezeParameters",
+        type=str,
+        default=[],
+        nargs="+",
+        help="""
+        Specify list of regex to freeze matching parameters of interest. 
         """,
     )
 
@@ -369,7 +389,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
                 compute_variance=args.computeHistErrors,
                 compute_cov=args.computeHistCov,
                 compute_chi2=not args.noChi2 and model.has_data,
-                compute_global_impacts=args.computeHistImpacts and not prefit,
+                compute_global_impacts=args.computeHistImpacts,
                 profile=profile,
             )
 
@@ -472,7 +492,6 @@ def fit(args, fitter, ws, dofit=True):
         if not args.noHessian:
 
             val, grad, hess = fitter.loss_val_grad_hess()
-
             edmval, cov = edmval_cov(grad, hess)
 
             logger.info(f"edmval: {edmval}")
@@ -535,10 +554,15 @@ def fit(args, fitter, ws, dofit=True):
     if not args.noHessian:
         ws.add_cov_hist(fitter.cov)
 
+    if args.nonProfiledImpacts:
+        # TODO: based on covariance
+        ws.add_nonprofiled_impacts_hist(*fitter.nonprofiled_impacts_parms())
+
     if args.scan is not None:
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
 
         for param in parms:
+            logger.info(f"-delta log(L) scan for {param}")
             x_scan, dnll_values = fitter.nll_scan(
                 param, args.scanRange, args.scanPoints, args.scanRangeUsePrefit
             )
@@ -567,7 +591,9 @@ def fit(args, fitter, ws, dofit=True):
 
         contours = np.zeros((len(parms), len(args.contourLevels), 2, len(fitter.parms)))
         for i, param in enumerate(parms):
+            logger.info(f"Contour scan for {param}")
             for j, cl in enumerate(args.contourLevels):
+                logger.info(f"    Now at CL {cl}")
 
                 # find confidence interval
                 contour = fitter.contour_scan(param, nllvalreduced, cl)
@@ -643,7 +669,7 @@ def main():
         "meta_info_input": ifitter.indata.metadata,
         "signals": ifitter.indata.signals,
         "procs": ifitter.indata.procs,
-        "nois": ifitter.parms[ifitter.npoi :][indata.noigroupidxs],
+        "nois": ifitter.parms[ifitter.npoi :][indata.noiidxs],
     }
 
     with workspace.Workspace(
@@ -659,40 +685,50 @@ def main():
         prefit_time = []
         postfit_time = []
         fit_time = []
+
         for i, ifit in enumerate(fits):
-            group = "results"
+            group = ["results"]
 
             if args.pseudoData is None:
-                datasets = [
-                    ifitter.indata.data_obs,
-                ]
+                datasets = zip([ifitter.indata.data_obs], [ifitter.indata.data_var])
             else:
                 # shape nobs x npseudodata
-                datasets = tf.transpose(indata.pseudodata_obs)
+                datasets = zip(
+                    tf.transpose(indata.pseudodata_obs),
+                    (
+                        tf.transpose(indata.pseudodata_var)
+                        if indata.pseudodata_var is not None
+                        else [None] * indata.pseudodata_obs.shape[-1]
+                    ),
+                )
 
             # loop over (pseudo)data sets
-            for j, data_values in enumerate(datasets):
+            for j, (data_values, data_variances) in enumerate(datasets):
 
                 ifitter.defaultassign()
                 if ifit == -1:
-                    group += "_asimov"
+                    group.append("asimov")
                     ifitter.set_nobs(ifitter.expected_yield())
                 else:
                     if ifit == 0:
                         ifitter.set_nobs(data_values)
                     elif ifit >= 1:
-                        group += f"_toy{ifit}"
+                        group.append(f"toy{ifit}")
                         ifitter.toyassign(
                             data_values,
+                            data_variances,
                             syst_randomize=args.toysSystRandomize,
                             data_randomize=args.toysDataRandomize,
                             data_mode=args.toysDataMode,
                             randomize_parameters=args.toysRandomizeParameters,
                         )
 
-                if np.shape(datasets)[0] > 1:
-                    # in case there are more than 1 pseudodata set, label each one
-                    group += f"_{indata.pseudodatanames[j]}"
+                if args.pseudoData is not None:
+                    # label each pseudodata set
+                    if j == 0:
+                        group.append(indata.pseudodatanames[j])
+                    else:
+                        group[-1] = indata.pseudodatanames[j]
 
                 ws.add_parms_hist(
                     values=ifitter.x,
@@ -722,7 +758,7 @@ def main():
                 else:
                     fit_time.append(time.time())
 
-                ws.dump_and_flush(group)
+                ws.dump_and_flush("_".join(group))
                 postfit_time.append(time.time())
 
     end_time = time.time()

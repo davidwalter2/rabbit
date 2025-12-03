@@ -1,3 +1,5 @@
+import re
+
 import h5py
 import numpy as np
 
@@ -14,11 +16,8 @@ def get_fitresult(fitresult_filename, result=None, meta=False):
         key = f"{key}_{result}"
     elif key not in h5file.keys():  # fallback in case only asimov was fit
         key = f"{key}_asimov"
-        if key not in h5file.keys():
-            raise ValueError(
-                f"'{key}' not in h5file, available keys are {h5file.keys()}"
-            )
-
+    if key not in h5file.keys():
+        raise ValueError(f"'{key}' not in h5file, available keys are {h5file.keys()}")
     h5results = ioutils.pickle_load_h5py(h5file[key])
     if meta:
         meta = ioutils.pickle_load_h5py(h5file["meta"])
@@ -39,19 +38,19 @@ def read_impacts_poi(
     fitresult,
     poi,
     grouped=False,
-    global_impacts=False,
+    impact_type="traditional",
     pulls=False,
     add_total=True,
     asym=False,
 ):
     # read impacts of a single POI
 
-    if asym:
+    if asym and impact_type == "traditional":
         h_impacts = fitresult["contour_scans"].get()[{"confidence_level": "1.0"}]
     else:
         impact_name = "impacts"
-        if global_impacts:
-            impact_name = f"global_{impact_name}"
+        if impact_type != "traditional":
+            impact_name = f"{impact_type}_{impact_name}"
         if grouped:
             impact_name += "_grouped"
 
@@ -72,10 +71,10 @@ def read_impacts_poi(
 
     if pulls:
         pulls_labels, pulls, constraints = get_pulls_and_constraints(
-            fitresult, asym=asym
+            fitresult, asym=asym and impact_type == "traditional"
         )
         pulls_labels, pulls_prefit, constraints_prefit = get_pulls_and_constraints(
-            fitresult, asym=asym, prefit=True
+            fitresult, asym=asym and impact_type == "traditional", prefit=True
         )
         if len(pulls_labels) != len(labels):
             mask = [l in labels for l in pulls_labels]
@@ -88,7 +87,52 @@ def read_impacts_poi(
     return impacts, labels
 
 
-def get_pulls_and_constraints(fitresult, prefit=False, asym=False):
+def _filter_nuisance_data(
+    labels,
+    pulls,
+    constraints,
+    keep_patterns=None,
+    exclude_patterns=None,
+):
+    if keep_patterns is None and exclude_patterns is None:
+        return labels, pulls, constraints
+
+    if isinstance(keep_patterns, str):
+        keep_patterns = [keep_patterns]
+    if isinstance(exclude_patterns, str):
+        exclude_patterns = [exclude_patterns]
+
+    keep_patterns = keep_patterns or []
+    exclude_patterns = exclude_patterns or []
+
+    def matches_any(patterns, label):
+        return any(re.search(pattern, label) for pattern in patterns)
+
+    mask = np.ones(len(labels), dtype=bool)
+    if keep_patterns:
+        mask &= np.array([matches_any(keep_patterns, label) for label in labels])
+    if exclude_patterns:
+        mask &= ~np.array([matches_any(exclude_patterns, label) for label in labels])
+
+    filtered_labels = labels[mask]
+    filtered_pulls = pulls[mask]
+
+    if np.ndim(constraints) == 0:
+        filtered_constraints = constraints
+    else:
+        indices = np.nonzero(mask)[0]
+        filtered_constraints = np.take(constraints, indices, axis=0)
+
+    return filtered_labels, filtered_pulls, filtered_constraints
+
+
+def get_pulls_and_constraints(
+    fitresult,
+    prefit=False,
+    asym=False,
+    keep_nuisances=None,
+    exclude_nuisances=None,
+):
     hist_name = "parms_prefit" if prefit else "parms"
     h_parms = fitresult[hist_name].get()
     labels = np.array(h_parms.axes["parms"])
@@ -100,6 +144,14 @@ def get_pulls_and_constraints(fitresult, prefit=False, asym=False):
         constraints = np.einsum("i j i -> i j", intervals)
     else:
         constraints = np.sqrt(h_parms.variances())
+
+    labels, pulls, constraints = _filter_nuisance_data(
+        labels,
+        pulls,
+        constraints,
+        keep_patterns=keep_nuisances,
+        exclude_patterns=exclude_nuisances,
+    )
 
     return labels, pulls, constraints
 
@@ -121,7 +173,7 @@ def get_postfit_hist_cov(fitresult, physics_model="Basemodel", channels=None):
         found_channels = [c for c in result["channels"].keys() if c in channels]
         if list(channels) != list(found_channels):
             raise RuntimeError(
-                f"Not all channels found in fitresult or the order is wrong, requested: {channels} and found {found_channels}"
+                f"Not all channels found in fitresult or the order is wrong, requested: {channels} and found {found_channels}. Available: {result['channels'].keys()}."
             )
         h_data = [
             result["channels"][c]["hist_postfit_inclusive"].get() for c in channels

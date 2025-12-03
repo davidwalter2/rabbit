@@ -551,11 +551,15 @@ def make_plot(
                         label = f"{label} < {hi}"
                 text.append(label)
 
+            text_loc = (
+                args.extraTextLoc if args.extraTextLoc else [0.05, 0.96 - i * 0.08]
+            )
             plot_tools.wrap_text(
                 text,
                 ax1,
-                0.05,
-                0.96 - i * 0.08,
+                # 0.05,
+                *text_loc,
+                # 0.96 - i * 0.08,
                 ha="left",
                 text_size="small",
             )
@@ -616,6 +620,8 @@ def main():
     args = parseArgs()
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
+
+    plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
 
     indata = inputdata.FitInputData(args.infile, pseudodata=args.pseudodata)
 
@@ -694,7 +700,7 @@ def main():
             # poisson errors on data hist for correct errors in ratio plot
             hist_data = hist.Hist(*hist_data_tmp.axes, storage=hist.storage.Weight())
             hist_data.values(flow=True)[...] = hist_data_tmp.values(flow=True)
-            hist_data.variances(flow=True)[...] = hist_data_tmp.values(flow=True)
+            hist_data.variances(flow=True)[...] = hist_data_tmp.variances(flow=True)
 
         info = dict(
             channel=channel,

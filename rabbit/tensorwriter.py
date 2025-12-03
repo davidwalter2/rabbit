@@ -34,13 +34,11 @@ class TensorWriter:
         self.nbinschan = {}
         self.pseudodata_names = set()
 
-        self.dict_noigroups = defaultdict(lambda: set())
         self.dict_systgroups = defaultdict(lambda: set())
 
         self.systsstandard = set()
         self.systsnoi = set()
         self.systsnoconstraint = set()
-        self.systsnoprofile = set()
         self.systscovariance = set()
 
         self.sparse = sparse
@@ -48,10 +46,11 @@ class TensorWriter:
 
         # temporary data
         self.dict_data_obs = {}  # [channel]
+        self.dict_data_var = {}  # [channel]
         self.data_covariance = None
         self.dict_pseudodata = {}  # [channel][pseudodata]
         self.dict_norm = {}  # [channel][process]
-        self.dict_sumw2 = {}  # [channel]
+        self.dict_sumw2 = {}  # [channel][process]
         self.dict_logkavg = {}  # [channel][proc][syst]
         self.dict_logkhalfdiff = {}  # [channel][proc][syst]
         self.dict_logkavg_indices = {}
@@ -77,17 +76,24 @@ class TensorWriter:
         return values.flatten().astype(self.dtype)
 
     def get_flat_variances(self, h, flow=False):
-        if hasattr(h, "values"):
+        if hasattr(h, "variances"):
             variances = h.variances(flow=flow)
         else:
             variances = h
+
+        if (variances < 0.0).any():
+            raise ValueError("Negative variances encountered")
+
         return variances.flatten().astype(self.dtype)
 
-    def add_data(self, h, channel="ch0"):
+    def add_data(self, h, channel="ch0", variances=None):
         self._check_hist_and_channel(h, channel)
         if channel in self.dict_data_obs.keys():
             raise RuntimeError(f"Data histogram for channel '{channel}' already set.")
         self.dict_data_obs[channel] = self.get_flat_values(h)
+        self.dict_data_var[channel] = self.get_flat_variances(
+            h if variances is None else variances
+        )
 
     def add_data_covariance(self, cov):
         self.data_covariance = cov if isinstance(cov, np.ndarray) else cov.values()
@@ -140,7 +146,7 @@ class TensorWriter:
             )
 
         self.dict_norm[channel][name] = norm
-        self.dict_sumw2[channel] += sumw2
+        self.dict_sumw2[channel][name] = sumw2
 
     def add_channel(self, axes, name=None, masked=False, flow=False):
         if flow and masked is False:
@@ -153,7 +159,7 @@ class TensorWriter:
         ibins = np.prod([a.extent if flow else a.size for a in axes])
         self.nbinschan[name] = ibins
         self.dict_norm[name] = {}
-        self.dict_sumw2[name] = np.zeros(ibins)
+        self.dict_sumw2[name] = {}
 
         # add masked channels last and not masked channels first
         this_channel = {"axes": [a for a in axes], "masked": masked, "flow": flow}
@@ -259,7 +265,6 @@ class TensorWriter:
         process,
         channel,
         uncertainty,
-        profile=True,
         add_to_data_covariance=False,
         groups=None,
         symmetrize="average",
@@ -319,7 +324,6 @@ class TensorWriter:
         self.book_systematic(
             var_name_out,
             groups=groups,
-            profile=profile,
             add_to_data_covariance=add_to_data_covariance,
             **kargs,
         )
@@ -453,7 +457,6 @@ class TensorWriter:
     def book_systematic(
         self,
         name,
-        profile=True,
         noi=False,
         constrained=True,
         add_to_data_covariance=False,
@@ -461,26 +464,26 @@ class TensorWriter:
     ):
 
         if add_to_data_covariance:
+            if noi:
+                raise ValueError(
+                    f"{name} is maked as 'noi' but an 'noi' can't be added to the data covariance matrix."
+                )
             self.systscovariance.add(name)
-        elif not profile:
-            self.systsnoprofile.add(name)
         elif not constrained:
             self.systsnoconstraint.add(name)
         else:
             self.systsstandard.add(name)
+
+        if noi:
+            self.systsnoi.add(name)
 
         # below only makes sense if this is an explicit nuisance parameter
         if not add_to_data_covariance:
             if groups is None:
                 groups = [name]
 
-            if noi:
-                target_dict = self.dict_noigroups
-            else:
-                target_dict = self.dict_systgroups
-
             for group in groups:
-                target_dict[group].add(name)
+                self.dict_systgroups[group].add(name)
 
     def write(self, outfolder="./", outfilename="rabbit_input.hdf5", args={}):
 
@@ -499,24 +502,25 @@ class TensorWriter:
         nbinsfull = sum([v for v in self.nbinschan.values()])
 
         logger.info(f"Write out nominal arrays")
-        sumw = np.zeros([nbinsfull], self.dtype)
-        sumw2 = np.zeros([nbinsfull], self.dtype)
+        sumw = np.zeros([nbinsfull, nproc], self.dtype)
+        sumw2 = np.zeros([nbinsfull, nproc], self.dtype)
         data_obs = np.zeros([nbins], self.dtype)
+        data_var = np.zeros([nbins], self.dtype)
         pseudodata = np.zeros([nbins, len(self.pseudodata_names)], self.dtype)
         ibin = 0
         for chan, chan_info in self.channels.items():
             nbinschan = self.nbinschan[chan]
 
-            sumw2[ibin : ibin + nbinschan] = self.dict_sumw2[chan]
-
             for iproc, proc in enumerate(procs):
                 if proc not in self.dict_norm[chan]:
                     continue
 
-                sumw[ibin : ibin + nbinschan] += self.dict_norm[chan][proc]
+                sumw[ibin : ibin + nbinschan, iproc] = self.dict_norm[chan][proc]
+                sumw2[ibin : ibin + nbinschan, iproc] = self.dict_sumw2[chan][proc]
 
             if not chan_info["masked"]:
                 data_obs[ibin : ibin + nbinschan] = self.dict_data_obs[chan]
+                data_var[ibin : ibin + nbinschan] = self.dict_data_var[chan]
 
                 for idx, name in enumerate(self.pseudodata_names):
                     pseudodata[ibin : ibin + nbinschan, idx] = self.dict_pseudodata[
@@ -746,8 +750,8 @@ class TensorWriter:
         if self.data_covariance is None and (
             self.systscovariance or self.add_bin_by_bin_stat_to_data_cov
         ):
-            # create data covariance assuming poisson statistics
-            self.data_covariance = np.diag(data_obs)
+            # create data covariance
+            self.data_covariance = np.diag(data_var)
 
         # write results to hdf5 file
         procSize = nproc * np.dtype(self.dtype).itemsize
@@ -780,9 +784,8 @@ class TensorWriter:
 
         ioutils.pickle_dump_h5py("meta", meta, f)
 
-        systsnoprofile = self.get_systsnoprofile()
+        noiidxs = self.get_noiidxs()
         systsnoconstraint = self.get_systsnoconstraint()
-        noigroups, noigroupidxs = self.get_noigroups()
         systgroups, systgroupidxs = self.get_systgroups()
 
         # save some lists of strings to the file for later use
@@ -802,7 +805,6 @@ class TensorWriter:
         create_dataset("procs", procs)
         create_dataset("signals", sorted(list(self.signals)))
         create_dataset("systs", systs)
-        create_dataset("systsnoprofile", systsnoprofile)
         create_dataset("systsnoconstraint", systsnoconstraint)
         create_dataset("systgroups", systgroups)
         create_dataset(
@@ -810,8 +812,7 @@ class TensorWriter:
             systgroupidxs,
             dtype=h5py.special_dtype(vlen=np.dtype("int32")),
         )
-        create_dataset("noigroups", noigroups)
-        create_dataset("noigroupidxs", noigroupidxs, dtype="int32")
+        create_dataset("noiidxs", noiidxs, dtype="int32")
         create_dataset("pseudodatanames", [n for n in self.pseudodata_names])
 
         # create h5py datasets with optimized chunk shapes
@@ -826,6 +827,11 @@ class TensorWriter:
         nbytes += h5pyutils.writeFlatInChunks(
             data_obs, f, "hdata_obs", maxChunkBytes=self.chunkSize
         )
+        if np.any(data_var != data_obs):
+            nbytes += h5pyutils.writeFlatInChunks(
+                data_var, f, "hdata_var", maxChunkBytes=self.chunkSize
+            )
+            data_var = None
         data_obs = None
 
         nbytes += h5pyutils.writeFlatInChunks(
@@ -915,9 +921,6 @@ class TensorWriter:
     def get_systsstandard(self):
         return list(common.natural_sort(self.systsstandard))
 
-    def get_systsnoprofile(self):
-        return list(common.natural_sort(self.systsnoprofile))
-
     def get_systsnoi(self):
         return list(common.natural_sort(self.systsnoi))
 
@@ -925,11 +928,7 @@ class TensorWriter:
         return list(common.natural_sort(self.systsnoconstraint))
 
     def get_systs(self):
-        return (
-            self.get_systsnoconstraint()
-            + self.get_systsstandard()
-            + self.get_systsnoprofile()
-        )
+        return self.get_systsnoconstraint() + self.get_systsstandard()
 
     def get_constraintweights(self, dtype):
         systs = self.get_systs()
@@ -950,16 +949,13 @@ class TensorWriter:
             idxs.append(idx)
         return groups, idxs
 
-    def get_noigroups(self):
-        # list of groups of systematics to be treated as additional outputs for impacts, etc (aka "nuisances of interest")
+    def get_noiidxs(self):
+        # list of indeces of nois w.r.t. systs
         systs = self.get_systs()
-        groups = []
         idxs = []
-        for group, members in common.natural_sort_dict(self.dict_noigroups).items():
-            groups.append(group)
-            for syst in members:
-                idxs.append(systs.index(syst))
-        return groups, idxs
+        for noi in self.get_systsnoi():
+            idxs.append(systs.index(noi))
+        return idxs
 
     def get_systgroups(self):
         # list of groups of systematics (nuisances) and lists of indexes
