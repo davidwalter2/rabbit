@@ -803,29 +803,48 @@ class Fitter:
         var_total = tf.gather(var_total, idxsout)
 
         if self.binByBinStat:
-            with tf.GradientTape(persistent=True) as t2:
-                t2.watch([self.x, self.ubeta])
-                with tf.GradientTape(persistent=True) as t1:
-                    t1.watch([self.x, self.ubeta])
-                    lc = self._compute_lc()
+
+            with tf.GradientTape() as t2:
+                t2.watch(self.ubeta)
+                with tf.GradientTape() as t1:
+                    t1.watch(self.ubeta)
                     _1, _2, beta = self._compute_yields_with_beta(
                         profile=True, compute_norm=False, full=False
                     )
                     lbeta = self._compute_lbeta(beta)
                 pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
-                dlcdx = t1.gradient(lc, self.x)
-                dbetadx = t1.jacobian(beta, self.x)
+
             # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
             pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
-            # d2lcdx2 is diagonal so we can use gradient instead of jacobian
-            d2lcdx2_diag = t2.gradient(dlcdx, self.x)
-        else:
-            with tf.GradientTape() as t2:
-                with tf.GradientTape() as t1:
-                    lc = self._compute_lc()
-                dlcdx = t1.gradient(lc, self.x)
-            # d2lcdx2 is diagonal so we can use gradient instead of jacobian
-            d2lcdx2_diag = t2.gradient(dlcdx, self.x)
+
+            # this the cholesky decomposition of pd2lbetadbeta2
+            sbeta = tf.linalg.LinearOperatorDiag(tf.sqrt(pd2lbetadbeta2_diag))
+
+            tangent_vector = tf.squeeze(cov_dexpdx, axis=1)
+            with tf.autodiff.ForwardAccumulator(self.x, tangent_vector) as acc:
+                _1, _2, beta = self._compute_yields_with_beta(
+                    profile=True, compute_norm=False, full=False
+                )
+
+            dbetadx_cov_dexpdx = acc.jvp(beta)
+
+            # impacts_beta0 = sbeta @ dbetadx @ cov_dexpdx
+            impacts_beta0 = sbeta.matmul(dbetadx_cov_dexpdx[..., None])
+
+            var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
+
+            if self.binByBinStatMode == "full":
+                impacts_beta0_process = tf.sqrt(var_beta0)
+                var_beta0 = tf.reduce_sum(var_beta0, axis=0)
+
+            impacts_beta0_total = tf.sqrt(var_beta0)
+
+        with tf.GradientTape() as t2:
+            with tf.GradientTape() as t1:
+                lc = self._compute_lc()
+            dlcdx = t1.gradient(lc, self.x)
+        # d2lcdx2 is diagonal so we can use gradient instead of jacobian
+        d2lcdx2_diag = t2.gradient(dlcdx, self.x)
 
         # sc is the cholesky decomposition of d2lcdx2
         sc = tf.linalg.LinearOperatorDiag(tf.sqrt(d2lcdx2_diag), is_self_adjoint=True)
@@ -842,20 +861,6 @@ class Fitter:
         var_nobs = var_total - var_theta0
 
         if self.binByBinStat:
-            # this the cholesky decomposition of pd2lbetadbeta2
-            sbeta = tf.linalg.LinearOperatorDiag(
-                tf.sqrt(pd2lbetadbeta2_diag), is_self_adjoint=True
-            )
-
-            impacts_beta0 = sbeta @ dbetadx @ cov_dexpdx
-            var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
-
-            if self.binByBinStatMode == "full":
-                impacts_beta0_process = tf.sqrt(var_beta0)
-                var_beta0 = tf.reduce_sum(var_beta0, axis=0)
-
-            impacts_beta0_total = tf.sqrt(var_beta0)
-
             var_nobs -= var_beta0
 
         impacts_nobs = tf.sqrt(var_nobs)
