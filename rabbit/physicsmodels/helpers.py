@@ -22,7 +22,6 @@ baseline_models = {
     "HLT": "hlt_efficiency", 
     "ID": "id_efficiency", 
     "ISO": "iso_efficiency", 
-
 }
 
 

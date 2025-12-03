@@ -203,18 +203,21 @@ class ID(PhysicsModel):
         )
 
     def compute_flat(self, params, observables):
-        h3 = self.h3.select(observables, inclusive=True)
-
+        h3 = self.h3.select(observables, inclusive=True)#[:, 1:, :]
         h2 = self.h2.select(observables, inclusive=True)
         h1_hlt = self.h1.select(observables, inclusive=True)[:, 1:, :]
         h1 = self.h1.select(observables, inclusive=True)
         h0 = self.h0.select(observables, inclusive=True)
+        
+        h1_iso = self.h2.select(observables, inclusive=True)[:, :1, :]
 
-        eps_iso = 2*h3/(h2 + 2*h3)
+        h2_iso = tf.concat([h1_iso, h2], axis = 1)
+        eps_iso = 2*h3/(h2_iso + 2*h3)
         
-        eps_hlt = h2/(h2 + h1_hlt*(1-eps_iso))
-        # eps_hlt = tf.reshape(eps_hlt, [-1])
-        
+        h1_hlt = self.h1.select(observables, inclusive=True)[:, 1:, :]
+
+        eps_hlt = h2/(h2 + h1_hlt*(1-eps_iso[:, 1:, :]))
+            
         eps_hlt_expanded = tf.zeros(shape=[24, 1, 6], dtype = tf.float64)  # or tf.ones, or any values you want
         # eps_hlt_expanded = tf.zeros(shape=[24, 1, 6], dtype = tf.float64)
         eps_hlt_expanded = tf.concat([eps_hlt_expanded, eps_hlt], axis = 1)

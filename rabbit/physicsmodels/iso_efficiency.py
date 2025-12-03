@@ -158,7 +158,9 @@ class ISO(PhysicsModel):
     def compute_flat(self, params, observables):
         h3 = self.h3.select(observables, inclusive=True)
         h2 = self.h2.select(observables, inclusive=True)
-        eps_iso = 2*h3/(h2 + 2*h3)
+        h1_iso = self.h2.select(observables, inclusive=True)[:, :1, :]
+        h2_iso = tf.concat([h1_iso, h2], axis = 1)
+        eps_iso = 2*h3/(h2_iso + 2*h3)
         eps_iso = tf.reshape(eps_iso, [-1])
 
         return eps_iso
