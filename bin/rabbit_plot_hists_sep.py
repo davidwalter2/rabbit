@@ -648,12 +648,9 @@ def make_plot(
             unc = scale_hist.variances()**0.5
 
             avg = np.average(vals, weights =unc)
-            chi_squared = np.sum([(vals[i]-avg)**2/unc[i]**2 for i in range(len(vals))])
-            print(f"CHI SQUARED/DOF: {chi_squared/len(vals)}, DOF: {len(vals)}")
-            # edges = scale_hist[{f"{axis_name}": j}].axes[0].edges
-            # binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
-            # nom = scale_hist[{f"{axis_name}": j}].values() / binwidth
-            # std = np.sqrt(scale_hist[{f"{axis_name}": j}].variances()) / binwidth
+            chi_squared = np.sum([(vals[i]-avg)**2/unc[i]**2 for i in range(1, len(vals))])
+            print(f"CHI SQUARED/DOF: {chi_squared/(len(vals)-1)}, DOF: {len(vals)-1}")
+            #### SHOULD CODE IN A P VALUE CALCULATOR
             
             hep.histplot(
                 scale_hist,
@@ -672,11 +669,11 @@ def make_plot(
                 ax1.set_ylim(0.97, 1.02)
             elif args.title == "ISO":
                 # ax1.set_ylim(0.8, 1.05)
-                ax1.set_ylim(0.98, 1.01)
+                ax1.set_ylim(0.99, 1.02)
+                # ax1.set_xlim(25, 80)
             else:
                 ax1.set_ylim(0.9, 1.02)
 
-            
             plot_tools.add_decor(
             ax1,
             args.title,
@@ -690,14 +687,28 @@ def make_plot(
             ax1.legend(loc='upper right', ncols = 2, fontsize = 14)
             ax1.set_ylabel("scale factor")
 
-
         outfile += "_scale"
         
-        
-        
-        
-            
         plot_tools.save_pdf_and_png(outdir, outfile)
+        
+        scale_hist = hh.divideHists(h_data[{f"{axis_name}": 1}], h_inclusive[{f"{axis_name}": 1}], rel_unc = True, cutoff = 1e-8)
+        if args.title == "ID" and other_axis == "eta_probe":
+            eta_sf_wmass = np.array([0.99957362, 0.99957128, 0.96152417, 0.99647758, 0.99238644, 0.99679887, 0.99708484, 0.9969605, 0.99803837, 0.99742668, 0.99867988, 0.99742398, 0.99649293, 0.99663737, 0.9981949,  0.99955459, 0.99572838, 0.99484177, 0.99777561, 0.99921407, 0.99819145, 0.99090125, 0.99803409, 0.99553938, 0.99809108, 0.99716896, 0.99245872, 0.99769054, 0.9987604,  0.99798393, 0.99731171, 0.99983467, 0.99650305, 0.99550629, 0.99608706, 0.99418814,  0.99916384, 1.00125303, 0.99617343, 0.99783729, 0.99755766, 0.99771107, 0.99810036, 0.99562341, 0.99930237, 0.96692167, 0.99930641, 1.00105502])
+            
+            eta_sf_bin = np.linspace(-2.4, 2.4, eta_sf_wmass.shape[0])
+            # eta_liv_bins = np.array([-2.4, -1.40655, -0.68156, -0.00848, 0.66796, 1.4006, 2.4])
+            plt.clf()
+            eta_liv_bins = np.array([-1.9, -1.04, -0.3, 0.3, 1.04, 1.9])
+            plt.scatter(eta_sf_bin, eta_sf_wmass, label = "W mass ref file")
+            # pdb.set_trace()
+            
+            plt.scatter(eta_liv_bins, scale_hist.values(), label = "Measured")
+            plt.xlabel("eta")
+            plt.ylabel("scale factor")
+            plt.legend()
+            plot_tools.save_pdf_and_png(outdir, "scale_factor_reference")
+                
+                
    
             
         
