@@ -19,8 +19,11 @@ class FitInputData:
             self.systgroupidxs = f["hsystgroupidxs"][...]
 
             self.noiidxs = (
-                f["hnoiidxs"][...] if "hnoiidxs" in f.keys() else f["hnoigroupidxs"]
+                f["hnoiidxs"][...]
+                if "hnoiidxs" in f.keys()
+                else f["hnoigroupidxs"][...]
             )
+
             if "hpseudodatanames" in f.keys():
                 self.pseudodatanames = f["hpseudodatanames"][...].astype(str)
             else:
