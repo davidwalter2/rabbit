@@ -49,6 +49,7 @@ class Fitter:
     def __init__(self, indata, options, do_blinding=False):
         self.indata = indata
 
+        self.globalImpactsFromJVP = not options.globalImpactsDisableJVP
         self.binByBinStat = not options.noBinByBinStat
         self.binByBinStatMode = options.binByBinStatMode
 
@@ -238,7 +239,7 @@ class Fitter:
 
             if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
                 self.kstat = self.sumw**2 / self.varbeta
-                self.betamask = self.varbeta == 0.0
+                self.betamask = (self.varbeta == 0.0) | (self.kstat == 0.0)
                 self.kstat = tf.where(self.betamask, 1.0, self.kstat)
             elif self.binByBinStatType == "normal-additive":
                 # precompute decomposition of composite matrix to speed up
@@ -810,6 +811,107 @@ class Fitter:
         d_squared_summed = tf.reduce_sum(gathered, axis=-1)
         return tf.sqrt(d_squared_summed)
 
+    def dbetadx_tangents(self, tangent_vector):
+        """
+        Computes JVP for a single tangent vector (column of cov_dexpdx).
+        """
+        # Setup Forward Accumulator for this tangent
+        with tf.autodiff.ForwardAccumulator(self.x, tangent_vector) as acc:
+            _1, _2, beta = self._compute_yields_with_beta(
+                profile=True, compute_norm=False, full=False
+            )
+        return acc.jvp(beta)
+
+    def _compute_global_impacts_beta0_jvp(self, cov_dexpdx, profile=True):
+        """
+        Computes global impacts from beta parameters via JVP in forward accumulator mode.
+        This is fast in case of more beta parameters than explicit parameters (self.x) and 'cov_dexpdx' has only a few columns.
+        It should always be more memory efficient
+        """
+        with tf.GradientTape() as t2:
+            t2.watch(self.ubeta)
+            with tf.GradientTape() as t1:
+                t1.watch(self.ubeta)
+                _1, _2, beta = self._compute_yields_with_beta(
+                    profile=profile, compute_norm=False, full=False
+                )
+                lbeta = self._compute_lbeta(beta)
+            pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
+
+        # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
+        pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
+
+        # this the cholesky decomposition of pd2lbetadbeta2
+        sbeta = tf.linalg.LinearOperatorDiag(
+            tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
+        )
+
+        impacts_beta_shape = (*self.beta_shape, cov_dexpdx.shape[-1])
+        impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=cov_dexpdx.dtype)
+
+        if profile:
+            # dbeta/dx is None if not profiled (no relation)
+            tangents = tf.transpose(cov_dexpdx)
+            dbetadx_cov_dexpdx = tf.vectorized_map(self.dbetadx_tangents, tangents)
+
+            # flatten all but first axes
+            dbetadx_cov_dexpdx = tf.reshape(
+                dbetadx_cov_dexpdx, [tf.shape(dbetadx_cov_dexpdx)[0], -1]
+            )
+            dbetadx_cov_dexpdx = tf.transpose(dbetadx_cov_dexpdx)
+
+            impacts_beta0 += tf.reshape(sbeta @ dbetadx_cov_dexpdx, impacts_beta_shape)
+
+        return impacts_beta0, sbeta
+
+    def _compute_global_impacts_beta0(self, cov_dexpdx, profile=True):
+        """
+        Computes global impacts from beta parameters in the traditional mode.
+        This is fast in case of less beta parameters than explicit parameters (self.x) or 'cov_dexpdx' has many columns.
+        """
+        with tf.GradientTape(persistent=True) as t2:
+            t2.watch([self.x, self.ubeta])
+            with tf.GradientTape(persistent=True) as t1:
+                t1.watch([self.x, self.ubeta])
+                _1, _2, beta = self._compute_yields_with_beta(
+                    profile=profile, compute_norm=False, full=False
+                )
+                lbeta = self._compute_lbeta(beta)
+            pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
+            dbetadx = t1.jacobian(beta, self.x)
+        # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
+        pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
+
+        # this the cholesky decomposition of pd2lbetadbeta2
+        sbeta = tf.linalg.LinearOperatorDiag(
+            tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
+        )
+
+        impacts_beta_shape = (*self.beta_shape, cov_dexpdx.shape[-1])
+        impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=cov_dexpdx.dtype)
+
+        if profile:
+            dbetadx_cov_dexpdx = dbetadx @ cov_dexpdx
+            dbetadx_cov_dexpdx = tf.reshape(
+                dbetadx_cov_dexpdx, [-1, tf.shape(dbetadx_cov_dexpdx)[-1]]
+            )
+
+            impacts_beta0 += tf.reshape(sbeta @ dbetadx_cov_dexpdx, impacts_beta_shape)
+
+        return impacts_beta0, sbeta
+
+    def _compute_global_impacts_x0(self, cov_dexpdx):
+        with tf.GradientTape() as t2:
+            with tf.GradientTape() as t1:
+                lc = self._compute_lc()
+            dlcdx = t1.gradient(lc, self.x)
+        # d2lcdx2 is diagonal so we can use gradient instead of jacobian
+        d2lcdx2_diag = t2.gradient(dlcdx, self.x)
+
+        # sc is the cholesky decomposition of d2lcdx2
+        sc = tf.linalg.LinearOperatorDiag(tf.sqrt(d2lcdx2_diag), is_self_adjoint=True)
+        return sc @ cov_dexpdx
+
     @tf.function
     def global_impacts_parms(self):
         # TODO migrate this to a physics model to avoid the below code which is largely duplicated
@@ -826,34 +928,20 @@ class Fitter:
         var_total = tf.gather(var_total, idxsout)
 
         if self.binByBinStat:
-            with tf.GradientTape(persistent=True) as t2:
-                t2.watch([self.x, self.ubeta])
-                with tf.GradientTape(persistent=True) as t1:
-                    t1.watch([self.x, self.ubeta])
-                    lc = self._compute_lc()
-                    _1, _2, beta = self._compute_yields_with_beta(
-                        profile=True, compute_norm=False, full=False
-                    )
-                    lbeta = self._compute_lbeta(beta)
-                pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
-                dlcdx = t1.gradient(lc, self.x)
-                dbetadx = t1.jacobian(beta, self.x)
-            # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
-            pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
-            # d2lcdx2 is diagonal so we can use gradient instead of jacobian
-            d2lcdx2_diag = t2.gradient(dlcdx, self.x)
-        else:
-            with tf.GradientTape() as t2:
-                with tf.GradientTape() as t1:
-                    lc = self._compute_lc()
-                dlcdx = t1.gradient(lc, self.x)
-            # d2lcdx2 is diagonal so we can use gradient instead of jacobian
-            d2lcdx2_diag = t2.gradient(dlcdx, self.x)
+            if self.globalImpactsFromJVP:
+                impacts_beta0, _ = self._compute_global_impacts_beta0_jvp(cov_dexpdx)
+            else:
+                impacts_beta0, _ = self._compute_global_impacts_beta0(cov_dexpdx)
 
-        # sc is the cholesky decomposition of d2lcdx2
-        sc = tf.linalg.LinearOperatorDiag(tf.sqrt(d2lcdx2_diag), is_self_adjoint=True)
+            var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
 
-        impacts_x0 = sc @ cov_dexpdx
+            if self.binByBinStatMode == "full":
+                impacts_beta0_process = tf.sqrt(var_beta0)
+                var_beta0 = tf.reduce_sum(var_beta0, axis=0)
+
+            impacts_beta0_total = tf.sqrt(var_beta0)
+
+        impacts_x0 = self._compute_global_impacts_x0(cov_dexpdx)
         impacts_theta0 = impacts_x0[self.npoi :]
 
         impacts_theta0 = tf.transpose(impacts_theta0)
@@ -865,20 +953,6 @@ class Fitter:
         var_nobs = var_total - var_theta0
 
         if self.binByBinStat:
-            # this the cholesky decomposition of pd2lbetadbeta2
-            sbeta = tf.linalg.LinearOperatorDiag(
-                tf.sqrt(pd2lbetadbeta2_diag), is_self_adjoint=True
-            )
-
-            impacts_beta0 = sbeta @ dbetadx @ cov_dexpdx
-            var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
-
-            if self.binByBinStatMode == "full":
-                impacts_beta0_process = tf.sqrt(var_beta0)
-                var_beta0 = tf.reduce_sum(var_beta0, axis=0)
-
-            impacts_beta0_total = tf.sqrt(var_beta0)
-
             var_nobs -= var_beta0
 
         impacts_nobs = tf.sqrt(var_nobs)
@@ -1004,7 +1078,7 @@ class Fitter:
             expected, dexpdx = compute_derivatives(dvars)
             pdexpdbeta = None
 
-        if compute_cov or (compute_global_impacts and self.binByBinStat):
+        if compute_cov or compute_global_impacts:
             cov_dexpdx = tf.matmul(self.cov, dexpdx, transpose_b=True)
 
         if compute_cov:
@@ -1062,29 +1136,26 @@ class Fitter:
             # the global observables "by hand", which can be non-trivial beyond the Gaussian case)
 
             if self.binByBinStat:
-                with tf.GradientTape(persistent=True) as t2:
-                    t2.watch([self.x, self.ubeta])
-                    with tf.GradientTape(persistent=True) as t1:
-                        t1.watch([self.x, self.ubeta])
-                        lc = self._compute_lc()
-                        _1, _2, beta = self._compute_yields_with_beta(
-                            profile=profile, compute_norm=False, full=False
-                        )
-                        lbeta = self._compute_lbeta(beta)
-                    pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
-                    dlcdx = t1.gradient(lc, self.x)
-                    dbetadx = t1.jacobian(beta, self.x)
-                # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
-                pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
-                # d2lcdx2 is diagonal so we can use gradient instead of jacobian
-                d2lcdx2_diag = t2.gradient(dlcdx, self.x)
-            else:
-                with tf.GradientTape() as t2:
-                    with tf.GradientTape() as t1:
-                        lc = self._compute_lc()
-                    dlcdx = t1.gradient(lc, self.x)
-                # d2lcdx2 is diagonal so we can use gradient instead of jacobian
-                d2lcdx2_diag = t2.gradient(dlcdx, self.x)
+                if self.globalImpactsFromJVP:
+                    impacts_beta0, sbeta = self._compute_global_impacts_beta0_jvp(
+                        cov_dexpdx, profile
+                    )
+                else:
+                    impacts_beta0, sbeta = self._compute_global_impacts_beta0(
+                        cov_dexpdx, profile
+                    )
+
+                if pdexpdbeta is not None:
+                    impacts_beta0 += tf.reshape(
+                        sbeta @ pd2ldbeta2_pdexpdbeta, impacts_beta0.shape
+                    )
+
+                var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
+                if self.binByBinStatMode == "full":
+                    impacts_beta0_process = tf.sqrt(var_beta0)
+                    var_beta0 = tf.reduce_sum(var_beta0, axis=0)
+
+                impacts_beta0_total = tf.sqrt(var_beta0)
 
             # protect against inconsistency
             # FIXME this should be handled more generally e.g. through modification of
@@ -1095,12 +1166,7 @@ class Fitter:
                     "Global impacts calculation not implemented for prefit case where prefitUnconstrainedNuisanceUncertainty != 0."
                 )
 
-            # sc is the cholesky decomposition of d2lcdx2
-            sc = tf.linalg.LinearOperatorDiag(
-                tf.sqrt(d2lcdx2_diag), is_self_adjoint=True
-            )
-
-            impacts_x0 = sc @ tf.matmul(self.cov, dexpdx, transpose_b=True)
+            impacts_x0 = self._compute_global_impacts_x0(cov_dexpdx)
             impacts_theta0 = impacts_x0[self.npoi :]
 
             impacts_theta0 = tf.transpose(impacts_theta0)
@@ -1112,37 +1178,6 @@ class Fitter:
             var_nobs = expvar_flat - var_theta0
 
             if self.binByBinStat:
-                # this the cholesky decomposition of pd2lbetadbeta2
-                sbeta = tf.linalg.LinearOperatorDiag(
-                    tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
-                )
-
-                impacts_beta_shape = (*self.beta_shape, *expvar_flat.shape)
-                impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=expvar.dtype)
-
-                if pdexpdbeta is not None:
-                    impacts_beta0 += tf.reshape(
-                        sbeta @ pd2ldbeta2_pdexpdbeta, impacts_beta_shape
-                    )
-
-                if dbetadx is not None:
-                    dbetadx_cov_dexpdx = dbetadx @ cov_dexpdx
-                    # flatten all but last axes
-                    dbetadx_cov_dexpdx = tf.reshape(
-                        dbetadx_cov_dexpdx, [-1, tf.shape(dbetadx_cov_dexpdx)[-1]]
-                    )
-                    impacts_beta0 += tf.reshape(
-                        sbeta @ dbetadx_cov_dexpdx, impacts_beta_shape
-                    )
-
-                var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
-                if self.binByBinStatMode == "full":
-                    impacts_beta0_process = tf.sqrt(var_beta0)
-
-                    var_beta0 = tf.reduce_sum(var_beta0, axis=0)
-
-                impacts_beta0_total = tf.sqrt(var_beta0)
-
                 var_nobs -= var_beta0
 
             impacts_nobs = tf.sqrt(var_nobs)
