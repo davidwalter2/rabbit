@@ -1,12 +1,14 @@
 import hashlib
 import re
 
+import h5py
 import numpy as np
 import scipy
 import tensorflow as tf
 import tensorflow_probability as tfp
 from wums import logging
 
+from rabbit import io_tools
 from rabbit import tfhelpers as tfh
 
 logger = logging.child_logger(__name__)
@@ -292,6 +294,37 @@ class Fitter:
             and self.indata.systematic_type == "normal"
             and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
         )
+
+    def load_fitresult(self, fitresult_file, fitresult_key):
+        # load results from external fit and set postfit value and covariance elements for common parameters
+        with h5py.File(fitresult_file, "r") as fext:
+            if "x" in fext.keys():
+                # fitresult from combinetf
+                x_ext = fext["x"][...]
+                parms_ext = fext["parms"][...].astype(str)
+                cov_ext = fext["cov"][...]
+            else:
+                # fitresult from rabbit
+                h5results_ext = io_tools.get_fitresult(fext, fitresult_key)
+                h_parms_ext = h5results_ext["parms"].get()
+
+                x_ext = h_parms_ext.values()
+                parms_ext = np.array(h_parms_ext.axes["parms"])
+                cov_ext = h5results_ext["cov"].get().values()
+
+        xvals = self.x.numpy()
+        covval = self.cov.numpy()
+        parms = self.parms.astype(str)
+
+        # Find common elements with their matching indices
+        common_elements, idxs, idxs_ext = np.intersect1d(
+            parms, parms_ext, assume_unique=True, return_indices=True
+        )
+        xvals[idxs] = x_ext[idxs_ext]
+        covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
+
+        self.x.assign(xvals)
+        self.cov.assign(tf.constant(covval))
 
     def freeze_params(self, frozen_parmeter_expressions):
         self.frozen_params.extend(
