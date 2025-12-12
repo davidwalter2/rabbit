@@ -145,11 +145,6 @@ class Fitter:
 
         self.parms = np.concatenate([self.pois, self.indata.systs])
 
-        self.frozen_params = []
-        self.frozen_params_mask = np.zeros(len(self.parms), dtype=bool)
-        self.frozen_indices = np.array([])
-        self.freeze_params(options.freezeParameters)
-
         self.allowNegativePOI = options.allowNegativePOI
 
         if self.allowNegativePOI:
@@ -165,6 +160,15 @@ class Fitter:
             xdefault = thetadefault
 
         self.x = tf.Variable(xdefault, trainable=True, name="x")
+
+        # for freezing parameters
+        self.frozen_params = []
+        self.frozen_params_mask = tf.Variable(
+            tf.zeros_like(self.x, dtype=tf.bool), trainable=False, dtype=tf.bool
+        )
+
+        self.frozen_indices = np.array([])
+        self.freeze_params(options.freezeParameters)
 
         # observed number of events per bin
         self.nobs = tf.Variable(
@@ -293,12 +297,17 @@ class Fitter:
             and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
         )
 
+    def update_frozen_params(self):
+        new_mask_np = np.isin(self.parms, self.frozen_params)
+
+        self.frozen_params_mask.assign(new_mask_np)
+        self.frozen_indices = np.where(new_mask_np)[0]
+
     def freeze_params(self, frozen_parmeter_expressions):
         self.frozen_params.extend(
             match_regexp_params(frozen_parmeter_expressions, self.parms)
         )
-        self.frozen_params_mask = np.isin(self.parms, self.frozen_params)
-        self.frozen_indices = np.where(self.frozen_params_mask)[0]
+        self.update_frozen_params()
 
     def defreeze_params(self, unfrozen_parmeter_expressions):
         unfrozen_parmeter = match_regexp_params(
@@ -307,9 +316,7 @@ class Fitter:
         self.frozen_params = [
             x for x in self.frozen_params if x not in unfrozen_parmeter
         ]
-
-        self.frozen_params_mask = np.isin(self.parms, self.frozen_params)
-        self.frozen_indices = np.where(self.frozen_params_mask)[0]
+        self.update_frozen_params()
 
     def init_blinding_values(self, unblind_parameter_expressions=[]):
 
@@ -2318,14 +2325,9 @@ class Fitter:
             hess=scipy.optimize.SR1(),  # TODO: use exact hessian or hessian vector product
         )
 
-        # initial guess from covariance
+        # initial values
         idx = np.where(self.parms.astype(str) == param)[0][0]
         xval = tf.identity(self.x)
-
-        xerr = (self.cov[idx, idx] * q) ** 0.5
-        xup = xval[idx] + xerr
-        xdn = xval[idx] - xerr
-
         xval_init = xval.numpy()
 
         if return_all_params:
@@ -2334,11 +2336,6 @@ class Fitter:
             intervals = np.full((len(signs)), np.nan)
 
         for i, sign in enumerate(signs):
-            if sign < 0:
-                xval_init[idx] = xdn
-            else:
-                xval_init[idx] = xup
-
             # Objective function and its derivatives
             def objective(params):
                 return -sign * params[idx]
