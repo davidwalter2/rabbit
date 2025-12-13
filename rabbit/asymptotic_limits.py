@@ -1,8 +1,7 @@
 import numpy as np
 import scipy.optimize
 import tensorflow as tf
-from scipy.optimize import fsolve
-from scipy.stats import norm
+from scipy.optimize import root
 from wums import logging
 
 from rabbit import tfhelpers as tfh
@@ -197,66 +196,36 @@ def compute_gaussian_limit(fitter, param, idx, xerr, cl_s):
     fitter.cov.assign(cov)
     xobs_err = fitter.cov[idx, idx] ** 0.5
 
-    xobs = xobs.numpy()
-    xobs_err = xobs_err.numpy()
+    logger.info(
+        f"Measured xobs +/- xobs_err (asimov err) = {xobs} +/- {xobs_err} ({xerr})"
+    )
 
-    logger.info(f"Measured xobs +/- xobs_err = {xobs} +/- {xobs_err}")
-
-    # Do not assume same uncertainties, in this case we have to find the root
+    # In general the limit in Gaussian approximation is not analytically solveable but we have to find the root of f(x)
     if xobs < 0:
-        raise NotImplementedError(
-            "Gaussian limits using modified statistics do not work yet"
-        )
-
         logger.debug("Use modified statistics")
+        # initial guess
+        r_init = 0
 
-        #  modified test statistic q~ = [0 for mu < mu^, q for mu < mu^ and mu^ > 0, q0 for mu^<0]
-        def f(x):
-            # xval = x**2 # ensure positivity
-            qmu = np.sqrt(((x - xobs) / xobs_err) ** 2 - (xobs / xobs_err) ** 2)
-            qA = x / xerr
-            return norm.cdf(-qmu) - cl_s * norm.cdf(qA - qmu)
-
-        def fprime(x):
-            qmu = np.sqrt(((x - xobs) / xobs_err) ** 2 - (xobs / xobs_err) ** 2)
-            qA = x / xerr
-
-            # PDFs
-            phi_qmu = norm.pdf(qmu)
-            phi_qA_qmu = norm.pdf(qA - qmu)
-
-            # Derivatives of qmu and qA
-            dqmu_dx = (x - xobs) / (qmu * xobs_err**2)
-            dqA_dx = 1.0 / xerr
-
-            # Final derivative according to the symbolic result
-            return -phi_qmu * dqmu_dx - cl_s * phi_qA_qmu * (dqA_dx - dqmu_dx)
+        def qmu_sqrt(x):
+            return tf.sqrt(((x - xobs) / xobs_err) ** 2 - (xobs / xobs_err) ** 2)
 
     else:
-        # Assume that the uncertainty in the asimov fit is the same as in the fit to data, then we can analytically solve for r; but it does not work if xobs < 0
-        r = max(0, xobs) - xerr * (norm.ppf(cl_s * norm.cdf(max(0, xobs) / xerr)))
-        # logger.info(f"Observed (Gaussian): {param} < {limit}")
+        # initial guess
+        # Assume that the uncertainty in the asimov fit is the same as in the fit to data, then we can analytically solve for r
+        r_init = xobs - xerr * (tfh.normal_pdf(cl_s * tfh.normal_cdf(xobs / xerr)))
 
-        def f(x):
-            qmu = (x - xobs) / xobs_err
-            qA = x / xerr
-            return norm.cdf(-qmu) - cl_s * norm.cdf(qA - qmu)
+        def qmu_sqrt(x):
+            return (x - xobs) / xobs_err
 
-        def fprime(x):
-            qmu = (x - xobs) / xobs_err
-            qA = x / xerr
+    def qA_sqrt(x):
+        return x / xerr
 
-            # PDFs
-            phi_qmu = norm.pdf(qmu)
-            phi_qA_qmu = norm.pdf(qA - qmu)
+    def f(x):
+        qmu = qmu_sqrt(x)
+        qA = qA_sqrt(x)
+        return tfh.normal_cdf(-qmu) - cl_s * tfh.normal_cdf(qA - qmu)
 
-            # Derivatives of qmu and qA
-            dqmu_dx = 1.0 / xobs_err
-            dqA_dx = 1.0 / xerr
-
-            # Final derivative according to the symbolic result
-            return -phi_qmu * dqmu_dx - cl_s * phi_qA_qmu * (dqA_dx - dqmu_dx)
-
-    limit = fsolve(f, r, fprime=fprime)[0]
+    res = root(f, r_init)
+    limit = res.x[0]
     logger.info(f"Observed (Gaussian): {param} < {limit}")
     return limit
