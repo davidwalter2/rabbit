@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import copy
+
 import tensorflow as tf
 
 tf.config.experimental.enable_op_determinism()
@@ -8,9 +10,9 @@ import argparse
 import time
 
 import numpy as np
-import scipy
+from scipy.stats import chi2, norm
 
-from rabbit import fitter, inputdata, workspace
+from rabbit import asymptotic_limits, fitter, inputdata, workspace
 from rabbit.physicsmodels import helpers as ph
 from rabbit.physicsmodels import physicsmodel as pm
 from rabbit.tfhelpers import edmval_cov
@@ -131,7 +133,12 @@ def make_parser():
         nargs="+",
         default=[],
         type=str,
-        help="Compute asymptotic upper limit based on CLs at specified parameters",
+        help="Compute asymptotic upper limit based on CLs at specified parameters or (masked) channel",
+    )
+    parser.add_argument(
+        "--limitsOnChannel",
+        action="store_true",
+        help="Interpret specified key in '--asymptoticLimits <key>' as (masked) channel",
     )
     parser.add_argument(
         "--cls",
@@ -470,15 +477,18 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
                 fitter.cov.assign(tf.constant(cov_prefit))
 
 
-def asymptotic_limits(
-    args, fitter, ws, bkg_only_fit=False, observed=False, from_xsec=True
+def do_asymptotic_limits(
+    args, fitter, ws, data_values, bkg_only_fit=False, on_channel=False
 ):
-    if bkg_only_fit or observed:
-        # perform background only fit
+    if bkg_only_fit:
+        logger.info("Perform background only fit")
         # set process to zero and freeze
         fitter.freeze_params(args.asymptoticLimits)
 
         fitter.minimize()
+
+        # set asimov from background only fit
+        fitter.set_nobs(fitter.expected_yield())
 
         # defreeze process again to evaluate it's dependencies
         fitter.defreeze_params(args.asymptoticLimits)
@@ -500,24 +510,24 @@ def asymptotic_limits(
     #  - combine tutorial https://indico.cern.ch/event/976099/contributions/4138520/
     #  - paper: https://arxiv.org/abs/1007.1727
 
+    clb_list = np.array([0.025, 0.16, 0.5, 0.84, 0.975])
+
     # axes for output histogram: params, cls, clb
-    limits_shape = [len(args.asymptoticLimits), len(args.cls)]
-    if observed:
-        clb_list = None
-    else:
-        clb_list = np.array([0.025, 0.16, 0.5, 0.84, 0.975])
-        limits_shape.append(len(clb_list))
+    limits_shape = [len(args.asymptoticLimits), len(args.cls), len(clb_list)]
+    limits_obs_shape = [len(args.asymptoticLimits), len(args.cls)]
 
     limits = np.full(limits_shape, np.nan)
-    for i, param in enumerate(args.asymptoticLimits):
-        if param not in fitter.indata.signals.astype(str):
-            raise RuntimeError(
-                f"Can not compute asymptotic limits for parameter {param}, no such signal process found, signal processe are: {fitter.indata.signals.astype(str)}"
-            )
+    limits_obs = np.full(limits_obs_shape, np.nan)
+    limits_nll = np.full(limits_shape, np.nan)
+    limits_nll_obs = np.full(limits_obs_shape, np.nan)
+    for i, key in enumerate(args.asymptoticLimits):
 
-        if f"{param}_masked" in fitter.indata.channel_info.keys():
-            # Get the limit on the cross section
-            model = ph.instance_from_class("Select", fitter.indata, f"{param}_masked")
+        if on_channel:
+            if key not in fitter.indata.channel_info.keys():
+                raise ValueError(f"Can not find (masked) channel {key} to set limits")
+
+            logger.info(f"Get the limit on the masked channel {key}_masked")
+            model = ph.instance_from_class("Select", fitter.indata, f"{key}_masked")
             fun = model.compute_flat
 
             exp, exp_var, _0, _1, _2 = fitter.expected_with_variance(
@@ -532,68 +542,109 @@ def asymptotic_limits(
             xerr = exp_var.numpy()[0] ** 0.5
 
         else:
-            # otherwise do it on the signal strength
-            idx = np.where(fitter.parms.astype(str) == param)[0][0]
+            if key not in fitter.indata.signals.astype(str):
+                raise RuntimeError(
+                    f"Can not compute asymptotic limits for parameter {key}, no such signal process found, signal processe are: {fitter.indata.signals.astype(str)}"
+                )
+            logger.info(f"Get the limit from the signal strength")
+            idx = np.where(fitter.parms.astype(str) == key)[0][0]
             xbest = fitter.get_blinded_poi()[idx]
             xerr = fitter.cov[idx, idx] ** 0.5
+
+            xbest = xbest.numpy()
+            xerr = xerr.numpy()
 
             if not args.allowNegativePOI:
                 xerr = 2 * xerr * xbest**0.5
 
-        logger.debug(f"Best fit {param} = {xbest} +/- {xerr}")
+        logger.debug(f"Best fit {key} = {xbest} +/- {xerr}")
 
-        # # this is the denominator of q for likelihood based limits
-        # nllvalreduced = fitter.reduced_nll().numpy()
-
-        if xbest < 0:
-            # need modified test statistic q~ = [0 for mu < mu^, q for mu < mu^ and mu^ > 0, q0 for mu^<0]
-            raise NotImplementedError(
-                "Need modified test statistic here or run without '--allowNegativePOI'"
-            )
+        # this is the denominator of q for likelihood based limits
+        nllvalreduced_asimov = fitter.reduced_nll().numpy()
 
         for j, cl_s in enumerate(args.cls):
             logger.info(f" -- AsymptoticLimits ( CLs={round(cl_s*100,1):4.1f}% ) -- ")
 
-            if observed:
-                # observed limit
-                # TODO: this is not correct, we need to take into account CLb (from the asimov)
-
-                # logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmu}")
-                # # TODO: implement likelihood based limit
-
-                # r = fitter.contour_scan(param, nllvalreduced, q, signs=[1])[0]
+            # now we need to find the values for mu where q_{mu,A} = -2ln(L)
+            for k, cl_b in enumerate(clb_list):
+                cl_sb = cl_s * cl_b
+                qmuA = (norm.ppf(cl_b) - norm.ppf(cl_sb)) ** 2
+                logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmuA}")
 
                 # Gaussian approximation
-                r = xbest  # + xerr * qmuA**0.5
+                r = xbest + xerr * qmuA**0.5
+                logger.info(
+                    f"Expected (Gaussian) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
+                )
+                limits[i, j, k] = r
 
-                logger.info(f"Observed Limit: {param} < {r}")
-                limits[i, j] = r
+                if on_channel:
+                    # TODO: implement for channels
+                    pass
+                else:
+                    # Likelihood approximation
+                    r = fitter.contour_scan(key, nllvalreduced_asimov, qmuA, signs=[1])[
+                        0
+                    ]
+                    logger.info(
+                        f"Expected (Likelihood) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
+                    )
+                    limits_nll[i, j, k] = r
+
+            # Clone fitter to simultaneously minimize on asimov dataset
+            fitter_asimov = copy.deepcopy(fitter)
+
+            # unconditional fit to real data
+            logger.info(f" -- Compute observed -- ")
+            fitter.set_nobs(data_values)
+            fitter.minimize()
+
+            # Gaussian approximation
+            limits_obs[i, j] = asymptotic_limits.compute_gaussian_limit(
+                fitter, key, idx, xerr, cl_s
+            )
+
+            # Likelihood approximation
+            if on_channel:
+                # TODO: implement for channels
+                pass
             else:
-                # now we need to find the values for mu where q_{mu,A} = -2ln(L)
-                for k, cl_b in enumerate(clb_list):
-                    cl_sb = cl_s * cl_b
-                    qmuA = (
-                        scipy.stats.norm.ppf(cl_s, loc=0, scale=1)
-                        + scipy.stats.norm.ppf(1 - cl_sb, loc=0, scale=1)
-                    ) ** 2
-                    logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmuA}")
-
-                    # Gaussian approximation
-                    r = xbest + xerr * qmuA**0.5
-
-                    # # TODO: implement likelihood based limit
-                    # r = fitter.contour_scan(param, nllvalreduced, qmuA, signs=[1])[
-                    #     0
-                    # ]
-                    logger.info(f"Expected {round(cl_sb*100,1):4.1f}%: {param} < {r}")
-                    limits[i, j, k] = r
+                # TODO: make it work
+                # nllvalreduced = fitter.reduced_nll().numpy()
+                # limits_nll_obs[i, j] = asymptotic_limits.compute_likelihood_limit(fitter, fitter_asimov, nllvalreduced, nllvalreduced_asimov, key, cl_s)
+                pass
 
     ws.add_limits_hist(
         limits,
         args.asymptoticLimits,
         args.cls,
         clb_list,
+        base_name="gaussian_asymptoticLimits_expected",
     )
+
+    ws.add_limits_hist(
+        limits_obs,
+        args.asymptoticLimits,
+        args.cls,
+        base_name="gaussian_asymptoticLimits_observed",
+    )
+
+    if not on_channel:
+        # TODO: implement for channels
+        ws.add_limits_hist(
+            limits_nll,
+            args.asymptoticLimits,
+            args.cls,
+            clb_list,
+            base_name="likelihood_asymptoticLimits_expected",
+        )
+
+        ws.add_limits_hist(
+            limits_nll_obs,
+            args.asymptoticLimits,
+            args.cls,
+            base_name="likelihood_asymptoticLimits_observed",
+        )
 
 
 def fit(args, fitter, ws, dofit=True):
@@ -641,12 +692,12 @@ def fit(args, fitter, ws, dofit=True):
         tf.size(fitter.nobs) - fitter.npoi - fitter.indata.nsystnoconstraint
     ).numpy()
 
-    chi2 = 2.0 * nllvalreduced
-    p_val = scipy.stats.chi2.sf(chi2, ndfsat)
+    chi2_val = 2.0 * nllvalreduced
+    p_val = chi2.sf(chi2_val, ndfsat)
 
     logger.info("Saturated chi2:")
     logger.info(f"    ndof: {ndfsat}")
-    logger.info(f"    2*deltaNLL: {round(chi2, 2)}")
+    logger.info(f"    2*deltaNLL: {round(chi2_val, 2)}")
     logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
 
     ws.results.update(
@@ -858,11 +909,19 @@ def main():
                 )
 
                 if args.asymptoticLimits:
-                    ifitter.set_nobs(data_values)
                     prefit_time.append(time.time())
 
-                    asymptotic_limits(
-                        args, ifitter, ws, bkg_only_fit=True, observed=ifit >= 0
+                    observations = (
+                        data_values if ifit >= 0 else ifitter.expected_yield()
+                    )
+
+                    do_asymptotic_limits(
+                        args,
+                        ifitter,
+                        ws,
+                        data_values=observations,
+                        bkg_only_fit=ifit >= 0,
+                        on_channel=args.limitsOnChannel,
                     )
                     fit_time.append(time.time())
 
