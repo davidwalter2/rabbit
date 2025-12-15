@@ -119,7 +119,7 @@ def make_parser():
         default=None,
         nargs=2,
         action="append",
-        help="Sepcify tuple with signal name and rate multiplier for signal expectation (used for fit starting values and for toys). E.g. '--expectSignal BSM 0.0 --expectSignal SM 1.0'",
+        help="Specify tuple with signal name and rate multiplier for signal expectation (used for fit starting values and for toys). E.g. '--expectSignal BSM 0.0 --expectSignal SM 1.0'",
     )
     parser.add_argument("--POIMode", default="mu", help="mode for POI's")
     parser.add_argument(
@@ -639,12 +639,13 @@ def do_asymptotic_limits(
             base_name="likelihood_asymptoticLimits_expected",
         )
 
-        ws.add_limits_hist(
-            limits_nll_obs,
-            args.asymptoticLimits,
-            args.cls,
-            base_name="likelihood_asymptoticLimits_observed",
-        )
+        # TODO: make it work
+        # ws.add_limits_hist(
+        #     limits_nll_obs,
+        #     args.asymptoticLimits,
+        #     args.cls,
+        #     base_name="likelihood_asymptoticLimits_observed",
+        # )
 
 
 def fit(args, fitter, ws, dofit=True):
