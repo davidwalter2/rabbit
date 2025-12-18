@@ -12,8 +12,8 @@ import numpy as np
 import scipy
 
 from rabbit import fitter, inputdata, io_tools, workspace
-from rabbit.physicsmodels import helpers as ph
-from rabbit.physicsmodels import physicsmodel as pm
+from rabbit.mappings import helpers as mh
+from rabbit.mappings import mapping as mp
 from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
@@ -282,22 +282,22 @@ def make_parser():
     )
     parser.add_argument(
         "-m",
-        "--physicsModel",
+        "--mapping",
         nargs="+",
         action="append",
         default=[],
         help="""
-        add physics model to perform transformations on observables for the prefit and postfit histograms, 
-        specifying the model defined in rabbit/physicsmodels/ followed by arguments passed in the model __init__, 
+        perform mappings on observables or parameters for the prefit and postfit histograms, 
+        specifying the mapping defined in rabbit/mappings/ followed by arguments passed in the mapping __init__, 
         e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.  
         This argument can be called multiple times.
-        Custom models can be specified with the full path to the custom model e.g. '-m custom_models.MyCustomModel'.
+        Custom mappings can be specified with the full path to the custom mapping e.g. '-m custom_mappings.MyCustomMapping'.
         """,
     )
     parser.add_argument(
-        "--compositeModel",
+        "--compositeMapping",
         action="store_true",
-        help="Make a composite model and compute the covariance matrix across all physics models.",
+        help="Make a composite mapping and compute the covariance matrix across all mappings.",
     )
     parser.add_argument(
         "--doImpacts",
@@ -368,14 +368,14 @@ def make_parser():
     return parser.parse_args()
 
 
-def save_observed_hists(args, models, fitter, ws):
-    for model in models:
-        if not model.has_data:
+def save_observed_hists(args, mappings, fitter, ws):
+    for mapping in mappings:
+        if not mapping.has_data:
             continue
 
-        print(f"Save data histogram for {model.key}")
+        print(f"Save data histogram for {mapping.key}")
         ws.add_observed_hists(
-            model,
+            mapping,
             fitter.indata.data_obs,
             fitter.nobs.value(),
             fitter.indata.data_cov_inv,
@@ -383,27 +383,27 @@ def save_observed_hists(args, models, fitter, ws):
         )
 
 
-def save_hists(args, models, fitter, ws, prefit=True, profile=False):
+def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
 
-    for model in models:
-        logger.info(f"Save inclusive histogram for {model.key}")
+    for mapping in mappings:
+        logger.info(f"Save inclusive histogram for {mapping.key}")
 
-        if prefit and model.skip_prefit:
+        if prefit and mapping.skip_prefit:
             continue
 
-        if not model.skip_incusive:
+        if not mapping.skip_incusive:
             exp, aux = fitter.expected_events(
-                model,
+                mapping,
                 inclusive=True,
                 compute_variance=args.computeHistErrors,
                 compute_cov=args.computeHistCov,
-                compute_chi2=not args.noChi2 and model.has_data,
+                compute_chi2=not args.noChi2 and mapping.has_data,
                 compute_global_impacts=args.computeHistImpacts,
                 profile=profile,
             )
 
             ws.add_expected_hists(
-                model,
+                mapping,
                 exp,
                 var=aux[0],
                 cov=aux[1],
@@ -413,20 +413,20 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
             )
 
             if aux[4] is not None:
-                ws.add_chi2(aux[4], aux[5], prefit, model)
+                ws.add_chi2(aux[4], aux[5], prefit, mapping)
 
-        if args.saveHistsPerProcess and not model.skip_per_process:
-            logger.info(f"Save processes histogram for {model.key}")
+        if args.saveHistsPerProcess and not mapping.skip_per_process:
+            logger.info(f"Save processes histogram for {mapping.key}")
 
             exp, aux = fitter.expected_events(
-                model,
+                mapping,
                 inclusive=False,
                 compute_variance=args.computeHistErrorsPerProcess,
                 profile=profile,
             )
 
             ws.add_expected_hists(
-                model,
+                mapping,
                 exp,
                 var=aux[0],
                 process_axis=True,
@@ -439,7 +439,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
                 fitter.cov.assign(fitter.prefit_covariance(unconstrained_err=1.0))
 
             exp, aux = fitter.expected_events(
-                model,
+                mapping,
                 inclusive=True,
                 compute_variance=False,
                 compute_variations=True,
@@ -447,7 +447,7 @@ def save_hists(args, models, fitter, ws, prefit=True, profile=False):
             )
 
             ws.add_expected_hists(
-                model,
+                mapping,
                 exp,
                 var=aux[0],
                 variations=True,
@@ -655,18 +655,18 @@ def main():
     indata = inputdata.FitInputData(args.filename, args.pseudoData)
     ifitter = fitter.Fitter(indata, args, do_blinding=any(blinded_fits))
 
-    # physics models for observables and transformations
-    if len(args.physicsModel) == 0 and args.saveHists:
-        # if no model is explicitly added and --saveHists is specified, fall back to Basemodel
-        args.physicsModel = [["Basemodel"]]
-    models = []
-    for margs in args.physicsModel:
-        model = ph.instance_from_class(margs[0], indata, *margs[1:])
-        models.append(model)
+    # mappings for observables and mappings
+    if len(args.mapping) == 0 and args.saveHists:
+        # if no mapping is explicitly added and --saveHists is specified, fall back to BaseMapping
+        args.mapping = [["BaseMapping"]]
+    mappings = []
+    for margs in args.mapping:
+        mapping = mh.instance_from_class(margs[0], indata, *margs[1:])
+        mappings.append(mapping)
 
-    if args.compositeModel:
-        models = [
-            pm.CompositeModel(models),
+    if args.compositeMapping:
+        mappings = [
+            mp.CompositeMapping(mappings),
         ]
 
     np.random.seed(args.seed)
@@ -746,8 +746,8 @@ def main():
                 )
 
                 if args.saveHists:
-                    save_observed_hists(args, models, ifitter, ws)
-                    save_hists(args, models, ifitter, ws, prefit=True)
+                    save_observed_hists(args, mappings, ifitter, ws)
+                    save_hists(args, mappings, ifitter, ws, prefit=True)
                 prefit_time.append(time.time())
 
                 if not args.prefitOnly:
@@ -758,7 +758,7 @@ def main():
                     if args.saveHists:
                         save_hists(
                             args,
-                            models,
+                            mappings,
                             ifitter,
                             ws,
                             prefit=False,

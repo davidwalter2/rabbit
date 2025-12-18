@@ -891,7 +891,7 @@ class Fitter:
 
     @tf.function
     def global_impacts_parms(self):
-        # TODO migrate this to a physics model to avoid the below code which is largely duplicated
+        # TODO migrate this to a mapping to avoid the below code which is largely duplicated
 
         idxs_poi = tf.range(self.npoi, dtype=tf.int64)
         idxs_noi = tf.constant(self.npoi + self.indata.noiidxs, dtype=tf.int64)
@@ -1745,7 +1745,7 @@ class Fitter:
 
     def expected_events(
         self,
-        model,
+        mapping,
         inclusive=True,
         compute_variance=True,
         compute_cov=False,
@@ -1761,7 +1761,7 @@ class Fitter:
         ):
             raise NotImplementedError()
 
-        fun = model.compute_flat if inclusive else model.compute_flat_per_process
+        fun = mapping.compute_flat if inclusive else mapping.compute_flat_per_process
 
         aux = [None] * 4
         if compute_cov or compute_variance or compute_global_impacts:
@@ -1771,8 +1771,8 @@ class Fitter:
                     profile=profile,
                     compute_cov=compute_cov,
                     compute_global_impacts=compute_global_impacts,
-                    need_observables=model.need_observables,
-                    inclusive=inclusive and not model.need_processes,
+                    need_observables=mapping.need_observables,
+                    inclusive=inclusive and not mapping.need_processes,
                 )
             )
             aux = [exp_var, exp_cov, exp_impacts, exp_impacts_grouped]
@@ -1780,22 +1780,22 @@ class Fitter:
             exp = self.expected_variations(
                 fun,
                 correlations=correlated_variations,
-                inclusive=inclusive and not model.need_processes,
-                need_observables=model.need_observables,
+                inclusive=inclusive and not mapping.need_processes,
+                need_observables=mapping.need_observables,
             )
         else:
             exp = self._compute_expected(
                 fun,
-                inclusive=inclusive and not model.need_processes,
+                inclusive=inclusive and not mapping.need_processes,
                 profile=profile,
-                need_observables=model.need_observables,
+                need_observables=mapping.need_observables,
             )
 
         if compute_chi2:
             chi2val, ndf = self.chi2(
-                model.compute_flat,
-                model._get_data,
-                model.ndf_reduction,
+                mapping.compute_flat,
+                mapping._get_data,
+                mapping.ndf_reduction,
                 profile=profile,
             )
 

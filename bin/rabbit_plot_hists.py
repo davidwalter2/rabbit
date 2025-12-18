@@ -203,13 +203,13 @@ def parseArgs():
     )
     parser.add_argument(
         "-m",
-        "--physicsModel",
+        "--mapping",
         nargs="+",
         action="append",
         default=[],
         help="""
-        Make plot of physics model prefit and postfit histograms. Loop over all by deault. 
-        Can also specify the model name, followed by the arguments, e.g. "-m Project ch0 eta pt". 
+        Make plot of mapping prefit and postfit histograms. Loop over all by deault. 
+        Can also specify the mapping name, followed by the arguments, e.g. "-m Project ch0 eta pt". 
         This argument can be called multiple times.
         """,
     )
@@ -258,7 +258,7 @@ def parseArgs():
         type=str,
         default="automatic",
         choices=["automatic", "saturated", "linear", " ", "none", None],
-        help="Type of chi2 to print on plot (saturated from fit likelihood. linear from observables, or none) 'automatic' means pick saturated for basemodel and otherwise linear",
+        help="Type of chi2 to print on plot (saturated from fit likelihood. linear from observables, or none) 'automatic' means pick saturated for basemapping and otherwise linear",
     )
     parser.add_argument(
         "--dataName", type=str, default="Data", help="Data name for plot labeling"
@@ -1474,16 +1474,16 @@ def main():
         varMarkers=args.varMarkers,
     )
 
-    results = fitresult["physics_models"]
-    for margs in args.physicsModel:
+    results = fitresult.get("mappings", fitresult.get("physics_models"))
+    for margs in args.mapping:
         if margs == []:
             instance_keys = results.keys()
         else:
-            model_key = " ".join(margs)
-            instance_keys = [k for k in results.keys() if k.startswith(model_key)]
+            mapping_key = " ".join(margs)
+            instance_keys = [k for k in results.keys() if k.startswith(mapping_key)]
             if len(instance_keys) == 0:
                 raise ValueError(
-                    f"No model found under {model_key}. Available models: {results.keys()}."
+                    f"No mapping found under {mapping_key}. Available mappings: {results.keys()}."
                 )
 
         for instance_key in instance_keys:
@@ -1499,7 +1499,7 @@ def main():
                     fitresult
                     if fittype == "postfit"
                     and (
-                        (instance_key == "Basemodel" and args.chisq != "linear")
+                        (instance_key == "BaseMapping" and args.chisq != "linear")
                         or args.chisq == "saturated"
                     )
                     else instance
@@ -1513,7 +1513,7 @@ def main():
                     continue
                 logger.info(f"Make plot for {instance_key} in channel {channel}")
 
-                if instance_key == "CompositeModel":
+                if instance_key == "CompositeMapping":
                     info = channel_info.get(" ".join(channel.split(" ")[-1:]), {})
                 else:
                     info = channel_info.get(channel, {})
@@ -1538,11 +1538,11 @@ def main():
                     if any(
                         instance_key.startswith(x)
                         for x in [
-                            "Basemodel",
+                            "BasemMapping",
                             "Project",
                             "Select",
                             "Norm",
-                            "CompositeModel",
+                            "CompositeMapping",
                         ]
                     )
                     and not args.noBinWidthNorm
@@ -1552,9 +1552,9 @@ def main():
                 opts["counts"] = counts
 
                 varResults = [
-                    r["physics_models"][instance_key.replace("_masked", "")][
-                        "channels"
-                    ][channel.replace("_masked", "")]
+                    r.get("mappings", r.get("physics_models"))[
+                        instance_key.replace("_masked", "")
+                    ]["channels"][channel.replace("_masked", "")]
                     for r in varFitresults
                 ]
 
