@@ -715,6 +715,13 @@ def parseArgs():
         help="Print impacts on observables use '-m <model> channel axes' for physics model results.",
     )
     parser.add_argument(
+        "--physicsModelRef",
+        default=None,
+        type=str,
+        nargs="+",
+        help="Print impacts on observables use '-m <model> channel axes' for physics model results for reference.",
+    )
+    parser.add_argument(
         "-r",
         "--referenceFile",
         type=str,
@@ -1233,7 +1240,7 @@ def main():
         )
         fitresult_ref = io_tools.get_fitresult(referenceFile, args.refResult)
     else:
-        fitresult_ref = None
+        fitresult_ref = fitresult
 
     meta_out = {
         "rabbit": meta["meta_info"],
@@ -1276,16 +1283,34 @@ def main():
                     "Only global impacts on observables is implemented (use --globalImpacts)"
                 )
 
+            def get_model_key(result, key):
+
+                if key in result["physics_models"].keys():
+                    channels = result["physics_models"][key]["channels"]
+                    return channels, key
+                else:
+                    keys = [
+                        key
+                        for key in result["physics_models"].keys()
+                        if key.startswith(key)
+                    ]
+                    if len(keys) == 0:
+                        raise ValueError(
+                            f"Physics model {key} not found, available models are: {result['physics_models'].keys()}"
+                        )
+
+                    channels = result["physics_models"][keys[0]]["channels"]
+                    return channels, keys[0]
+
             model_key = " ".join(args.physicsModel)
-            if model_key in fitresult["physics_models"].keys():
-                channels = fitresult["physics_models"][model_key]["channels"]
-            else:
-                keys = [
-                    key
-                    for key in fitresult["physics_models"].keys()
-                    if key.startswith(model_key)
-                ]
-                channels = fitresult["physics_models"][keys[0]]["channels"]
+            model_key_ref = (
+                " ".join(args.physicsModelRef)
+                if args.physicsModelRef is not None
+                else model_key
+            )
+
+            channels, model_key = get_model_key(fitresult, model_key)
+            channels_ref, model_key_ref = get_model_key(fitresult_ref, model_key_ref)
 
             for channel, hists in channels.items():
 
@@ -1301,16 +1326,21 @@ def main():
 
                     hist = hists[key].get()
 
-                    # TODO: implement ref
-                    # hist_ref
-                    # hist_total_ref
+                    if channel in channels_ref.keys():
+                        channel_ref = channel
+                    elif len(channels_ref.keys()) == 1:
+                        channel_ref = [v for v in channels_ref.keys()][0]
+                    else:
+                        raise NotImplementedError(
+                            f"Could not decide which is the right channel from reference file with channels: {channels_ref.keys()}"
+                        )
 
-                    if fitresult_ref is not None:
-                        hists_ref = fitresult_ref["physics_models"][model_key][
-                            "channels"
-                        ][channel]
-                        hist_ref = hists_ref[key].get()
-                        hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
+                    hists_ref = fitresult_ref["physics_models"][model_key_ref][
+                        "channels"
+                    ][channel_ref]
+
+                    hist_ref = hists_ref[key].get()
+                    hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
 
                     for idxs in itertools.product(
                         *[np.arange(a.size) for a in hist_total.axes]
@@ -1336,10 +1366,8 @@ def main():
                             ibin,
                             group=group,
                             grouping=grouping,
-                            hist_impacts_ref=hist_ref[ibin] if fitresult_ref else None,
-                            hist_total_ref=(
-                                hist_total_ref[ibin] if fitresult_ref else None
-                            ),
+                            hist_impacts_ref=hist_ref[ibin],
+                            hist_total_ref=hist_total_ref[ibin],
                             **kwargs,
                         )
         else:
