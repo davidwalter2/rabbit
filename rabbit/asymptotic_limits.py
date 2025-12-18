@@ -5,7 +5,6 @@ from scipy.optimize import root
 from wums import logging
 
 from rabbit import tfhelpers as tfh
-from rabbit.tfhelpers import edmval_cov
 
 logger = logging.child_logger(__name__)
 
@@ -188,14 +187,7 @@ def compute_likelihood_limit(
     return limit
 
 
-def compute_gaussian_limit(fitter, param, idx, xerr, cl_s):
-
-    xobs = fitter.get_blinded_poi()[idx]
-    val, grad, hess = fitter.loss_val_grad_hess()
-    edmval, cov = edmval_cov(grad, hess)
-    fitter.cov.assign(cov)
-    xobs_err = fitter.cov[idx, idx] ** 0.5
-
+def compute_gaussian_limit(param, xobs, xobs_err, xerr, cl_s):
     logger.info(
         f"Measured xobs +/- xobs_err (asimov err) = {xobs} +/- {xobs_err} ({xerr})"
     )

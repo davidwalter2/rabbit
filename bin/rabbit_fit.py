@@ -505,6 +505,13 @@ def do_asymptotic_limits(
 
         del cov
 
+    # Clone fitter to simultaneously minimize on asimov dataset
+    fitter_asimov = copy.deepcopy(fitter)
+
+    # unconditional fit to real data
+    fitter.set_nobs(data_values)
+    fitter.minimize()
+
     # asymptotic limits (CLs)
     #  see:
     #  - combine tutorial https://indico.cern.ch/event/976099/contributions/4138520/
@@ -526,11 +533,11 @@ def do_asymptotic_limits(
             if key not in fitter.indata.channel_info.keys():
                 raise ValueError(f"Can not find (masked) channel {key} to set limits")
 
-            logger.info(f"Get the limit on the masked channel {key}_masked")
-            model = ph.instance_from_class("Select", fitter.indata, f"{key}_masked")
+            logger.info(f"Get the limit on the masked channel {key}")
+            model = ph.instance_from_class("Select", fitter.indata, key)
             fun = model.compute_flat
 
-            exp, exp_var, _0, _1, _2 = fitter.expected_with_variance(
+            exp, exp_var, _0, _1, _2 = fitter_asimov.expected_with_variance(
                 fun,
                 profile=True,
                 compute_cov=False,
@@ -541,6 +548,17 @@ def do_asymptotic_limits(
             xbest = exp.numpy()[0]
             xerr = exp_var.numpy()[0] ** 0.5
 
+            # for observed limit
+            exp, exp_var, _0, _1, _2 = fitter_asimov.expected_with_variance(
+                fun,
+                profile=True,
+                compute_cov=False,
+                compute_global_impacts=False,
+                need_observables=True,
+                inclusive=True,
+            )
+            xobs = exp.numpy()[0]
+            xobs_err = exp_var.numpy()[0] ** 0.5
         else:
             if key not in fitter.indata.signals.astype(str):
                 raise RuntimeError(
@@ -548,19 +566,27 @@ def do_asymptotic_limits(
                 )
             logger.info(f"Get the limit from the signal strength")
             idx = np.where(fitter.parms.astype(str) == key)[0][0]
-            xbest = fitter.get_blinded_poi()[idx]
-            xerr = fitter.cov[idx, idx] ** 0.5
+            xbest = fitter_asimov.get_blinded_poi()[idx]
+            xerr = fitter_asimov.cov[idx, idx] ** 0.5
 
             xbest = xbest.numpy()
             xerr = xerr.numpy()
 
+            # for observed limit
+            xobs = fitter.get_blinded_poi()[idx]
+            val, grad, hess = fitter.loss_val_grad_hess()
+            edmval, cov = edmval_cov(grad, hess)
+            fitter.cov.assign(cov)
+            xobs_err = fitter.cov[idx, idx] ** 0.5
+
             if not args.allowNegativePOI:
                 xerr = 2 * xerr * xbest**0.5
+                xobs_err = 2 * xobs_err * xobs**0.5
 
         logger.debug(f"Best fit {key} = {xbest} +/- {xerr}")
 
         # this is the denominator of q for likelihood based limits
-        nllvalreduced_asimov = fitter.reduced_nll().numpy()
+        nllvalreduced_asimov = fitter_asimov.reduced_nll().numpy()
 
         for j, cl_s in enumerate(args.cls):
             logger.info(f" -- AsymptoticLimits ( CLs={round(cl_s*100,1):4.1f}% ) -- ")
@@ -583,25 +609,17 @@ def do_asymptotic_limits(
                     pass
                 else:
                     # Likelihood approximation
-                    r = fitter.contour_scan(key, nllvalreduced_asimov, qmuA, signs=[1])[
-                        0
-                    ]
+                    r = fitter_asimov.contour_scan(
+                        key, nllvalreduced_asimov, qmuA, signs=[1]
+                    )[0]
                     logger.info(
                         f"Expected (Likelihood) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
                     )
                     limits_nll[i, j, k] = r
 
-            # Clone fitter to simultaneously minimize on asimov dataset
-            fitter_asimov = copy.deepcopy(fitter)
-
-            # unconditional fit to real data
-            logger.info(f" -- Compute observed -- ")
-            fitter.set_nobs(data_values)
-            fitter.minimize()
-
             # Gaussian approximation
             limits_obs[i, j] = asymptotic_limits.compute_gaussian_limit(
-                fitter, key, idx, xerr, cl_s
+                key, xobs, xobs_err, xerr, cl_s
             )
 
             # Likelihood approximation
