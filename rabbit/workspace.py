@@ -69,7 +69,7 @@ class Workspace:
         )
 
         self.parms = fitter.parms
-        self.npoi = fitter.npoi
+        self.npoi = fitter.poi_model.npoi
         self.noiidxs = fitter.indata.noiidxs
 
         self.extension = "hdf5"
