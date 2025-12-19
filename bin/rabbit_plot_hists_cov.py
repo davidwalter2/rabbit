@@ -152,6 +152,7 @@ def plot_matrix(
     suffix=None,
     ticklabels=None,
 ):
+    opts = dict()
 
     if not isinstance(matrix, np.ndarray):
         matrix = matrix.values()
@@ -163,10 +164,8 @@ def plot_matrix(
     if args.correlation:
         std_dev = np.sqrt(np.diag(matrix))
         matrix = matrix / np.outer(std_dev, std_dev)
+        opts.update(dict(vmin=-1, vmax=1))
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    opts = dict()
     if ticklabels is not None:
         opts.update(
             dict(
@@ -175,6 +174,7 @@ def plot_matrix(
             )
         )
 
+    fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(
         matrix,
         cmap=cmap,

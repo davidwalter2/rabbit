@@ -21,6 +21,26 @@ class POIModel:
         :return 2D tensor to be multiplied with [proc,bin] tensor
         """
 
+    def set_poi_default(self, expectSignal, allowNegativePOI=False):
+        """
+        Set default POI values, used by different POI models
+        """
+        poidefault = tf.ones([self.npoi], dtype=self.indata.dtype)
+        if expectSignal is not None:
+            indices = []
+            updates = []
+            for signal, value in expectSignal:
+                idx = self.pois.index(signal.encode())
+                indices.append([idx])
+                updates.append(float(value))
+
+            poidefault = tf.tensor_scatter_nd_update(poidefault, indices, updates)
+
+        if allowNegativePOI:
+            self.poidefault = poidefault
+        else:
+            self.poidefault = tf.sqrt(poidefault)
+
 
 class Ones(POIModel):
     """
@@ -46,7 +66,7 @@ class Mu(POIModel):
     multiply unconstrained parameter to signal processes, and ones otherwise
     """
 
-    def __init__(self, indata, expectSignal=1, allowNegativePOI=False, **kwargs):
+    def __init__(self, indata, expectSignal=None, allowNegativePOI=False, **kwargs):
         self.indata = indata
 
         self.npoi = self.indata.nsignals
@@ -59,11 +79,7 @@ class Mu(POIModel):
 
         self.is_linear = self.npoi == 0 or self.allowNegativePOI
 
-        poidefault = expectSignal * tf.ones([self.npoi], dtype=self.indata.dtype)
-        if self.allowNegativePOI:
-            self.xpoidefault = poidefault
-        else:
-            self.xpoidefault = tf.sqrt(poidefault)
+        self.set_poi_default(expectSignal, allowNegativePOI)
 
     def compute(self, poi):
         rnorm = tf.concat(
@@ -122,11 +138,7 @@ class MixtureModel(POIModel):
         self.allowNegativePOI = allowNegativePOI
         self.is_linear = False
 
-        poidefault = expectSignal * tf.ones([self.npoi], dtype=self.indata.dtype)
-        if self.allowNegativePOI:
-            self.xpoidefault = poidefault
-        else:
-            self.xpoidefault = tf.sqrt(poidefault)
+        self.set_poi_default(expectSignal, allowNegativePOI)
 
     def compute(self, poi):
 
