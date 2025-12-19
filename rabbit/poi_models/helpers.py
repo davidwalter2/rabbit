@@ -2,9 +2,9 @@ from rabbit import common
 
 # dictionary with class name and the corresponding filename where it is defined
 baseline_models = {
-    "POIModel": "poi_model",
+    "Ones": "poi_model",
     "Mu": "poi_model",
-    "BranchingRatio": "poi_model",
+    "MixtureModel": "poi_model",
 }
 
 
