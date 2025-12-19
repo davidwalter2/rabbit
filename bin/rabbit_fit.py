@@ -134,12 +134,14 @@ def make_parser():
         nargs="+",
         default=[],
         type=str,
-        help="Compute asymptotic upper limit based on CLs at specified parameters or (masked) channel",
+        help="Compute asymptotic upper limit based on CLs based on specified parameter, either on the parameter itself or on the (masked) channel via '--limitsOnChannel'",
     )
     parser.add_argument(
         "--limitsOnChannel",
-        action="store_true",
-        help="Interpret specified key in '--asymptoticLimits <key>' as (masked) channel",
+        nargs="+",
+        default=[],
+        type=str,
+        help="Compute asymptotic upper limit based on (masked) channel",
     )
     parser.add_argument(
         "--cls",
@@ -484,7 +486,7 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
 
 
 def do_asymptotic_limits(
-    args, fitter, ws, data_values, bkg_only_fit=False, on_channel=False
+    args, fitter, ws, data_values, bkg_only_fit=False, on_channel=[]
 ):
     if bkg_only_fit:
         logger.info("Perform background only fit")
@@ -535,13 +537,16 @@ def do_asymptotic_limits(
     limits_nll_obs = np.full(limits_obs_shape, np.nan)
     for i, key in enumerate(args.asymptoticLimits):
 
-        if on_channel:
-            if key not in fitter.indata.channel_info.keys():
-                raise ValueError(f"Can not find (masked) channel {key} to set limits")
+        if len(on_channel):
+            channel = on_channel[i]
+            if channel not in fitter_asimov.indata.channel_info.keys():
+                raise ValueError(
+                    f"Can not find (masked) channel {channel} to set limits"
+                )
 
-            logger.info(f"Get the limit on the masked channel {key}")
-            model = ph.instance_from_class("Select", fitter.indata, key)
-            fun = model.compute_flat
+            logger.info(f"Get the limit on the masked channel {channel}")
+            mapping = mh.load_mapping("Select", fitter_asimov.indata, channel)
+            fun = mapping.compute_flat
 
             exp, exp_var, _0, _1, _2 = fitter_asimov.expected_with_variance(
                 fun,
@@ -555,7 +560,7 @@ def do_asymptotic_limits(
             xerr = exp_var.numpy()[0] ** 0.5
 
             # for observed limit
-            exp, exp_var, _0, _1, _2 = fitter_asimov.expected_with_variance(
+            exp, exp_var, _0, _1, _2 = fitter.expected_with_variance(
                 fun,
                 profile=True,
                 compute_cov=False,
@@ -566,9 +571,9 @@ def do_asymptotic_limits(
             xobs = exp.numpy()[0]
             xobs_err = exp_var.numpy()[0] ** 0.5
         else:
-            if key not in fitter.indata.signals.astype(str):
+            if key not in fitter.poi_model.pois.astype(str):
                 raise RuntimeError(
-                    f"Can not compute asymptotic limits for parameter {key}, no such signal process found, signal processe are: {fitter.indata.signals.astype(str)}"
+                    f"Can not compute asymptotic limits for parameter {key}, no such signal process found, signal processe are: {fitter.poi_model.pois.astype(str)}"
                 )
             logger.info(f"Get the limit from the signal strength")
             idx = np.where(fitter.parms.astype(str) == key)[0][0]
@@ -610,7 +615,7 @@ def do_asymptotic_limits(
                 )
                 limits[i, j, k] = r
 
-                if on_channel:
+                if len(on_channel):
                     # TODO: implement for channels
                     pass
                 else:
@@ -629,7 +634,7 @@ def do_asymptotic_limits(
             )
 
             # Likelihood approximation
-            if on_channel:
+            if len(on_channel):
                 # TODO: implement for channels
                 pass
             else:
@@ -653,7 +658,7 @@ def do_asymptotic_limits(
         base_name="gaussian_asymptoticLimits_observed",
     )
 
-    if not on_channel:
+    if len(on_channel):
         # TODO: implement for channels
         ws.add_limits_hist(
             limits_nll,
@@ -867,8 +872,8 @@ def main():
     meta = {
         "meta_info": output_tools.make_meta_info_dict(args=args),
         "meta_info_input": ifitter.indata.metadata,
-        "signals": ifitter.indata.signals,
         "procs": ifitter.indata.procs,
+        "pois": ifitter.poi_model.pois,
         "nois": ifitter.parms[ifitter.poi_model.npoi :][indata.noiidxs],
     }
 

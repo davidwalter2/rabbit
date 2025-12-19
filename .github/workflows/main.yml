@@ -158,7 +158,7 @@ jobs:
 
       - name: make bsm tensor
         run: >-
-          python tests/make_tensor.py -o $RABBIT_OUTDIR/ --bsm --postfix bsm --skipMaskedChannels
+          python tests/make_tensor.py -o $RABBIT_OUTDIR/ --bsm --postfix bsm
 
       - name: make symmetric tensor
         run: >-
@@ -255,10 +255,15 @@ jobs:
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
 
-      - name: bsm fit
+      - name: bsm limits
         run: >-
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
-          -t 0 --unblind --expectSignal bsm1 0  --expectSignal bsm2 1 --allowNegativePOI --asymptoticLimits bsm1 --cls 0.05
+          -t 0 --unblind --expectSignal bsm1 0 --expectSignal bsm2 1 --allowNegativePOI --asymptoticLimits bsm1 --cls 0.05
+
+      - name: bsm limits on channel 
+        run: >-
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
+          -t 0 --unblind --physicsModel MixtureModel --expectSignal bsm1_sig_mixing 0 --asymptoticLimits bsm1_sig_mixing --limitsOnChannel bsm1_masked --cls 0.05
 
       - name: linearized solution
         run: >- 

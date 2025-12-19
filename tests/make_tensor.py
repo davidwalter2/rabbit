@@ -159,6 +159,10 @@ if args.bsm:
     h1_bsm1 = Histogram(ax_x, weighted=True)
     h1_bsm2 = Histogram(ax_x, weighted=True)
 
+    if not args.skipMaskedChannels:
+        ax_integral = Axis(1, -5, 5, axis_type="Regular", name="counts")
+        h1_bsm1_masked = Histogram(ax_integral, weighted=True)
+
 
 # for pseudodata
 h1_pseudo = Histogram(ax_x, weighted=True)
@@ -240,6 +244,9 @@ if args.bsm:
     x = get_bsm(200, -3, 0.1)
     fill(h1_bsm2, x)
 
+    if not args.skipMaskedChannels:
+        fill(h1_bsm1_masked, x)
+
 if not args.skipMaskedChannels:
     x, w_x = get_sig_masked(3)
     fill(h1_sig_masked, x, weight=w_x)
@@ -318,6 +325,10 @@ if not args.skipMaskedChannels:
     # add masked channel
     writer.add_channel(h1_sig_masked.axes, "ch0_masked", masked=True)
     writer.add_process(h1_sig_masked, "sig", "ch0_masked", signal=not args.bsm)
+
+    if args.bsm:
+        writer.add_channel(h1_bsm1_masked.axes, "bsm1_masked", masked=True)
+        writer.add_process(h1_bsm1_masked, "bsm1", "bsm1_masked", signal=True)
 
 # systematic uncertainties
 

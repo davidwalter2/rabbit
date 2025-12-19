@@ -323,7 +323,6 @@ class Fitter:
         self.update_frozen_params()
 
     def init_blinding_values(self, unblind_parameter_expressions=[]):
-
         unblind_parameters = match_regexp_params(
             unblind_parameter_expressions,
             [
@@ -1286,7 +1285,9 @@ class Fitter:
         poi = self.get_blinded_poi()
         theta = self.get_blinded_theta()
 
-        poi = tf.where(self.frozen_params_mask[: self.npoi], tf.stop_gradient(poi), poi)
+        poi = tf.where(
+            self.frozen_params_mask[: self.poi_model.npoi], tf.stop_gradient(poi), poi
+        )
         theta = tf.where(
             self.frozen_params_mask[self.poi_model.npoi :],
             tf.stop_gradient(theta),
@@ -1338,7 +1339,7 @@ class Fitter:
             elif self.indata.systematic_type == "normal":
                 normcentral = tf.sparse.to_dense(snormnorm_sparse)
 
-            nexpcentral = tf.sparse.reduce_sum(snormnorm_sparse, axis=-1)
+            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull

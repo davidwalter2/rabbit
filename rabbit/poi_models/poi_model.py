@@ -10,7 +10,7 @@ class POIModel:
         # a POI model must set these attribues
         # self.npoi = # number of parameters of interest (POIs)
         # self.pois = # list of names for the POIs
-        # self.poidefault = # default values for the POIs
+        # self.xpoidefault = # default values for the POIs
         # self.is_linear = # define if the model is linear in the POIs
         # self.allowNegativePOI = # define if the POI can be negative or not
 
@@ -30,16 +30,21 @@ class POIModel:
             indices = []
             updates = []
             for signal, value in expectSignal:
-                idx = self.pois.index(signal.encode())
+                if signal.encode() not in self.pois:
+                    raise ValueError(
+                        f"{signal.encode()} not in list of POIs: {self.pois}"
+                    )
+                idx = np.where(np.isin(self.pois, signal.encode()))[0][0]
+
                 indices.append([idx])
                 updates.append(float(value))
 
             poidefault = tf.tensor_scatter_nd_update(poidefault, indices, updates)
 
         if allowNegativePOI:
-            self.poidefault = poidefault
+            self.xpoidefault = poidefault
         else:
-            self.poidefault = tf.sqrt(poidefault)
+            self.xpoidefault = tf.sqrt(poidefault)
 
 
 class Ones(POIModel):
@@ -50,7 +55,7 @@ class Ones(POIModel):
     def __init__(self, indata, **kwargs):
         self.indata = indata
         self.npoi = 0
-        self.pois = []
+        self.pois = np.array([])
         self.poidefault = tf.zeros([], dtype=self.indata.dtype)
 
         self.allowNegativePOI = False
@@ -71,9 +76,7 @@ class Mu(POIModel):
 
         self.npoi = self.indata.nsignals
 
-        self.pois = []
-        for signal in self.indata.signals:
-            self.pois.append(signal)
+        self.pois = np.array([s for s in self.indata.signals])
 
         self.allowNegativePOI = allowNegativePOI
 
@@ -101,8 +104,8 @@ class MixtureModel(POIModel):
     def __init__(
         self,
         indata,
-        primary_processes="sig",
-        complementary_processes="bkg",
+        primary_processes="bsm1",
+        complementary_processes="sig",
         expectSignal=0,
         allowNegativePOI=False,
         **kwargs,
@@ -123,6 +126,16 @@ class MixtureModel(POIModel):
                 f"Length of pimary and complementary processes has to be the same, but got {len(primary_processes)} and {len(complementary_processes)}"
             )
 
+        if any(n not in self.indata.procs for n in primary_processes):
+            not_found = [n for n in primary_processes if n not in self.indata.procs]
+            raise ValueError(f"{not_found} not found in processes {self.indata.procs}")
+
+        if any(n not in self.indata.procs for n in complementary_processes):
+            not_found = [
+                n for n in complementary_processes if n not in self.indata.procs
+            ]
+            raise ValueError(f"{not_found} not found in processes {self.indata.procs}")
+
         self.primary_idxs = np.where(np.isin(self.indata.procs, primary_processes))[0]
         self.complementary_idxs = np.where(
             np.isin(self.indata.procs, complementary_processes)
@@ -130,10 +143,14 @@ class MixtureModel(POIModel):
         self.all_idx = np.concatenate([self.primary_idxs, self.complementary_idxs])
 
         self.npoi = len(primary_processes)
-        self.pois = [
-            f"{p}_{c}_mixing"
-            for p, c in zip(primary_processes, complementary_processes)
-        ]
+        self.pois = np.array(
+            [
+                f"{p}_{c}_mixing".encode()
+                for p, c in zip(
+                    primary_processes.astype(str), complementary_processes.astype(str)
+                )
+            ]
+        )
 
         self.allowNegativePOI = allowNegativePOI
         self.is_linear = False
@@ -142,19 +159,15 @@ class MixtureModel(POIModel):
 
     def compute(self, poi):
 
-        all_updates = tf.concat(
-            [
-                tf.fill([len(self.primary_idxs)], poi),
-                tf.fill([len(self.complementary_idxs)], 1 - poi),
-            ],
-            axis=0,
-        )
+        ones = tf.ones(self.npoi, dtype=self.indata.dtype)
+
+        updates = tf.concat([ones * poi, ones * (1 - poi)], axis=0)
 
         # Single scatter update
         rnorm = tf.tensor_scatter_nd_update(
             tf.ones(self.indata.nproc, dtype=self.indata.dtype),
             self.all_idx[:, None],
-            all_updates,
+            updates,
         )
 
         rnorm = tf.reshape(rnorm, [1, -1])
