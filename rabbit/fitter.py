@@ -1227,8 +1227,7 @@ class Fitter:
 
         return expvars
 
-    def _compute_yields_noBBB(self, compute_norm=False, full=True):
-        # compute_norm: compute yields for each process, otherwise inclusive
+    def _compute_yields_noBBB(self, full=True):
         # full: compute yields inclduing masked channels
         poi = self.get_blinded_poi()
         theta = self.get_blinded_theta()
@@ -1240,9 +1239,6 @@ class Fitter:
         )
 
         rnorm = self.poi_model.compute(poi)
-
-        mrnorm = tf.expand_dims(rnorm, -1)
-        ernorm = tf.reshape(rnorm, [1, -1])
 
         normcentral = None
         if self.indata.symmetric_tensor:
@@ -1271,7 +1267,7 @@ class Fitter:
                     snorm * self.indata.norm.values
                 )
             elif self.indata.systematic_type == "normal":
-                snormnorm_sparse = self.indata.norm * ernorm
+                snormnorm_sparse = self.indata.norm * rnorm
                 snormnorm_sparse = snormnorm_sparse.with_values(
                     snormnorm_sparse.values + logsnorm
                 )
@@ -1282,15 +1278,12 @@ class Fitter:
                 )
 
             if self.indata.systematic_type == "log_normal":
-                nexpcentral = tf.sparse.sparse_dense_matmul(snormnorm_sparse, mrnorm)
-                nexpcentral = tf.squeeze(nexpcentral, -1)
-                if compute_norm:
-                    snormnorm = tf.sparse.to_dense(snormnorm_sparse)
-                    normcentral = ernorm * snormnorm
+                snormnorm = tf.sparse.to_dense(snormnorm_sparse)
+                normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
-                if compute_norm:
-                    normcentral = tf.sparse.to_dense(snormnorm_sparse)
-                nexpcentral = tf.sparse.reduce_sum(snormnorm_sparse, axis=-1)
+                normcentral = tf.sparse.to_dense(snormnorm_sparse)
+
+            nexpcentral = tf.sparse.reduce_sum(snormnorm_sparse, axis=-1)
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull
@@ -1318,21 +1311,16 @@ class Fitter:
             if self.indata.systematic_type == "log_normal":
                 snorm = tf.exp(logsnorm)
                 snormnorm = snorm * norm
-
-                nexpcentral = tf.matmul(snormnorm, mrnorm)
-                nexpcentral = tf.squeeze(nexpcentral, -1)
-                if compute_norm:
-                    normcentral = ernorm * snormnorm
+                normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
-                normcentral = norm * ernorm + logsnorm
-                nexpcentral = tf.reduce_sum(normcentral, axis=-1)
+                normcentral = norm * rnorm + logsnorm
+
+            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
 
         return nexpcentral, normcentral
 
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
-        nexp, norm = self._compute_yields_noBBB(
-            compute_norm or self.binByBinStatMode == "full", full=full
-        )
+        nexp, norm = self._compute_yields_noBBB(full=full)
 
         if self.binByBinStat:
             if profile:
