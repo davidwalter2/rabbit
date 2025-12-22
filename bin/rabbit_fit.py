@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 
-import copy
-
 import tensorflow as tf
 
 tf.config.experimental.enable_op_determinism()
 
-import argparse
 import time
 
 import numpy as np
-from scipy.stats import chi2, norm
+from scipy.stats import chi2
 
-from rabbit import asymptotic_limits, fitter, inputdata, workspace
+from rabbit import fitter, inputdata, parsing, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
 from rabbit.poi_models import helpers as ph
@@ -23,132 +20,12 @@ from wums import output_tools, logging  # isort: skip
 logger = None
 
 
-class OptionalListAction(argparse.Action):
-    def __call__(self, parser, namespace, values, option_string=None):
-        if len(values) == 0:
-            setattr(namespace, self.dest, [".*"])
-        else:
-            setattr(namespace, self.dest, values)
-
-
 def make_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "--eager",
-        action="store_true",
-        default=False,
-        help="Run tensorflow in eager mode (for debugging)",
-    )
-    parser.add_argument(
-        "--diagnostics",
-        action="store_true",
-        help="Calculate and print additional info for diagnostics (condition number, edm value)",
-    )
+    parser = parsing.common_parser()
     parser.add_argument(
         "--fullNll",
         action="store_true",
         help="Calculate and store full value of -log(L)",
-    )
-    parser.add_argument("filename", help="filename of the main hdf5 input")
-    parser.add_argument("-o", "--output", default="./", help="output directory")
-    parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
-    parser.add_argument(
-        "--postfix",
-        default=None,
-        type=str,
-        help="Postfix to append on output file name",
-    )
-    parser.add_argument(
-        "--minimizerMethod",
-        default="trust-krylov",
-        type=str,
-        choices=["trust-krylov", "trust-exact"],
-        help="Mnimizer method used in scipy.optimize.minimize for the nominal fit minimization",
-    )
-    parser.add_argument(
-        "-t",
-        "--toys",
-        default=[-1],
-        type=int,
-        nargs="+",
-        help="run a given number of toys, 0 fits the data, and -1 fits the asimov toy (the default)",
-    )
-    parser.add_argument(
-        "--toysSystRandomize",
-        default="frequentist",
-        choices=["frequentist", "bayesian", "none"],
-        help="""
-        Type of randomization for systematic uncertainties (including binByBinStat if present).  
-        Options are 'frequentist' which randomizes the contraint minima a.k.a global observables 
-        and 'bayesian' which randomizes the actual nuisance parameters used in the pseudodata generation
-        """,
-    )
-    parser.add_argument(
-        "--toysDataRandomize",
-        default="poisson",
-        choices=["poisson", "normal", "none"],
-        help="Type of randomization for pseudodata.  Options are 'poisson',  'normal', and 'none'",
-    )
-    parser.add_argument(
-        "--toysDataMode",
-        default="expected",
-        choices=["expected", "observed"],
-        help="central value for pseudodata used in the toys",
-    )
-    parser.add_argument(
-        "--toysRandomizeParameters",
-        default=False,
-        action="store_true",
-        help="randomize the parameter starting values for toys",
-    )
-    parser.add_argument(
-        "--seed", default=123456789, type=int, help="random seed for toys"
-    )
-    parser.add_argument(
-        "--expectSignal",
-        default=None,
-        nargs=2,
-        action="append",
-        help="Specify tuple with signal name and rate multiplier for signal expectation (used for fit starting values and for toys). E.g. '--expectSignal BSM 0.0 --expectSignal SM 1.0'",
-    )
-    parser.add_argument("--POIMode", default="mu", help="mode for POI's")
-    parser.add_argument(
-        "--allowNegativePOI",
-        default=False,
-        action="store_true",
-        help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
-    )
-    parser.add_argument(
-        "--asymptoticLimits",
-        nargs="+",
-        default=[],
-        type=str,
-        help="Compute asymptotic upper limit based on CLs based on specified parameter, either on the parameter itself or on the (masked) channel via '--limitsOnChannel'",
-    )
-    parser.add_argument(
-        "--limitsOnChannel",
-        nargs="+",
-        default=[],
-        type=str,
-        help="Compute asymptotic upper limit based on (masked) channel",
-    )
-    parser.add_argument(
-        "--cls",
-        nargs="+",
-        default=[0.05],
-        type=float,
-        help="Confidence level for asymptotic upper limit, multiple are possible",
     )
     parser.add_argument(
         "--contourScan",
@@ -212,12 +89,6 @@ def make_parser():
         help="Only compute prefit outputs",
     )
     parser.add_argument(
-        "--noHessian",
-        default=False,
-        action="store_true",
-        help="Don't compute the hessian of parameters",
-    )
-    parser.add_argument(
         "--saveHists",
         default=False,
         action="store_true",
@@ -266,24 +137,6 @@ def make_parser():
         help="Do not compute chi2 on prefit/postfit histograms",
     )
     parser.add_argument(
-        "--noBinByBinStat",
-        default=False,
-        action="store_true",
-        help="Don't add bin-by-bin statistical uncertainties on templates (by default adding sumW2 on variance)",
-    )
-    parser.add_argument(
-        "--binByBinStatType",
-        default="automatic",
-        choices=["automatic", *fitter.Fitter.valid_bin_by_bin_stat_types],
-        help="probability density for bin-by-bin statistical uncertainties, ('automatic' is 'gamma' except for data covariance where it is 'normal')",
-    )
-    parser.add_argument(
-        "--binByBinStatMode",
-        default="lite",
-        choices=["lite", "full"],
-        help="Barlow-Beeston mode bin-by-bin statistical uncertainties",
-    )
-    parser.add_argument(
         "--externalPostfit",
         default=None,
         type=str,
@@ -294,37 +147,6 @@ def make_parser():
         default=None,
         type=str,
         help="Specify result from external postfit file",
-    )
-    parser.add_argument(
-        "--pseudoData",
-        default=None,
-        type=str,
-        nargs="*",
-        help="run fit on pseudo data with the given name",
-    )
-    parser.add_argument(
-        "--physicsModel",
-        default="Mu",
-        help="Specify physics model to be used to introduce non standard parameterization",
-    )
-    parser.add_argument(
-        "-m",
-        "--mapping",
-        nargs="+",
-        action="append",
-        default=[],
-        help="""
-        perform mappings on observables or parameters for the prefit and postfit histograms, 
-        specifying the mapping defined in rabbit/mappings/ followed by arguments passed in the mapping __init__, 
-        e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.  
-        This argument can be called multiple times.
-        Custom mappings can be specified with the full path to the custom mapping e.g. '-m custom_mappings.MyCustomMapping'.
-        """,
-    )
-    parser.add_argument(
-        "--compositeMapping",
-        action="store_true",
-        help="Make a composite mapping and compute the covariance matrix across all mappings.",
     )
     parser.add_argument(
         "--doImpacts",
@@ -352,44 +174,6 @@ def make_parser():
         default=False,
         action="store_true",
         help="compute impacts of frozen (non-profiled) systematics",
-    )
-    parser.add_argument(
-        "--chisqFit",
-        default=False,
-        action="store_true",
-        help="Perform diagonal chi-square fit instead of poisson likelihood fit",
-    )
-    parser.add_argument(
-        "--covarianceFit",
-        default=False,
-        action="store_true",
-        help="Perform chi-square fit using covariance matrix for the observations",
-    )
-    parser.add_argument(
-        "--prefitUnconstrainedNuisanceUncertainty",
-        default=0.0,
-        type=float,
-        help="Assumed prefit uncertainty for unconstrained nuisances",
-    )
-    parser.add_argument(
-        "--unblind",
-        type=str,
-        default=[],
-        nargs="*",
-        action=OptionalListAction,
-        help="""
-        Specify list of regex to unblind matching parameters of interest. 
-        E.g. use '--unblind ^signal$' to unblind a parameter named signal or '--unblind' to unblind all.
-        """,
-    )
-    parser.add_argument(
-        "--freezeParameters",
-        type=str,
-        default=[],
-        nargs="+",
-        help="""
-        Specify list of regex to freeze matching parameters of interest. 
-        """,
     )
 
     return parser.parse_args()
@@ -483,198 +267,6 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
 
             if prefit:
                 fitter.cov.assign(tf.constant(cov_prefit))
-
-
-def do_asymptotic_limits(
-    args, fitter, ws, data_values, bkg_only_fit=False, on_channel=[]
-):
-    if bkg_only_fit:
-        logger.info("Perform background only fit")
-        # set process to zero and freeze
-        fitter.freeze_params(args.asymptoticLimits)
-
-        fitter.minimize()
-
-        # set asimov from background only fit
-        fitter.set_nobs(fitter.expected_yield())
-
-        # defreeze process again to evaluate it's dependencies
-        fitter.defreeze_params(args.asymptoticLimits)
-
-    if not args.noHessian:
-        # compute the covariance matrix and estimated distance to minimum
-
-        val, grad, hess = fitter.loss_val_grad_hess()
-        edmval, cov = edmval_cov(grad, hess)
-
-        logger.info(f"edmval: {edmval}")
-
-        fitter.cov.assign(cov)
-
-        del cov
-
-    # Clone fitter to simultaneously minimize on asimov dataset
-    fitter_asimov = copy.deepcopy(fitter)
-
-    # unconditional fit to real data
-    fitter.set_nobs(data_values)
-    fitter.minimize()
-
-    # asymptotic limits (CLs)
-    #  see:
-    #  - combine tutorial https://indico.cern.ch/event/976099/contributions/4138520/
-    #  - paper: https://arxiv.org/abs/1007.1727
-
-    clb_list = np.array([0.025, 0.16, 0.5, 0.84, 0.975])
-
-    # axes for output histogram: params, cls, clb
-    limits_shape = [len(args.asymptoticLimits), len(args.cls), len(clb_list)]
-    limits_obs_shape = [len(args.asymptoticLimits), len(args.cls)]
-
-    limits = np.full(limits_shape, np.nan)
-    limits_obs = np.full(limits_obs_shape, np.nan)
-    limits_nll = np.full(limits_shape, np.nan)
-    limits_nll_obs = np.full(limits_obs_shape, np.nan)
-    for i, key in enumerate(args.asymptoticLimits):
-
-        if len(on_channel):
-            channel = on_channel[i]
-            if channel not in fitter_asimov.indata.channel_info.keys():
-                raise ValueError(
-                    f"Can not find (masked) channel {channel} to set limits"
-                )
-
-            logger.info(f"Get the limit on the masked channel {channel}")
-            mapping = mh.load_mapping("Select", fitter_asimov.indata, channel)
-            fun = mapping.compute_flat
-
-            exp, exp_var, _0, _1, _2 = fitter_asimov.expected_with_variance(
-                fun,
-                profile=True,
-                compute_cov=False,
-                compute_global_impacts=False,
-                need_observables=True,
-                inclusive=True,
-            )
-            xbest = exp.numpy()[0]
-            xerr = exp_var.numpy()[0] ** 0.5
-
-            # for observed limit
-            exp, exp_var, _0, _1, _2 = fitter.expected_with_variance(
-                fun,
-                profile=True,
-                compute_cov=False,
-                compute_global_impacts=False,
-                need_observables=True,
-                inclusive=True,
-            )
-            xobs = exp.numpy()[0]
-            xobs_err = exp_var.numpy()[0] ** 0.5
-        else:
-            if key not in fitter.poi_model.pois.astype(str):
-                raise RuntimeError(
-                    f"Can not compute asymptotic limits for parameter {key}, no such signal process found, signal processe are: {fitter.poi_model.pois.astype(str)}"
-                )
-            logger.info(f"Get the limit from the signal strength")
-            idx = np.where(fitter.parms.astype(str) == key)[0][0]
-            xbest = fitter_asimov.get_blinded_poi()[idx]
-            xerr = fitter_asimov.cov[idx, idx] ** 0.5
-
-            xbest = xbest.numpy()
-            xerr = xerr.numpy()
-
-            # for observed limit
-            xobs = fitter.get_blinded_poi()[idx]
-            val, grad, hess = fitter.loss_val_grad_hess()
-            edmval, cov = edmval_cov(grad, hess)
-            fitter.cov.assign(cov)
-            xobs_err = fitter.cov[idx, idx] ** 0.5
-
-            if not args.allowNegativePOI:
-                xerr = 2 * xerr * xbest**0.5
-                xobs_err = 2 * xobs_err * xobs**0.5
-
-        logger.debug(f"Best fit {key} = {xbest} +/- {xerr}")
-
-        # this is the denominator of q for likelihood based limits
-        nllvalreduced_asimov = fitter_asimov.reduced_nll().numpy()
-
-        for j, cl_s in enumerate(args.cls):
-            logger.info(f" -- AsymptoticLimits ( CLs={round(cl_s*100,1):4.1f}% ) -- ")
-
-            # now we need to find the values for mu where q_{mu,A} = -2ln(L)
-            for k, cl_b in enumerate(clb_list):
-                cl_sb = cl_s * cl_b
-                qmuA = (norm.ppf(cl_b) - norm.ppf(cl_sb)) ** 2
-                logger.debug(f"Find r with q_(r,A)=-2ln(L)/ln(L0) = {qmuA}")
-
-                # Gaussian approximation
-                r = xbest + xerr * qmuA**0.5
-                logger.info(
-                    f"Expected (Gaussian) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
-                )
-                limits[i, j, k] = r
-
-                if len(on_channel):
-                    # TODO: implement for channels
-                    pass
-                else:
-                    # Likelihood approximation
-                    r = fitter_asimov.contour_scan(
-                        key, nllvalreduced_asimov, qmuA, signs=[1]
-                    )[0]
-                    logger.info(
-                        f"Expected (Likelihood) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
-                    )
-                    limits_nll[i, j, k] = r
-
-            # Gaussian approximation
-            limits_obs[i, j] = asymptotic_limits.compute_gaussian_limit(
-                key, xobs, xobs_err, xerr, cl_s
-            )
-
-            # Likelihood approximation
-            if len(on_channel):
-                # TODO: implement for channels
-                pass
-            else:
-                # TODO: make it work
-                # nllvalreduced = fitter.reduced_nll().numpy()
-                # limits_nll_obs[i, j] = asymptotic_limits.compute_likelihood_limit(fitter, fitter_asimov, nllvalreduced, nllvalreduced_asimov, key, cl_s)
-                pass
-
-    ws.add_limits_hist(
-        limits,
-        args.asymptoticLimits,
-        args.cls,
-        clb_list,
-        base_name="gaussian_asymptoticLimits_expected",
-    )
-
-    ws.add_limits_hist(
-        limits_obs,
-        args.asymptoticLimits,
-        args.cls,
-        base_name="gaussian_asymptoticLimits_observed",
-    )
-
-    if len(on_channel):
-        # TODO: implement for channels
-        ws.add_limits_hist(
-            limits_nll,
-            args.asymptoticLimits,
-            args.cls,
-            clb_list,
-            base_name="likelihood_asymptoticLimits_expected",
-        )
-
-        # TODO: make it work
-        # ws.add_limits_hist(
-        #     limits_nll_obs,
-        #     args.asymptoticLimits,
-        #     args.cls,
-        #     base_name="likelihood_asymptoticLimits_observed",
-        # )
 
 
 def fit(args, fitter, ws, dofit=True):
@@ -849,7 +441,13 @@ def main():
 
     poi_model = ph.load_model(args.physicsModel, indata, **vars(args))
 
-    ifitter = fitter.Fitter(indata, poi_model, args, do_blinding=any(blinded_fits))
+    ifitter = fitter.Fitter(
+        indata,
+        poi_model,
+        args,
+        do_blinding=any(blinded_fits),
+        globalImpactsFromJVP=not args.globalImpactsDisableJVP,
+    )
 
     # mappings for observables and parameters
     if len(args.mapping) == 0 and args.saveHists:
@@ -941,45 +539,27 @@ def main():
                     hist_name="parms_prefit",
                 )
 
-                if args.asymptoticLimits:
-                    prefit_time.append(time.time())
+                if args.saveHists:
+                    save_observed_hists(args, mappings, ifitter, ws)
+                    save_hists(args, mappings, ifitter, ws, prefit=True)
+                prefit_time.append(time.time())
 
-                    observations = (
-                        data_values if ifit >= 0 else ifitter.expected_yield()
-                    )
-
-                    do_asymptotic_limits(
-                        args,
-                        ifitter,
-                        ws,
-                        data_values=observations,
-                        bkg_only_fit=ifit >= 0,
-                        on_channel=args.limitsOnChannel,
-                    )
+                if not args.prefitOnly:
+                    ifitter.set_blinding_offsets(blind=blinded_fits[i])
+                    fit(args, ifitter, ws, dofit=ifit >= 0)
                     fit_time.append(time.time())
 
-                else:
                     if args.saveHists:
-                        save_observed_hists(args, mappings, ifitter, ws)
-                        save_hists(args, mappings, ifitter, ws, prefit=True)
-                    prefit_time.append(time.time())
-
-                    if not args.prefitOnly:
-                        ifitter.set_blinding_offsets(blind=blinded_fits[i])
-                        fit(args, ifitter, ws, dofit=ifit >= 0)
-                        fit_time.append(time.time())
-
-                        if args.saveHists:
-                            save_hists(
-                                args,
-                                mappings,
-                                ifitter,
-                                ws,
-                                prefit=False,
-                                profile=args.externalPostfit is None,
-                            )
-                    else:
-                        fit_time.append(time.time())
+                        save_hists(
+                            args,
+                            mappings,
+                            ifitter,
+                            ws,
+                            prefit=False,
+                            profile=args.externalPostfit is None,
+                        )
+                else:
+                    fit_time.append(time.time())
 
                 ws.dump_and_flush("_".join(group))
                 postfit_time.append(time.time())

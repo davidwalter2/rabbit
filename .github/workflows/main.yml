@@ -257,13 +257,13 @@ jobs:
 
       - name: bsm limits
         run: >-
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
+          rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
           -t 0 --unblind --expectSignal bsm1 0 --expectSignal bsm2 1 --allowNegativePOI --asymptoticLimits bsm1 --cls 0.05
 
       - name: bsm limits on channel 
         run: >-
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
-          -t 0 --unblind --physicsModel MixtureModel --expectSignal bsm1_sig_mixing 0 --asymptoticLimits bsm1_sig_mixing --limitsOnChannel bsm1_masked --cls 0.05
+          rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
+          -t 0 --unblind --physicsModel MixtureModel --expectSignal bsm1_sig_mixing 0 --asymptoticLimits bsm1_sig_mixing --limitsOnChannel bsm1_masked --cls 0.05 --allowNegativePOI
 
       - name: linearized solution
         run: >- 

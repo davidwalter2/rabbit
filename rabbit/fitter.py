@@ -48,10 +48,12 @@ class Fitter:
     valid_bin_by_bin_stat_types = ["gamma", "normal-additive", "normal-multiplicative"]
     valid_systematic_types = ["log_normal", "normal"]
 
-    def __init__(self, indata, poi_model, options, do_blinding=False):
+    def __init__(
+        self, indata, poi_model, options, globalImpactsFromJVP=True, do_blinding=False
+    ):
         self.indata = indata
 
-        self.globalImpactsFromJVP = not options.globalImpactsDisableJVP
+        self.globalImpactsFromJVP = globalImpactsFromJVP
         self.binByBinStat = not options.noBinByBinStat
         self.binByBinStatMode = options.binByBinStatMode
 
