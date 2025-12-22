@@ -4,13 +4,12 @@ from rabbit import common
 baseline_models = {
     "Ones": "poi_model",
     "Mu": "poi_model",
-    "MixtureModel": "poi_model",
+    "Mixture": "poi_model",
 }
 
 
-def load_model(class_name, indata, **kwargs):
-    model_class = common.load_class_from_module(
+def load_model(class_name, indata, *args, **kwargs):
+    model = common.load_class_from_module(
         class_name, baseline_models, base_dir="rabbit.poi_models"
     )
-    model_instance = model_class(indata, **kwargs)
-    return model_instance
+    return model.parse_args(indata, *args, **kwargs)

@@ -1283,7 +1283,7 @@ class Fitter:
             elif self.indata.systematic_type == "normal":
                 normcentral = tf.sparse.to_dense(snormnorm_sparse)
 
-            nexpcentral = tf.sparse.reduce_sum(snormnorm_sparse, axis=-1)
+            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull

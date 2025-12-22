@@ -116,11 +116,14 @@ def make_parser():
     )
     parser.add_argument(
         "--expectSignal",
-        default=1.0,
-        type=float,
-        help="rate multiplier for signal expectation (used for fit starting values and for toys)",
+        default=None,
+        nargs=2,
+        action="append",
+        help="""
+        Specify tuple with key and value to be passed to POI model (used for fit starting values and for toys). 
+        E.g. '--expectSignal BSM 0.0 --expectSignal SM 1.0'
+        """,
     )
-    parser.add_argument("--POIMode", default="mu", help="mode for POI's")
     parser.add_argument(
         "--allowNegativePOI",
         default=False,
@@ -282,9 +285,10 @@ def make_parser():
         help="run fit on pseudo data with the given name",
     )
     parser.add_argument(
-        "--physicsModel",
-        default="Mu",
-        help="Specify physics model to be used to introduce non standard parameterization",
+        "--poiModel",
+        default=["Mu"],
+        nargs="+",
+        help="Specify POI model to be used to introduce non standard parameterization",
     )
     parser.add_argument(
         "-m",
@@ -660,7 +664,8 @@ def main():
 
     indata = inputdata.FitInputData(args.filename, args.pseudoData)
 
-    poi_model = ph.load_model(args.physicsModel, indata, **vars(args))
+    margs = args.poiModel
+    poi_model = ph.load_model(margs[0], indata, *margs[1:], **vars(args))
 
     ifitter = fitter.Fitter(indata, poi_model, args, do_blinding=any(blinded_fits))
 
@@ -685,7 +690,7 @@ def main():
     meta = {
         "meta_info": output_tools.make_meta_info_dict(args=args),
         "meta_info_input": ifitter.indata.metadata,
-        "signals": ifitter.indata.signals,
+        "pois": ifitter.poi_model.pois,
         "procs": ifitter.indata.procs,
         "nois": ifitter.parms[ifitter.poi_model.npoi :][indata.noiidxs],
     }
