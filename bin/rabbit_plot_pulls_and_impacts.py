@@ -708,11 +708,11 @@ def parseArgs():
     )
     parser.add_argument(
         "-m",
-        "--physicsModel",
+        "--mapping",
         default=None,
         type=str,
         nargs="+",
-        help="Print impacts on observables use '-m <model> channel axes' for physics model results.",
+        help="Print impacts on observables use '-m <mapping> channel axes' for mapping results.",
     )
     parser.add_argument(
         "-r",
@@ -1266,7 +1266,7 @@ def main():
         if args.grouping is not None:
             grouping = getattr(config, "nuisance_grouping", {}).get(args.grouping, None)
 
-        if args.physicsModel is not None:
+        if args.mapping is not None:
             if args.asymImpacts:
                 raise NotImplementedError(
                     "Asymetric impacts on observables is not yet implemented"
@@ -1276,16 +1276,14 @@ def main():
                     "Only global impacts on observables is implemented (use --globalImpacts)"
                 )
 
-            model_key = " ".join(args.physicsModel)
-            if model_key in fitresult["physics_models"].keys():
-                channels = fitresult["physics_models"][model_key]["channels"]
+            mapping_key = " ".join(args.mapping)
+            results = fitresult.get("mappings", fitresult.get("physics_models"))
+
+            if mapping_key in results.keys():
+                channels = results[mapping_key]["channels"]
             else:
-                keys = [
-                    key
-                    for key in fitresult["physics_models"].keys()
-                    if key.startswith(model_key)
-                ]
-                channels = fitresult["physics_models"][keys[0]]["channels"]
+                keys = [key for key in results.keys() if key.startswith(mapping_key)]
+                channels = results[keys[0]]["channels"]
 
             for channel, hists in channels.items():
 
@@ -1306,9 +1304,10 @@ def main():
                     # hist_total_ref
 
                     if fitresult_ref is not None:
-                        hists_ref = fitresult_ref["physics_models"][model_key][
-                            "channels"
-                        ][channel]
+                        results_ref = fitresult_ref.get(
+                            "mappings", fitresult_ref.get("physics_models")
+                        )
+                        hists_ref = results_ref[mapping_key]["channels"][channel]
                         hist_ref = hists_ref[key].get()
                         hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
 

@@ -9,9 +9,9 @@ from wums import boostHistHelpers as hh
 from rabbit import tfhelpers
 
 # dictionary with class name and the corresponding filename where it is defined
-baseline_models = {
-    "Basemodel": "physicsmodel",
-    "Select": "physicsmodel",
+baseline_mappings = {
+    "BaseMapping": "mapping",
+    "Select": "mapping",
     "Project": "project",
     "Normalize": "project",
     "Ratio": "ratio",
@@ -29,23 +29,23 @@ def instance_from_class(class_name, *args, **kwargs):
         module_name = ".".join(parts[:-1])
         class_name = parts[-1]
     else:
-        # import one of the baseline models
-        if class_name not in baseline_models:
+        # import one of the baseline mappings
+        if class_name not in baseline_mappings:
             raise ValueError(
-                f"Model {class_name} not found, available baseline models are {baseline_models.keys()}"
+                f"Mapping {class_name} not found, available baseline mappings are {baseline_mappings.keys()}"
             )
-        module_name = f"rabbit.physicsmodels.{baseline_models[class_name]}"
+        module_name = f"rabbit.mappings.{baseline_mappings[class_name]}"
 
     # Try to import the module
     module = importlib.import_module(module_name)
 
-    model = getattr(module, class_name, None)
-    if model is None:
+    mapping = getattr(module, class_name, None)
+    if mapping is None:
         raise AttributeError(
             f"Class '{class_name}' not found in module '{module_name}'."
         )
 
-    return model.parse_args(*args, **kwargs)
+    return mapping.parse_args(*args, **kwargs)
 
 
 def parse_axis_selection(selection_str):

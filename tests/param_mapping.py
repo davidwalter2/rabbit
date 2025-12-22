@@ -1,12 +1,12 @@
 import hist
 import tensorflow as tf
 
-from rabbit.physicsmodels.physicsmodel import PhysicsModel
+from rabbit.mappings.mapping import Mapping
 
 
-class Param(PhysicsModel):
+class Param(Mapping):
     """
-    Custom physics model to transform fit parameters using f(x) = scale*x + offset
+    Custom mapping of fit parameters using f(x) = scale*x + offset
 
     Parameters
     ----------

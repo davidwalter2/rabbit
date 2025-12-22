@@ -152,13 +152,13 @@ def parseArgs():
     )
     parser.add_argument(
         "-m",
-        "--physicsModel",
+        "--mapping",
         nargs="+",
         action="append",
         default=[],
         help="""
-        Make plot of physics model prefit and postfit histograms. Loop over all by deault. 
-        Can also specify the model name, followed by the arguments, e.g. "-m Project ch0 eta pt". 
+        Make plot of mapping prefit and postfit histograms. Loop over all by deault. 
+        Can also specify the mapping name, followed by the arguments, e.g. "-m Project ch0 eta pt". 
         This argument can be called multiple times.
         """,
     )
@@ -525,15 +525,15 @@ def main():
         meta=meta,
     )
 
-    results = fitresult["physics_models"]
-    for margs in args.physicsModel:
+    results = fitresult.get("mappings", fitresult.get("physics_models"))
+    for margs in args.mapping:
         if margs == []:
             instance_keys = results.keys()
         else:
-            model_key = " ".join(margs)
-            instance_keys = [k for k in results.keys() if k.startswith(model_key)]
+            mapping_key = " ".join(margs)
+            instance_keys = [k for k in results.keys() if k.startswith(mapping_key)]
             if len(instance_keys) == 0:
-                raise ValueError(f"No model found under {model_key}")
+                raise ValueError(f"No mapping found under {mapping_key}")
 
         for instance_key in instance_keys:
             instance = results[instance_key]

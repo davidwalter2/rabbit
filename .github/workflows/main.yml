@@ -207,7 +207,7 @@ jobs:
           -t 0 --unblind --doImpacts --globalImpacts
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistCov --computeHistImpacts --computeVariations
-          -m Basemodel
+          -m BaseMapping
           -m Select ch0 'x:rebin(-5,-2,2,5)'
           -m Project ch1 a 
           -m Project ch1 b 
@@ -217,7 +217,7 @@ jobs:
           -m Ratio ch0 ch1 'None:None' 'b:slice(0,2),b:sum'
           -m Ratio ch0 ch1 'x:slice(None,None,2),x:sum' 'a:sum,b:sum'
           -m Normratio ch1 ch1 sig sig,bkg 'b:sum' 'b:2'
-          -m tests.param_model.Param 'slope_signal' 1 0
+          -m tests.param_mapping.Param 'slope_signal' 1 0
 
       - name: nominal fit
         run: >- 
@@ -225,7 +225,7 @@ jobs:
           -t 0 --unblind '.*' --doImpacts --globalImpacts
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistCov --computeHistImpacts --computeVariations
-          --compositeModel -m Project ch1 a -m Project ch1 b 
+          --compositeMapping -m Project ch1 a -m Project ch1 b 
 
       - name: nominal fit blinded
         run: >- 
@@ -320,13 +320,13 @@ jobs:
       - name: plot prefit distributions
         run: >-
           rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
-          --extraTextLoc '0.05' '0.7' --legCols 1 -m Basemodel -m Project ch1 a -m Project ch1 b --yscale '1.2' 
+          --extraTextLoc '0.05' '0.7' --legCols 1 -m BaseMapping -m Project ch1 a -m Project ch1 b --yscale '1.2' 
           --subtitle Preliminary --prefit --config tests/style_config.py
 
       - name: plot postfit distributions
         run: >-
           rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
-          --extraTextLoc '0.05' '0.7' --legCols 1 -m Basemodel -m Project ch1 a -m Project ch1 b -m Normalize ch0 x --yscale '1.2' 
+          --extraTextLoc '0.05' '0.7' --legCols 1 -m BaseMapping -m Project ch1 a -m Project ch1 b -m Normalize ch0 x --yscale '1.2' 
           --subtitle Preliminary --varNames 'slope_signal' --varColors orange --config tests/style_config.py --rrange 0.8 1.2
 
       - name: plot histogram uncertainties
