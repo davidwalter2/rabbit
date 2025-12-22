@@ -655,7 +655,7 @@ def main():
     indata = inputdata.FitInputData(args.filename, args.pseudoData)
     ifitter = fitter.Fitter(indata, args, do_blinding=any(blinded_fits))
 
-    # mappings for observables and mappings
+    # mappings for observables and parameters
     if len(args.mapping) == 0 and args.saveHists:
         # if no mapping is explicitly added and --saveHists is specified, fall back to BaseMapping
         args.mapping = [["BaseMapping"]]
