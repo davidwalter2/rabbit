@@ -26,7 +26,6 @@ def common_parser():
     )
     parser.add_argument("filename", help="filename of the main hdf5 input")
     parser.add_argument("-o", "--output", default="./", help="output directory")
-    parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
     parser.add_argument(
         "--postfix",
         default=None,

@@ -715,11 +715,11 @@ def parseArgs():
         help="Print impacts on observables use '-m <mapping> channel axes' for mapping results.",
     )
     parser.add_argument(
-        "--physicsModelRef",
+        "--mappingRef",
         default=None,
         type=str,
         nargs="+",
-        help="Print impacts on observables use '-m <model> channel axes' for physics model results for reference.",
+        help="Print impacts on observables use '-m <mapping> channel axes' for mapping results for reference.",
     )
     parser.add_argument(
         "-r",
@@ -1283,7 +1283,7 @@ def main():
                     "Only global impacts on observables is implemented (use --globalImpacts)"
                 )
 
-            def get_model_key(result, key):
+            def get_mapping_key(result, key):
 
                 res = result.get("mappings", fitresult.get("physics_models"))
                 if key in res.keys():
@@ -1293,21 +1293,23 @@ def main():
                     keys = [key for key in res.keys() if key.startswith(key)]
                     if len(keys) == 0:
                         raise ValueError(
-                            f"Mapping {key} not found, available models are: {res.keys()}"
+                            f"Mapping {key} not found, available mappings are: {res.keys()}"
                         )
 
                     channels = res[keys[0]]["channels"]
                     return channels, keys[0]
 
-            model_key = " ".join(args.physicsModel)
-            model_key_ref = (
-                " ".join(args.physicsModelRef)
-                if args.physicsModelRef is not None
-                else model_key
+            mapping_key = " ".join(args.mapping)
+            mapping_key_ref = (
+                " ".join(args.mappingRef)
+                if args.mappingRef is not None
+                else mapping_key
             )
 
-            channels, model_key = get_model_key(fitresult, model_key)
-            channels_ref, model_key_ref = get_model_key(fitresult_ref, model_key_ref)
+            channels, mapping_key = get_mapping_key(fitresult, mapping_key)
+            channels_ref, mapping_key_ref = get_mapping_key(
+                fitresult_ref, mapping_key_ref
+            )
 
             for channel, hists in channels.items():
 
@@ -1335,7 +1337,7 @@ def main():
                     res_ref = fitresult_ref.get(
                         "mappings", fitresult.get("physics_models")
                     )
-                    hists_ref = res_ref[model_key_ref]["channels"][channel_ref]
+                    hists_ref = res_ref[mapping_key_ref]["channels"][channel_ref]
 
                     hist_ref = hists_ref[key].get()
                     hist_total_ref = hists_ref["hist_postfit_inclusive"].get()

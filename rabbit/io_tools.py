@@ -26,7 +26,9 @@ def get_fitresult(fitresult_filename, result=None, meta=False):
 
 
 def get_poi_names(meta):
-    return np.concatenate((meta["signals"], meta["nois"])).astype(str)
+    return np.concatenate((meta.get("pois", meta.get("signals")), meta["nois"])).astype(
+        str
+    )
 
 
 def get_syst_labels(fitresult):

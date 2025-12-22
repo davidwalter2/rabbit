@@ -2304,7 +2304,9 @@ class Fitter:
         self.x.assign(xval)
         return x_scans, y_scans, dnlls
 
-    def contour_scan(self, param, nll_min, q=1, signs=[-1, 1], return_all_params=False):
+    def contour_scan(
+        self, param, nll_min, q=1, signs=[-1, 1], fun=None, return_all_params=False
+    ):
 
         def scipy_grad(xval):
             self.x.assign(xval)
@@ -2313,7 +2315,7 @@ class Fitter:
 
         # def scipy_hessp(xval, pval):
         #     self.x.assign(xval)
-        #     p = tf.convert_to_tensor(pval)
+        #     p = tf.convert_to_tensor(pval, dtype=self.indata.dtype)
         #     val, grad, hessp = self.loss_val_grad_hessp(p)
         #     # print("scipy_hessp", val)
         #     return hessp.numpy()
@@ -2325,57 +2327,103 @@ class Fitter:
 
         nlc = scipy.optimize.NonlinearConstraint(
             fun=scipy_loss,
-            lb=0,
+            lb=-np.inf,
             ub=0,
             jac=scipy_grad,
             hess=scipy.optimize.SR1(),  # TODO: use exact hessian or hessian vector product
         )
-
-        # initial values
-        idx = np.where(self.parms.astype(str) == param)[0][0]
-        xval = tf.identity(self.x)
-        xval_init = xval.numpy()
 
         if return_all_params:
             intervals = np.full((len(signs), len(self.parms)), np.nan)
         else:
             intervals = np.full((len(signs)), np.nan)
 
+        xval = tf.identity(self.x)
+        xval_init = xval.numpy()
+
+        idx = np.where(self.parms.astype(str) == param)[0][0]
+        if fun is None:
+            # initial values
+            need_observables = False
+            has_hessp = False
+
+            def fun(params):
+                return params[idx]
+
+        else:
+            need_observables = True
+            has_hessp = True
+
         for i, sign in enumerate(signs):
             # Objective function and its derivatives
-            def objective(params):
-                return -sign * params[idx]
 
-            def objective_jac(params):
-                jac = np.zeros_like(params)
-                jac[idx] = -sign
-                return jac
+            def objective_val_grad(xval):
+                self.x.assign(xval)
+                with tf.GradientTape() as t:
+                    expected = self._compute_expected(
+                        fun,
+                        inclusive=True,
+                        profile=True,
+                        full=True,
+                        need_observables=need_observables,
+                    )
+                    val = -sign * tf.squeeze(expected)
+                grad = t.gradient(val, self.x)
+                return val.__array__(), grad.__array__()
 
-            def objective_hessp(params, v):
-                return np.zeros_like(v)
+            if has_hessp:
+
+                def objective_hessp(xval, pval):
+                    self.x.assign(xval)
+                    p = tf.convert_to_tensor(pval, dtype=self.indata.dtype)
+                    p = tf.stop_gradient(p)
+                    with tf.GradientTape() as t2:
+                        with tf.GradientTape() as t1:
+                            expected = self._compute_expected(
+                                fun,
+                                inclusive=True,
+                                profile=True,
+                                full=True,
+                                need_observables=need_observables,
+                            )
+                            val = -sign * tf.squeeze(expected)
+                        grad = t1.gradient(val, self.x)
+                    hessp = t2.gradient(grad, self.x, output_gradients=p)
+                    return hessp.__array__()
+
+            else:
+
+                def objective_hessp(params, v):
+                    return np.zeros_like(v)
+
+            callback = FitterCallback(xval)
 
             res = scipy.optimize.minimize(
-                objective,
+                objective_val_grad,
                 xval_init,
                 method="trust-constr",
-                jac=objective_jac,
                 hessp=objective_hessp,
+                jac=True,
                 constraints=[nlc],
-                options={
-                    "maxiter": 5000,
-                    "xtol": 1e-10,
-                    "gtol": 1e-10,
-                    # "verbose": 3
-                },
+                # options={
+                #     "maxiter": 5000,
+                #     "xtol": 1e-10,
+                #     "gtol": 1e-10,
+                # },
+                tol=0.0,
+                callback=callback,
             )
 
-            if res["success"]:
-                if return_all_params:
-                    intervals[i] = res["x"] - xval.numpy()
-                else:
-                    intervals[i] = res["x"][idx] - xval.numpy()[idx]
+            self.x.assign(res["x"])
+            val = self._compute_expected(
+                fun,
+                inclusive=True,
+                profile=True,
+                full=True,
+                need_observables=need_observables,
+            )
 
-            self.x.assign(xval)
+            intervals[i] = val
 
         return intervals
 

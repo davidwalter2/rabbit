@@ -13,7 +13,6 @@ from scipy.stats import norm
 
 from rabbit import asymptotic_limits, fitter, inputdata, parsing, workspace
 from rabbit.mappings import helpers as mh
-from rabbit.mappings import mapping as mp
 from rabbit.poi_models import helpers as ph
 from rabbit.tfhelpers import edmval_cov
 
@@ -24,20 +23,13 @@ logger = None
 
 def make_parser():
     parser = parsing.common_parser()
-
+    parser.add_argument("--outname", default="limits.hdf5", help="output file name")
     parser.add_argument(
         "--asymptoticLimits",
         nargs="+",
         default=[],
         type=str,
-        help="Compute asymptotic upper limit based on CLs based on specified parameter, either on the parameter itself or on the (masked) channel via '--limitsOnChannel'",
-    )
-    parser.add_argument(
-        "--limitsOnChannel",
-        nargs="+",
-        default=[],
-        type=str,
-        help="Compute asymptotic upper limit based on (masked) channel",
+        help="Compute asymptotic upper limit based on CLs based on specified parameter, either on the parameter itself or on the (masked) channel via '--mapping'",
     )
     parser.add_argument(
         "--cls",
@@ -51,7 +43,7 @@ def make_parser():
 
 
 def do_asymptotic_limits(
-    args, fitter, ws, data_values, bkg_only_fit=False, on_channel=[]
+    args, fitter, ws, data_values, mapping=None, bkg_only_fit=False
 ):
     if bkg_only_fit:
         logger.info("Perform background only fit")
@@ -102,15 +94,8 @@ def do_asymptotic_limits(
     limits_nll_obs = np.full(limits_obs_shape, np.nan)
     for i, key in enumerate(args.asymptoticLimits):
 
-        if len(on_channel):
-            channel = on_channel[i]
-            if channel not in fitter_asimov.indata.channel_info.keys():
-                raise ValueError(
-                    f"Can not find (masked) channel {channel} to set limits"
-                )
-
-            logger.info(f"Get the limit on the masked channel {channel}")
-            mapping = mh.load_mapping("Select", fitter_asimov.indata, channel)
+        if mapping is not None:
+            logger.info(f"Get the limit on the mapping")
             fun = mapping.compute_flat
 
             exp, exp_var, _0, _1, _2 = fitter_asimov.expected_with_variance(
@@ -136,20 +121,27 @@ def do_asymptotic_limits(
             xobs = exp.numpy()[0]
             xobs_err = exp_var.numpy()[0] ** 0.5
         else:
-            if key not in fitter.poi_model.pois.astype(str):
+            if key not in fitter.parms.astype(str):
                 raise RuntimeError(
-                    f"Can not compute asymptotic limits for parameter {key}, no such signal process found, signal processe are: {fitter.poi_model.pois.astype(str)}"
+                    f"Can not compute asymptotic limits for parameter {key}, no such parameter found, parameters are: {fitter.parms.astype(str)}"
                 )
             logger.info(f"Get the limit from the signal strength")
             idx = np.where(fitter.parms.astype(str) == key)[0][0]
-            xbest = fitter_asimov.get_blinded_poi()[idx]
+            if key in fitter.poi_model.pois.astype(str):
+                xbest = fitter_asimov.get_blinded_poi()[idx]
+                xobs = fitter.get_blinded_poi()[idx]
+            elif key in fitter.parms.astype(str):
+                xbest = fitter_asimov.get_blinded_theta()[
+                    fitter_asimov.poi_model.npoi + idx
+                ]
+                xobs = fitter.get_blinded_theta()[fitter_asimov.poi_model.npoi + idx]
+
             xerr = fitter_asimov.cov[idx, idx] ** 0.5
 
             xbest = xbest.numpy()
             xerr = xerr.numpy()
 
             # for observed limit
-            xobs = fitter.get_blinded_poi()[idx]
             val, grad, hess = fitter.loss_val_grad_hess()
             edmval, cov = edmval_cov(grad, hess)
             fitter.cov.assign(cov)
@@ -180,11 +172,16 @@ def do_asymptotic_limits(
                 )
                 limits[i, j, k] = r
 
-                if len(on_channel):
-                    # TODO: implement for channels
-                    pass
+                # Likelihood approximation
+                if mapping is not None:
+                    r = fitter_asimov.contour_scan(
+                        key, nllvalreduced_asimov, qmuA, signs=[1], fun=fun
+                    )[0]
+                    logger.info(
+                        f"Expected (Likelihood) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
+                    )
+                    limits_nll[i, j, k] = r
                 else:
-                    # Likelihood approximation
                     r = fitter_asimov.contour_scan(
                         key, nllvalreduced_asimov, qmuA, signs=[1]
                     )[0]
@@ -199,7 +196,7 @@ def do_asymptotic_limits(
             )
 
             # Likelihood approximation
-            if len(on_channel):
+            if mapping is not None:
                 # TODO: implement for channels
                 pass
             else:
@@ -223,7 +220,7 @@ def do_asymptotic_limits(
         base_name="gaussian_asymptoticLimits_observed",
     )
 
-    if len(on_channel):
+    if mapping is not None:
         # TODO: implement for channels
         ws.add_limits_hist(
             limits_nll,
@@ -264,16 +261,12 @@ def main():
 
     ifitter = fitter.Fitter(indata, poi_model, args, do_blinding=any(blinded_fits))
 
-    # mappings for observables and parameters
-    mappings = []
-    for margs in args.mapping:
+    # mapping for observables and parameters
+    if len(args.mapping) > 0:
+        margs = args.mapping[0]
         mapping = mh.load_mapping(margs[0], indata, *margs[1:])
-        mappings.append(mapping)
-
-    if args.compositeMapping:
-        mappings = [
-            mp.CompositeMapping(mappings),
-        ]
+    else:
+        mapping = None
 
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)
@@ -360,8 +353,8 @@ def main():
                     ifitter,
                     ws,
                     data_values=observations,
+                    mapping=mapping,
                     bkg_only_fit=ifit >= 0,
-                    on_channel=args.limitsOnChannel,
                 )
                 fit_time.append(time.time())
 
