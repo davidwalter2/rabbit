@@ -1234,13 +1234,15 @@ def main():
     translate_label = getattr(config, "impact_labels", {})
 
     fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
-    if args.referenceFile is not None or args.refResult is not None:
+    if any(
+        x is not None for x in [args.referenceFile, args.refResult, args.mappingRef]
+    ):
         referenceFile = (
             args.referenceFile if args.referenceFile is not None else args.inputFile
         )
         fitresult_ref = io_tools.get_fitresult(referenceFile, args.refResult)
     else:
-        fitresult_ref = fitresult
+        fitresult_ref = None
 
     meta_out = {
         "rabbit": meta["meta_info"],
@@ -1300,16 +1302,19 @@ def main():
                     return channels, keys[0]
 
             mapping_key = " ".join(args.mapping)
-            mapping_key_ref = (
-                " ".join(args.mappingRef)
-                if args.mappingRef is not None
-                else mapping_key
-            )
 
             channels, mapping_key = get_mapping_key(fitresult, mapping_key)
-            channels_ref, mapping_key_ref = get_mapping_key(
-                fitresult_ref, mapping_key_ref
-            )
+
+            if fitresult_ref:
+                mapping_key_ref = (
+                    " ".join(args.mappingRef)
+                    if args.mappingRef is not None
+                    else mapping_key
+                )
+
+                channels_ref, mapping_key_ref = get_mapping_key(
+                    fitresult_ref, mapping_key_ref
+                )
 
             for channel, hists in channels.items():
 
@@ -1325,22 +1330,23 @@ def main():
 
                     hist = hists[key].get()
 
-                    if channel in channels_ref.keys():
-                        channel_ref = channel
-                    elif len(channels_ref.keys()) == 1:
-                        channel_ref = [v for v in channels_ref.keys()][0]
-                    else:
-                        raise NotImplementedError(
-                            f"Could not decide which is the right channel from reference file with channels: {channels_ref.keys()}"
+                    if fitresult_ref:
+                        if channel in channels_ref.keys():
+                            channel_ref = channel
+                        elif len(channels_ref.keys()) == 1:
+                            channel_ref = [v for v in channels_ref.keys()][0]
+                        else:
+                            raise NotImplementedError(
+                                f"Could not decide which is the right channel from reference file with channels: {channels_ref.keys()}"
+                            )
+
+                        res_ref = fitresult_ref.get(
+                            "mappings", fitresult.get("physics_models")
                         )
+                        hists_ref = res_ref[mapping_key_ref]["channels"][channel_ref]
 
-                    res_ref = fitresult_ref.get(
-                        "mappings", fitresult.get("physics_models")
-                    )
-                    hists_ref = res_ref[mapping_key_ref]["channels"][channel_ref]
-
-                    hist_ref = hists_ref[key].get()
-                    hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
+                        hist_ref = hists_ref[key].get()
+                        hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
 
                     for idxs in itertools.product(
                         *[np.arange(a.size) for a in hist_total.axes]
@@ -1366,8 +1372,10 @@ def main():
                             ibin,
                             group=group,
                             grouping=grouping,
-                            hist_impacts_ref=hist_ref[ibin],
-                            hist_total_ref=hist_total_ref[ibin],
+                            hist_impacts_ref=hist_ref[ibin] if fitresult_ref else None,
+                            hist_total_ref=(
+                                hist_total_ref[ibin] if fitresult_ref else None
+                            ),
                             **kwargs,
                         )
         else:
