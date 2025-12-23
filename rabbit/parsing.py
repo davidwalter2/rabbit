@@ -172,9 +172,10 @@ def common_parser():
         help="Barlow-Beeston mode bin-by-bin statistical uncertainties",
     )
     parser.add_argument(
-        "--physicsModel",
-        default="Mu",
-        help="Specify physics model to be used to introduce non standard parameterization",
+        "--poiModel",
+        default=["Mu"],
+        nargs="+",
+        help="Specify POI model to be used to introduce non standard parameterization",
     )
     parser.add_argument(
         "-m",

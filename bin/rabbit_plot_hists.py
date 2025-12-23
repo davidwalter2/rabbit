@@ -1538,7 +1538,7 @@ def main():
                     if any(
                         instance_key.startswith(x)
                         for x in [
-                            "BasemMapping",
+                            "BaseMapping",
                             "Project",
                             "Select",
                             "Norm",

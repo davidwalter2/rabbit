@@ -439,7 +439,8 @@ def main():
 
     indata = inputdata.FitInputData(args.filename, args.pseudoData)
 
-    poi_model = ph.load_model(args.physicsModel, indata, **vars(args))
+    margs = args.poiModel
+    poi_model = ph.load_model(margs[0], indata, *margs[1:], **vars(args))
 
     ifitter = fitter.Fitter(
         indata,

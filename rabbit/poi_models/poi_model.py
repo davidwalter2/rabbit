@@ -4,15 +4,20 @@ import tensorflow as tf
 
 class POIModel:
 
-    def __init__(self, indata, **kwargs):
+    def __init__(self, indata, *args, **kwargs):
         self.indata = indata
 
-        # a POI model must set these attribues
+        # # a POI model must set these attribues
         # self.npoi = # number of parameters of interest (POIs)
         # self.pois = # list of names for the POIs
         # self.xpoidefault = # default values for the POIs
         # self.is_linear = # define if the model is linear in the POIs
         # self.allowNegativePOI = # define if the POI can be negative or not
+
+    # class function to parse strings as given by the argparse input e.g. --poiModel <Model> <arg[0]> <args[1]> ...
+    @classmethod
+    def parse_args(cls, indata, *args, **kwargs):
+        return cls(indata, *args, **kwargs)
 
     def compute(self, poi):
         """
@@ -94,7 +99,7 @@ class Mu(POIModel):
         return rnorm
 
 
-class MixtureModel(POIModel):
+class Mixture(POIModel):
     """
     Based on unconstrained parameters x_i
     multiply `primary` process by x_i
@@ -104,8 +109,8 @@ class MixtureModel(POIModel):
     def __init__(
         self,
         indata,
-        primary_processes="bsm1",
-        complementary_processes="sig",
+        primary_processes,
+        complementary_processes,
         expectSignal=0,
         allowNegativePOI=False,
         **kwargs,
@@ -157,10 +162,27 @@ class MixtureModel(POIModel):
 
         self.set_poi_default(expectSignal, allowNegativePOI)
 
+    @classmethod
+    def parse_args(cls, indata, *args, **kwargs):
+        """
+        parsing the input arguments into the constructor, is has to be called as
+        --poiModel Mixture <proc_0>,<proc_1>,... <proc_a>,<proc_b>,...
+        to introduce a mixing parameter for proc_0 with proc_a, and proc_1 with proc_b, etc.
+        """
+
+        if len(args) != 2:
+            raise ValueError(
+                f"Expected exactly 2 arguments for Mixture model but got {len(args)}"
+            )
+
+        primaries = args[0].split(",")
+        complementaries = args[1].split(",")
+
+        return cls(indata, primaries, complementaries, **kwargs)
+
     def compute(self, poi):
 
         ones = tf.ones(self.npoi, dtype=self.indata.dtype)
-
         updates = tf.concat([ones * poi, ones * (1 - poi)], axis=0)
 
         # Single scatter update
