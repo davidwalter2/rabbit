@@ -14,6 +14,7 @@ baseline_mappings = {
     "Project": "project",
     "Normalize": "project",
     "Ratio": "ratio",
+    "Difference": "ratio",
     "Normratio": "ratio",
     "Asymmetry": "ratio",
     "AngularCoefficients": "angular_coefficients",

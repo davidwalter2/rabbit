@@ -76,7 +76,7 @@ class Mu(POIModel):
     multiply unconstrained parameter to signal processes, and ones otherwise
     """
 
-    def __init__(self, indata, expectSignal=1, allowNegativePOI=False, **kwargs):
+    def __init__(self, indata, expectSignal=None, allowNegativePOI=False, **kwargs):
         self.indata = indata
 
         self.npoi = self.indata.nsignals
@@ -111,7 +111,7 @@ class Mixture(POIModel):
         indata,
         primary_processes,
         complementary_processes,
-        expectSignal=0,
+        expectSignal=None,
         allowNegativePOI=False,
         **kwargs,
     ):

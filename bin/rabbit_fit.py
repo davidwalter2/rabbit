@@ -7,11 +7,10 @@ tf.config.experimental.enable_op_determinism()
 import argparse
 import time
 
-import h5py
 import numpy as np
 import scipy
 
-from rabbit import fitter, inputdata, io_tools, workspace
+from rabbit import fitter, inputdata, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
 from rabbit.poi_models import helpers as ph
@@ -473,35 +472,7 @@ def fit(args, fitter, ws, dofit=True):
     edmval = None
 
     if args.externalPostfit is not None:
-        # load results from external fit and set postfit value and covariance elements for common parameters
-        with h5py.File(args.externalPostfit, "r") as fext:
-            if "x" in fext.keys():
-                # fitresult from combinetf
-                x_ext = fext["x"][...]
-                parms_ext = fext["parms"][...].astype(str)
-                cov_ext = fext["cov"][...]
-            else:
-                # fitresult from rabbit
-                h5results_ext = io_tools.get_fitresult(fext, args.externalPostfitResult)
-                h_parms_ext = h5results_ext["parms"].get()
-
-                x_ext = h_parms_ext.values()
-                parms_ext = np.array(h_parms_ext.axes["parms"])
-                cov_ext = h5results_ext["cov"].get().values()
-
-        xvals = fitter.x.numpy()
-        covval = fitter.cov.numpy()
-        parms = fitter.parms.astype(str)
-
-        # Find common elements with their matching indices
-        common_elements, idxs, idxs_ext = np.intersect1d(
-            parms, parms_ext, assume_unique=True, return_indices=True
-        )
-        xvals[idxs] = x_ext[idxs_ext]
-        covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
-
-        fitter.x.assign(xvals)
-        fitter.cov.assign(tf.constant(covval))
+        fitter.load_fitresult(args.externalPostfit, args.externalPostfitResult)
     else:
         if dofit:
             fitter.minimize()
