@@ -111,7 +111,7 @@ class Mixture(POIModel):
         indata,
         primary_processes,
         complementary_processes,
-        expectSignal=0,
+        expectSignal=None,
         allowNegativePOI=False,
         **kwargs,
     ):
