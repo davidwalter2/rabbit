@@ -4,13 +4,12 @@ import tensorflow as tf
 
 tf.config.experimental.enable_op_determinism()
 
-import argparse
 import time
 
 import numpy as np
-import scipy
+from scipy.stats import chi2
 
-from rabbit import fitter, inputdata, workspace
+from rabbit import fitter, inputdata, parsing, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
 from rabbit.poi_models import helpers as ph
@@ -21,113 +20,13 @@ from wums import output_tools, logging  # isort: skip
 logger = None
 
 
-class OptionalListAction(argparse.Action):
-    def __call__(self, parser, namespace, values, option_string=None):
-        if len(values) == 0:
-            setattr(namespace, self.dest, [".*"])
-        else:
-            setattr(namespace, self.dest, values)
-
-
 def make_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "--eager",
-        action="store_true",
-        default=False,
-        help="Run tensorflow in eager mode (for debugging)",
-    )
-    parser.add_argument(
-        "--diagnostics",
-        action="store_true",
-        help="Calculate and print additional info for diagnostics (condition number, edm value)",
-    )
+    parser = parsing.common_parser()
+    parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
     parser.add_argument(
         "--fullNll",
         action="store_true",
         help="Calculate and store full value of -log(L)",
-    )
-    parser.add_argument("filename", help="filename of the main hdf5 input")
-    parser.add_argument("-o", "--output", default="./", help="output directory")
-    parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
-    parser.add_argument(
-        "--postfix",
-        default=None,
-        type=str,
-        help="Postfix to append on output file name",
-    )
-    parser.add_argument(
-        "--minimizerMethod",
-        default="trust-krylov",
-        type=str,
-        choices=["trust-krylov", "trust-exact"],
-        help="Mnimizer method used in scipy.optimize.minimize for the nominal fit minimization",
-    )
-    parser.add_argument(
-        "-t",
-        "--toys",
-        default=[-1],
-        type=int,
-        nargs="+",
-        help="run a given number of toys, 0 fits the data, and -1 fits the asimov toy (the default)",
-    )
-    parser.add_argument(
-        "--toysSystRandomize",
-        default="frequentist",
-        choices=["frequentist", "bayesian", "none"],
-        help="""
-        Type of randomization for systematic uncertainties (including binByBinStat if present).  
-        Options are 'frequentist' which randomizes the contraint minima a.k.a global observables 
-        and 'bayesian' which randomizes the actual nuisance parameters used in the pseudodata generation
-        """,
-    )
-    parser.add_argument(
-        "--toysDataRandomize",
-        default="poisson",
-        choices=["poisson", "normal", "none"],
-        help="Type of randomization for pseudodata.  Options are 'poisson',  'normal', and 'none'",
-    )
-    parser.add_argument(
-        "--toysDataMode",
-        default="expected",
-        choices=["expected", "observed"],
-        help="central value for pseudodata used in the toys",
-    )
-    parser.add_argument(
-        "--toysRandomizeParameters",
-        default=False,
-        action="store_true",
-        help="randomize the parameter starting values for toys",
-    )
-    parser.add_argument(
-        "--seed", default=123456789, type=int, help="random seed for toys"
-    )
-    parser.add_argument(
-        "--expectSignal",
-        default=None,
-        nargs=2,
-        action="append",
-        help="""
-        Specify tuple with key and value to be passed to POI model (used for fit starting values and for toys). 
-        E.g. '--expectSignal BSM 0.0 --expectSignal SM 1.0'
-        """,
-    )
-    parser.add_argument(
-        "--allowNegativePOI",
-        default=False,
-        action="store_true",
-        help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
     )
     parser.add_argument(
         "--contourScan",
@@ -138,9 +37,7 @@ def make_parser():
     )
     parser.add_argument(
         "--contourLevels",
-        default=[
-            1.0,
-        ],
+        default=[1.0, 2.0],
         type=float,
         nargs="+",
         help="Confidence level in standard deviations for contour scans (1 = 1 sigma = 68%%)",
@@ -193,12 +90,6 @@ def make_parser():
         help="Only compute prefit outputs",
     )
     parser.add_argument(
-        "--noHessian",
-        default=False,
-        action="store_true",
-        help="Don't compute the hessian of parameters",
-    )
-    parser.add_argument(
         "--saveHists",
         default=False,
         action="store_true",
@@ -247,24 +138,6 @@ def make_parser():
         help="Do not compute chi2 on prefit/postfit histograms",
     )
     parser.add_argument(
-        "--noBinByBinStat",
-        default=False,
-        action="store_true",
-        help="Don't add bin-by-bin statistical uncertainties on templates (by default adding sumW2 on variance)",
-    )
-    parser.add_argument(
-        "--binByBinStatType",
-        default="automatic",
-        choices=["automatic", *fitter.Fitter.valid_bin_by_bin_stat_types],
-        help="probability density for bin-by-bin statistical uncertainties, ('automatic' is 'gamma' except for data covariance where it is 'normal')",
-    )
-    parser.add_argument(
-        "--binByBinStatMode",
-        default="lite",
-        choices=["lite", "full"],
-        help="Barlow-Beeston mode bin-by-bin statistical uncertainties",
-    )
-    parser.add_argument(
         "--externalPostfit",
         default=None,
         type=str,
@@ -275,38 +148,6 @@ def make_parser():
         default=None,
         type=str,
         help="Specify result from external postfit file",
-    )
-    parser.add_argument(
-        "--pseudoData",
-        default=None,
-        type=str,
-        nargs="*",
-        help="run fit on pseudo data with the given name",
-    )
-    parser.add_argument(
-        "--poiModel",
-        default=["Mu"],
-        nargs="+",
-        help="Specify POI model to be used to introduce non standard parameterization",
-    )
-    parser.add_argument(
-        "-m",
-        "--mapping",
-        nargs="+",
-        action="append",
-        default=[],
-        help="""
-        perform mappings on observables or parameters for the prefit and postfit histograms, 
-        specifying the mapping defined in rabbit/mappings/ followed by arguments passed in the mapping __init__, 
-        e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.  
-        This argument can be called multiple times.
-        Custom mappings can be specified with the full path to the custom mapping e.g. '-m custom_mappings.MyCustomMapping'.
-        """,
-    )
-    parser.add_argument(
-        "--compositeMapping",
-        action="store_true",
-        help="Make a composite mapping and compute the covariance matrix across all mappings.",
     )
     parser.add_argument(
         "--doImpacts",
@@ -334,44 +175,6 @@ def make_parser():
         default=False,
         action="store_true",
         help="compute impacts of frozen (non-profiled) systematics",
-    )
-    parser.add_argument(
-        "--chisqFit",
-        default=False,
-        action="store_true",
-        help="Perform diagonal chi-square fit instead of poisson likelihood fit",
-    )
-    parser.add_argument(
-        "--covarianceFit",
-        default=False,
-        action="store_true",
-        help="Perform chi-square fit using covariance matrix for the observations",
-    )
-    parser.add_argument(
-        "--prefitUnconstrainedNuisanceUncertainty",
-        default=0.0,
-        type=float,
-        help="Assumed prefit uncertainty for unconstrained nuisances",
-    )
-    parser.add_argument(
-        "--unblind",
-        type=str,
-        default=[],
-        nargs="*",
-        action=OptionalListAction,
-        help="""
-        Specify list of regex to unblind matching parameters of interest. 
-        E.g. use '--unblind ^signal$' to unblind a parameter named signal or '--unblind' to unblind all.
-        """,
-    )
-    parser.add_argument(
-        "--freezeParameters",
-        type=str,
-        default=[],
-        nargs="+",
-        help="""
-        Specify list of regex to freeze matching parameters of interest. 
-        """,
     )
 
     return parser.parse_args()
@@ -477,9 +280,8 @@ def fit(args, fitter, ws, dofit=True):
         if dofit:
             fitter.minimize()
 
-        # compute the covariance matrix and estimated distance to minimum
-
         if not args.noHessian:
+            # compute the covariance matrix and estimated distance to minimum
 
             val, grad, hess = fitter.loss_val_grad_hess()
             edmval, cov = edmval_cov(grad, hess)
@@ -513,12 +315,12 @@ def fit(args, fitter, ws, dofit=True):
         tf.size(fitter.nobs) - fitter.poi_model.npoi - fitter.indata.nsystnoconstraint
     ).numpy()
 
-    chi2 = 2.0 * nllvalreduced
-    p_val = scipy.stats.chi2.sf(chi2, ndfsat)
+    chi2_val = 2.0 * nllvalreduced
+    p_val = chi2.sf(chi2_val, ndfsat)
 
     logger.info("Saturated chi2:")
     logger.info(f"    ndof: {ndfsat}")
-    logger.info(f"    2*deltaNLL: {round(chi2, 2)}")
+    logger.info(f"    2*deltaNLL: {round(chi2_val, 2)}")
     logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
 
     ws.results.update(
@@ -548,6 +350,7 @@ def fit(args, fitter, ws, dofit=True):
         # TODO: based on covariance
         ws.add_nonprofiled_impacts_hist(*fitter.nonprofiled_impacts_parms())
 
+    # Likelihood scans
     if args.scan is not None:
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
 
@@ -569,8 +372,8 @@ def fit(args, fitter, ws, dofit=True):
             )
             ws.add_nll_scan2D_hist(param_tuple, x_scan, yscan, dnll_values)
 
+    # Likelihood contour scans
     if args.contourScan is not None:
-        # do likelihood contour scans
         nllvalreduced = fitter.reduced_nll().numpy()
 
         parms = (
@@ -586,8 +389,8 @@ def fit(args, fitter, ws, dofit=True):
                 logger.info(f"    Now at CL {cl}")
 
                 # find confidence interval
-                contour = fitter.contour_scan(param, nllvalreduced, cl)
-                contours[i, j, ...] = contour
+                _, params = fitter.contour_scan(param, nllvalreduced, cl**2)
+                contours[i, j, ...] = params
 
         ws.add_contour_scan_hist(parms, contours, args.contourLevels)
 
@@ -638,7 +441,13 @@ def main():
     margs = args.poiModel
     poi_model = ph.load_model(margs[0], indata, *margs[1:], **vars(args))
 
-    ifitter = fitter.Fitter(indata, poi_model, args, do_blinding=any(blinded_fits))
+    ifitter = fitter.Fitter(
+        indata,
+        poi_model,
+        args,
+        do_blinding=any(blinded_fits),
+        globalImpactsFromJVP=not args.globalImpactsDisableJVP,
+    )
 
     # mappings for observables and parameters
     if len(args.mapping) == 0 and args.saveHists:
@@ -661,8 +470,8 @@ def main():
     meta = {
         "meta_info": output_tools.make_meta_info_dict(args=args),
         "meta_info_input": ifitter.indata.metadata,
-        "pois": ifitter.poi_model.pois,
         "procs": ifitter.indata.procs,
+        "pois": ifitter.poi_model.pois,
         "nois": ifitter.parms[ifitter.poi_model.npoi :][indata.noiidxs],
     }
 

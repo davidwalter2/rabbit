@@ -48,10 +48,12 @@ class Fitter:
     valid_bin_by_bin_stat_types = ["gamma", "normal-additive", "normal-multiplicative"]
     valid_systematic_types = ["log_normal", "normal"]
 
-    def __init__(self, indata, poi_model, options, do_blinding=False):
+    def __init__(
+        self, indata, poi_model, options, globalImpactsFromJVP=True, do_blinding=False
+    ):
         self.indata = indata
 
-        self.globalImpactsFromJVP = not options.globalImpactsDisableJVP
+        self.globalImpactsFromJVP = globalImpactsFromJVP
         self.binByBinStat = not options.noBinByBinStat
         self.binByBinStatMode = options.binByBinStatMode
 
@@ -323,7 +325,6 @@ class Fitter:
         self.update_frozen_params()
 
     def init_blinding_values(self, unblind_parameter_expressions=[]):
-
         unblind_parameters = match_regexp_params(
             unblind_parameter_expressions,
             [
@@ -2303,82 +2304,157 @@ class Fitter:
         self.x.assign(xval)
         return x_scans, y_scans, dnlls
 
-    def contour_scan(self, param, nll_min, cl=1):
+    def contour_scan(self, param, nll_min, q=1, signs=[-1, 1], fun=None):
 
-        def scipy_grad(xval):
-            self.x.assign(xval)
-            val, grad = self.loss_val_grad()
-            return grad.numpy()
-
-        # def scipy_hessp(xval, pval):
-        #     self.x.assign(xval)
-        #     p = tf.convert_to_tensor(pval)
-        #     val, grad, hessp = self.loss_val_grad_hessp(p)
-        #     # print("scipy_hessp", val)
-        #     return hessp.numpy()
-
-        def scipy_loss(xval):
-            self.x.assign(xval)
+        def scipy_loss(x):
+            self.x.assign(x)
             val = self.loss_val()
-            return val.numpy() - nll_min - 0.5 * cl**2
+            loss = val.numpy() - nll_min - 0.5 * q
+            return loss[None,]
+
+        def scipy_grad(x):
+            self.x.assign(x)
+            val, grad = self.loss_val_grad()
+            return grad.numpy()[None,]
+
+        def scipy_hess(x, v):
+            self.x.assign(x)
+            val, grad, hess = self.loss_val_grad_hess()
+            return v[0] * hess.numpy()
 
         nlc = scipy.optimize.NonlinearConstraint(
             fun=scipy_loss,
             lb=0,
             ub=0,
             jac=scipy_grad,
-            hess=scipy.optimize.SR1(),  # TODO: use exact hessian or hessian vector product
+            hess=scipy_hess,
         )
 
-        # initial guess from covariance
-        idx = np.where(self.parms.astype(str) == param)[0][0]
+        intervals = np.full((len(signs)), np.nan)
+        params_values = np.full((len(signs), len(self.parms)), np.nan)
+
         xval = tf.identity(self.x)
-
-        xup = xval[idx] + self.cov[idx, idx] ** 0.5
-        xdn = xval[idx] - self.cov[idx, idx] ** 0.5
-
         xval_init = xval.numpy()
 
-        intervals = np.full((2, len(self.parms)), np.nan)
-        for i, sign in enumerate([-1.0, 1.0]):
-            if sign == 1.0:
+        idx = np.where(self.parms.astype(str) == param)[0][0]
+        x0 = xval[idx]
+
+        # initial guess from covariance
+        initial_fit = False
+
+        xup = xval[idx] + (self.cov[idx, idx] * q) ** 0.5
+        xdn = xval[idx] - (self.cov[idx, idx] * q) ** 0.5
+
+        for i, sign in enumerate(signs):
+            # Objective function and its derivatives
+            if sign == -1:
                 xval_init[idx] = xdn
             else:
                 xval_init[idx] = xup
 
-            # Objective function and its derivatives
-            def objective(params):
-                return sign * params[idx]
+            if initial_fit:
+                # perform initial fit where contour is expected
+                self.x.assign(xval_init)
+                self.freeze_params(param)
+                self.minimize()
+                self.defreeze_params(param)
 
-            def objective_jac(params):
-                jac = np.zeros_like(params)
-                jac[idx] = sign
-                return jac
+            opt = {}
+            if fun is None:
+                # contour scan on parameter
+                def objective_val_grad(x):
+                    self.x.assign(x)
+                    val = -sign * (x[idx] - x0)
+                    grad = np.zeros_like(x)
+                    grad[idx] = -sign
 
-            def objective_hessp(params, v):
-                return np.zeros_like(v)
+                    # logger.info(f"val = {val}")
+                    # logger.info(f"Grad = {grad}")
+                    return val, grad
+
+                from scipy.sparse import csr_matrix
+
+                n_params = len(xval_init)
+                obj_hess = csr_matrix((n_params, n_params))
+                opt["hess"] = lambda x: obj_hess
+            else:
+                # contour scan on observable
+                def objective_val_grad(x):
+                    self.x.assign(x)
+                    with tf.GradientTape() as t:
+                        expected = self._compute_expected(
+                            fun,
+                            inclusive=True,
+                            profile=True,
+                            full=True,
+                            need_observables=True,
+                        )
+                        val = -sign * tf.squeeze(expected)
+                    grad = t.gradient(val, self.x)
+                    return val.__array__(), grad.__array__()
+
+                def objective_hessp(x, pval):
+                    self.x.assign(x)
+                    p = tf.convert_to_tensor(pval, dtype=self.indata.dtype)
+                    p = tf.stop_gradient(p)
+                    with tf.GradientTape() as t2:
+                        with tf.GradientTape() as t1:
+                            expected = self._compute_expected(
+                                fun,
+                                inclusive=True,
+                                profile=True,
+                                full=True,
+                                need_observables=True,
+                            )
+                            val = -sign * tf.squeeze(expected)
+                        grad = t1.gradient(val, self.x)
+                    hessp = t2.gradient(grad, self.x, output_gradients=p)
+                    return hessp.__array__()
+
+                opt["hessp"] = objective_hessp
 
             res = scipy.optimize.minimize(
-                objective,
+                objective_val_grad,
                 xval_init,
                 method="trust-constr",
-                jac=objective_jac,
-                hessp=objective_hessp,
+                jac=True,
                 constraints=[nlc],
                 options={
-                    "maxiter": 5000,
+                    "maxiter": 50000,
                     "xtol": 1e-10,
                     "gtol": 1e-10,
-                    # "verbose": 3
+                    # "barrier_tol": 1e-10,
                 },
+                **opt,
             )
 
-            if res["success"]:
-                intervals[i] = res["x"] - xval.numpy()
+            logger.info(f"Success: {res.success}")
+            logger.debug(f"Status: {res.status}")
+            if not res.success:
+                logger.warning(f"Message: {res.message}")
+                logger.warning(f"Optimality (gtol): {res.optimality}")
+                logger.warning(f"Constraint Violation: {res.constr_violation}")
+                continue
 
+            params_values[i] = res["x"] - xval
+
+            if fun is None:
+                val = res["x"][idx] - x0
+            else:
+                self.x.assign(res["x"])
+                val = self._compute_expected(
+                    fun,
+                    inclusive=True,
+                    profile=True,
+                    full=True,
+                    need_observables=True,
+                )
+            # reset the parameter values
             self.x.assign(xval)
 
-        return intervals
+            intervals[i] = val
+
+        return intervals, params_values
 
     def contour_scan2D(self, param_tuple, nll_min, cl=1, n_points=16):
         # Not yet working

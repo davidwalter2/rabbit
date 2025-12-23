@@ -152,7 +152,6 @@ def plot_matrix(
     suffix=None,
     ticklabels=None,
 ):
-
     opts = dict()
 
     if not isinstance(matrix, np.ndarray):
