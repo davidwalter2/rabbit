@@ -204,3 +204,19 @@ class Asymmetry(Ratio):
         exp = (num - den) / (num + den)
         exp = tf.reshape(exp, [-1])
         return exp
+
+
+class Difference(Ratio):
+    """
+    Same as Ratio but compute the difference of numerator and denominator
+    """
+
+    def init(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def compute_flat(self, params, observables):
+        num = self.num.select(observables, normalize=True, inclusive=True)
+        den = self.den.select(observables, normalize=True, inclusive=True)
+        exp = num - den
+        exp = tf.reshape(exp, [-1])
+        return exp

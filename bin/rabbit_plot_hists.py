@@ -1197,7 +1197,7 @@ def make_plots(
 
     axes = [a for a in hist_inclusive.axes]
 
-    if args.processGrouping is not None:
+    if args.processGrouping is not None and len(hist_stack):
         hist_stack, labels, colors, procs = config.process_grouping(
             args.processGrouping, hist_stack, procs
         )

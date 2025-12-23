@@ -715,6 +715,13 @@ def parseArgs():
         help="Print impacts on observables use '-m <mapping> channel axes' for mapping results.",
     )
     parser.add_argument(
+        "--mappingRef",
+        default=None,
+        type=str,
+        nargs="+",
+        help="Print impacts on observables use '-m <mapping> channel axes' for mapping results for reference.",
+    )
+    parser.add_argument(
         "-r",
         "--referenceFile",
         type=str,
@@ -1227,7 +1234,9 @@ def main():
     translate_label = getattr(config, "impact_labels", {})
 
     fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
-    if args.referenceFile is not None or args.refResult is not None:
+    if any(
+        x is not None for x in [args.referenceFile, args.refResult, args.mappingRef]
+    ):
         referenceFile = (
             args.referenceFile if args.referenceFile is not None else args.inputFile
         )
@@ -1276,14 +1285,36 @@ def main():
                     "Only global impacts on observables is implemented (use --globalImpacts)"
                 )
 
-            mapping_key = " ".join(args.mapping)
-            results = fitresult.get("mappings", fitresult.get("physics_models"))
+            def get_mapping_key(result, key):
 
-            if mapping_key in results.keys():
-                channels = results[mapping_key]["channels"]
-            else:
-                keys = [key for key in results.keys() if key.startswith(mapping_key)]
-                channels = results[keys[0]]["channels"]
+                res = result.get("mappings", fitresult.get("physics_models"))
+                if key in res.keys():
+                    channels = res[key]["channels"]
+                    return channels, key
+                else:
+                    keys = [key for key in res.keys() if key.startswith(key)]
+                    if len(keys) == 0:
+                        raise ValueError(
+                            f"Mapping {key} not found, available mappings are: {res.keys()}"
+                        )
+
+                    channels = res[keys[0]]["channels"]
+                    return channels, keys[0]
+
+            mapping_key = " ".join(args.mapping)
+
+            channels, mapping_key = get_mapping_key(fitresult, mapping_key)
+
+            if fitresult_ref:
+                mapping_key_ref = (
+                    " ".join(args.mappingRef)
+                    if args.mappingRef is not None
+                    else mapping_key
+                )
+
+                channels_ref, mapping_key_ref = get_mapping_key(
+                    fitresult_ref, mapping_key_ref
+                )
 
             for channel, hists in channels.items():
 
@@ -1299,15 +1330,21 @@ def main():
 
                     hist = hists[key].get()
 
-                    # TODO: implement ref
-                    # hist_ref
-                    # hist_total_ref
+                    if fitresult_ref:
+                        if channel in channels_ref.keys():
+                            channel_ref = channel
+                        elif len(channels_ref.keys()) == 1:
+                            channel_ref = [v for v in channels_ref.keys()][0]
+                        else:
+                            raise NotImplementedError(
+                                f"Could not decide which is the right channel from reference file with channels: {channels_ref.keys()}"
+                            )
 
-                    if fitresult_ref is not None:
-                        results_ref = fitresult_ref.get(
-                            "mappings", fitresult_ref.get("physics_models")
+                        res_ref = fitresult_ref.get(
+                            "mappings", fitresult.get("physics_models")
                         )
-                        hists_ref = results_ref[mapping_key]["channels"][channel]
+                        hists_ref = res_ref[mapping_key_ref]["channels"][channel_ref]
+
                         hist_ref = hists_ref[key].get()
                         hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
 
