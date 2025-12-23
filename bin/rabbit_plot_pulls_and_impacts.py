@@ -1242,7 +1242,7 @@ def main():
         )
         fitresult_ref = io_tools.get_fitresult(referenceFile, args.refResult)
     else:
-        fitresult_ref = fitresult
+        fitresult_ref = None
 
     meta_out = {
         "rabbit": meta["meta_info"],
@@ -1372,8 +1372,10 @@ def main():
                             ibin,
                             group=group,
                             grouping=grouping,
-                            hist_impacts_ref=hist_ref[ibin],
-                            hist_total_ref=hist_total_ref[ibin],
+                            hist_impacts_ref=hist_ref[ibin] if fitresult_ref else None,
+                            hist_total_ref=(
+                                hist_total_ref[ibin] if fitresult_ref else None
+                            ),
                             **kwargs,
                         )
         else:

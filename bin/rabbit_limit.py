@@ -32,7 +32,7 @@ def make_parser():
         help="Compute asymptotic upper limit based on CLs based on specified parameter, either on the parameter itself or on the (masked) channel via '--mapping'",
     )
     parser.add_argument(
-        "--cls",
+        "--levels",
         nargs="+",
         default=[0.05],
         type=float,
@@ -85,8 +85,8 @@ def do_asymptotic_limits(
     clb_list = np.array([0.025, 0.16, 0.5, 0.84, 0.975])
 
     # axes for output histogram: params, cls, clb
-    limits_shape = [len(args.asymptoticLimits), len(args.cls), len(clb_list)]
-    limits_obs_shape = [len(args.asymptoticLimits), len(args.cls)]
+    limits_shape = [len(args.asymptoticLimits), len(args.levels), len(clb_list)]
+    limits_obs_shape = [len(args.asymptoticLimits), len(args.levels)]
 
     limits = np.full(limits_shape, np.nan)
     limits_obs = np.full(limits_obs_shape, np.nan)
@@ -126,6 +126,8 @@ def do_asymptotic_limits(
                     f"Can not compute asymptotic limits for parameter {key}, no such parameter found, parameters are: {fitter.parms.astype(str)}"
                 )
             logger.info(f"Get the limit from the signal strength")
+            fun = None
+
             idx = np.where(fitter.parms.astype(str) == key)[0][0]
             if key in fitter.poi_model.pois.astype(str):
                 xbest = fitter_asimov.get_blinded_poi()[idx]
@@ -156,7 +158,7 @@ def do_asymptotic_limits(
         # this is the denominator of q for likelihood based limits
         nllvalreduced_asimov = fitter_asimov.reduced_nll().numpy()
 
-        for j, cl_s in enumerate(args.cls):
+        for j, cl_s in enumerate(args.levels):
             logger.info(f" -- AsymptoticLimits ( CLs={round(cl_s*100,1):4.1f}% ) -- ")
 
             # now we need to find the values for mu where q_{mu,A} = -2ln(L)
@@ -173,22 +175,13 @@ def do_asymptotic_limits(
                 limits[i, j, k] = r
 
                 # Likelihood approximation
-                if mapping is not None:
-                    r = fitter_asimov.contour_scan(
-                        key, nllvalreduced_asimov, qmuA, signs=[1], fun=fun
-                    )[0]
-                    logger.info(
-                        f"Expected (Likelihood) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
-                    )
-                    limits_nll[i, j, k] = r
-                else:
-                    r = fitter_asimov.contour_scan(
-                        key, nllvalreduced_asimov, qmuA, signs=[1]
-                    )[0]
-                    logger.info(
-                        f"Expected (Likelihood) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
-                    )
-                    limits_nll[i, j, k] = r
+                r, _ = fitter_asimov.contour_scan(
+                    key, nllvalreduced_asimov, qmuA, signs=[1], fun=fun
+                )
+                logger.info(
+                    f"Expected (Likelihood) {round((cl_b)*100,1):4.1f}%: {key} < {r}"
+                )
+                limits_nll[i, j, k] = r
 
             # Gaussian approximation
             limits_obs[i, j] = asymptotic_limits.compute_gaussian_limit(
@@ -208,7 +201,7 @@ def do_asymptotic_limits(
     ws.add_limits_hist(
         limits,
         args.asymptoticLimits,
-        args.cls,
+        args.levels,
         clb_list,
         base_name="gaussian_asymptoticLimits_expected",
     )
@@ -216,7 +209,7 @@ def do_asymptotic_limits(
     ws.add_limits_hist(
         limits_obs,
         args.asymptoticLimits,
-        args.cls,
+        args.levels,
         base_name="gaussian_asymptoticLimits_observed",
     )
 
@@ -225,7 +218,7 @@ def do_asymptotic_limits(
         ws.add_limits_hist(
             limits_nll,
             args.asymptoticLimits,
-            args.cls,
+            args.levels,
             clb_list,
             base_name="likelihood_asymptoticLimits_expected",
         )
@@ -234,7 +227,7 @@ def do_asymptotic_limits(
         # ws.add_limits_hist(
         #     limits_nll_obs,
         #     args.asymptoticLimits,
-        #     args.cls,
+        #     args.levels,
         #     base_name="likelihood_asymptoticLimits_observed",
         # )
 
@@ -257,7 +250,8 @@ def main():
 
     indata = inputdata.FitInputData(args.filename, args.pseudoData)
 
-    poi_model = ph.load_model(args.physicsModel, indata, **vars(args))
+    margs = args.poiModel
+    poi_model = ph.load_model(margs[0], indata, *margs[1:], **vars(args))
 
     ifitter = fitter.Fitter(indata, poi_model, args, do_blinding=any(blinded_fits))
 

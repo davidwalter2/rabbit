@@ -255,16 +255,6 @@ jobs:
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
 
-      - name: bsm limits
-        run: >-
-          rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
-          -t 0 --unblind --expectSignal bsm1 0 --expectSignal bsm2 1 --allowNegativePOI --asymptoticLimits bsm1 --cls 0.05
-
-      - name: bsm limits on channel 
-        run: >-
-          rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
-          -t 0 --unblind --physicsModel MixtureModel --expectSignal bsm1_sig_mixing 0 --asymptoticLimits bsm1_sig_mixing --limitsOnChannel bsm1_masked --cls 0.05 --allowNegativePOI
-
       - name: linearized solution
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix linearized
@@ -276,6 +266,32 @@ jobs:
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix bb_full
           -t 0 --globalImpacts --binByBinStatType normal-multiplicative --binByBinStatMode full
+
+  bsm:
+    runs-on: [self-hosted, linux, x64]
+    needs: [setenv, make-tensor]
+
+    steps:
+      - env:
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
+          PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
+          PATH: ${{ needs.setenv.outputs.PATH }}
+        run: |
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
+          echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
+          echo "PATH=${PATH}" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v4
+
+      - name: bsm limits
+        run: >-
+          rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
+          -t 0 --unblind --expectSignal bsm1 0 --expectSignal bsm2 1 --allowNegativePOI --asymptoticLimits bsm1 --levels 0.05
+
+      - name: bsm limits on channel 
+        run: >-
+          rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
+          -t 0 --unblind --poiModel Mixture bsm1 sig --expectSignal bsm1_sig_mixing 0 --asymptoticLimits bsm1_sig_mixing --levels 0.05 --allowNegativePOI
 
   plotting:
     runs-on: [self-hosted, linux, x64]
@@ -415,7 +431,7 @@ jobs:
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
-    needs: [setenv, symmerizations, plotting, likelihoodscans]
+    needs: [setenv, symmerizations, bsm, plotting, likelihoodscans]
     if: always() 
     steps:
       - env:

@@ -154,8 +154,6 @@ def plot_matrix(
 ):
     opts = dict()
 
-    opts = dict()
-
     if not isinstance(matrix, np.ndarray):
         matrix = matrix.values()
 

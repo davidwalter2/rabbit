@@ -2304,9 +2304,7 @@ class Fitter:
         self.x.assign(xval)
         return x_scans, y_scans, dnlls
 
-    def contour_scan(
-        self, param, nll_min, q=1, signs=[-1, 1], fun=None, return_all_params=False
-    ):
+    def contour_scan(self, param, nll_min, q=1, signs=[-1, 1], fun=None):
 
         def scipy_grad(xval):
             self.x.assign(xval)
@@ -2333,45 +2331,43 @@ class Fitter:
             hess=scipy.optimize.SR1(),  # TODO: use exact hessian or hessian vector product
         )
 
-        if return_all_params:
-            intervals = np.full((len(signs), len(self.parms)), np.nan)
-        else:
-            intervals = np.full((len(signs)), np.nan)
+        intervals = np.full((len(signs)), np.nan)
+        params_values = np.full((len(signs), len(self.parms)), np.nan)
 
         xval = tf.identity(self.x)
         xval_init = xval.numpy()
 
         idx = np.where(self.parms.astype(str) == param)[0][0]
-        if fun is None:
-            # initial values
-            need_observables = False
-            has_hessp = False
-
-            def fun(params):
-                return params[idx]
-
-        else:
-            need_observables = True
-            has_hessp = True
 
         for i, sign in enumerate(signs):
             # Objective function and its derivatives
 
-            def objective_val_grad(xval):
-                self.x.assign(xval)
-                with tf.GradientTape() as t:
-                    expected = self._compute_expected(
-                        fun,
-                        inclusive=True,
-                        profile=True,
-                        full=True,
-                        need_observables=need_observables,
-                    )
-                    val = -sign * tf.squeeze(expected)
-                grad = t.gradient(val, self.x)
-                return val.__array__(), grad.__array__()
+            if fun is None:
+                # contour scan on parameter
+                def objective_val_grad(xval):
+                    val = -sign * xval[idx]
+                    jac = np.zeros_like(xval)
+                    jac[idx] = -sign
+                    return val, jac
 
-            if has_hessp:
+                def objective_hessp(params, v):
+                    return np.zeros_like(v)
+
+            else:
+                # contour scan on observable
+                def objective_val_grad(xval):
+                    self.x.assign(xval)
+                    with tf.GradientTape() as t:
+                        expected = self._compute_expected(
+                            fun,
+                            inclusive=True,
+                            profile=True,
+                            full=True,
+                            need_observables=True,
+                        )
+                        val = -sign * tf.squeeze(expected)
+                    grad = t.gradient(val, self.x)
+                    return val.__array__(), grad.__array__()
 
                 def objective_hessp(xval, pval):
                     self.x.assign(xval)
@@ -2384,17 +2380,12 @@ class Fitter:
                                 inclusive=True,
                                 profile=True,
                                 full=True,
-                                need_observables=need_observables,
+                                need_observables=True,
                             )
                             val = -sign * tf.squeeze(expected)
                         grad = t1.gradient(val, self.x)
                     hessp = t2.gradient(grad, self.x, output_gradients=p)
                     return hessp.__array__()
-
-            else:
-
-                def objective_hessp(params, v):
-                    return np.zeros_like(v)
 
             callback = FitterCallback(xval)
 
@@ -2414,18 +2405,25 @@ class Fitter:
                 callback=callback,
             )
 
-            self.x.assign(res["x"])
-            val = self._compute_expected(
-                fun,
-                inclusive=True,
-                profile=True,
-                full=True,
-                need_observables=need_observables,
-            )
+            params_values[i] = res["x"] - xval_init
 
-            intervals[i] = val
+            if fun is None:
+                intervals[i] = res["x"][idx] - xval_init[idx]
+            else:
+                self.x.assign(res["x"])
+                val = self._compute_expected(
+                    fun,
+                    inclusive=True,
+                    profile=True,
+                    full=True,
+                    need_observables=True,
+                )
+                intervals[i] = val
 
-        return intervals
+            # reset the parameter values
+            self.x.assign(xval)
+
+        return intervals, params_values
 
     def contour_scan2D(self, param_tuple, nll_min, cl=1, n_points=16):
         # Not yet working

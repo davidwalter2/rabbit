@@ -22,6 +22,7 @@ logger = None
 
 def make_parser():
     parser = parsing.common_parser()
+    parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
     parser.add_argument(
         "--fullNll",
         action="store_true",
@@ -388,10 +389,8 @@ def fit(args, fitter, ws, dofit=True):
                 logger.info(f"    Now at CL {cl}")
 
                 # find confidence interval
-                contour = fitter.contour_scan(
-                    param, nllvalreduced, cl**2, return_all_params=True
-                )
-                contours[i, j, ...] = contour
+                _, params = fitter.contour_scan(param, nllvalreduced, cl**2)
+                contours[i, j, ...] = params
 
         ws.add_contour_scan_hist(parms, contours, args.contourLevels)
 
