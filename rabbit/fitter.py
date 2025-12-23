@@ -46,7 +46,7 @@ class Fitter:
     valid_bin_by_bin_stat_types = ["gamma", "normal-additive", "normal-multiplicative"]
     valid_systematic_types = ["log_normal", "normal"]
 
-    def __init__(self, indata, options, do_blinding=False):
+    def __init__(self, indata, poi_model, options, do_blinding=False):
         self.indata = indata
 
         self.globalImpactsFromJVP = not options.globalImpactsDisableJVP
@@ -105,25 +105,12 @@ class Fitter:
             options.prefitUnconstrainedNuisanceUncertainty
         )
 
-        self.pois = []
-
-        if options.POIMode == "mu":
-            self.npoi = self.indata.nsignals
-            poidefault = options.expectSignal * tf.ones(
-                [self.npoi], dtype=self.indata.dtype
-            )
-            for signal in self.indata.signals:
-                self.pois.append(signal)
-        elif options.POIMode == "none":
-            self.npoi = 0
-            poidefault = tf.zeros([], dtype=self.indata.dtype)
-        else:
-            raise Exception("unsupported POIMode")
+        self.poi_model = poi_model
 
         self.do_blinding = do_blinding
         if self.do_blinding:
             self._blinding_offsets_poi = tf.Variable(
-                tf.ones([self.npoi], dtype=self.indata.dtype),
+                tf.ones([self.poi_model.npoi], dtype=self.indata.dtype),
                 trainable=False,
                 name="offset_poi",
             )
@@ -134,21 +121,14 @@ class Fitter:
             )
             self.init_blinding_values(options.unblind)
 
-        self.parms = np.concatenate([self.pois, self.indata.systs])
+        self.parms = np.concatenate([self.poi_model.pois, self.indata.systs])
 
         self.init_frozen_params(options.freezeParameters)
 
-        self.allowNegativePOI = options.allowNegativePOI
-
-        if self.allowNegativePOI:
-            self.xpoidefault = poidefault
-        else:
-            self.xpoidefault = tf.sqrt(poidefault)
-
         # tf variable containing all fit parameters
         thetadefault = tf.zeros([self.indata.nsyst], dtype=self.indata.dtype)
-        if self.npoi > 0:
-            xdefault = tf.concat([self.xpoidefault, thetadefault], axis=0)
+        if self.poi_model.npoi > 0:
+            xdefault = tf.concat([self.poi_model.xpoidefault, thetadefault], axis=0)
         else:
             xdefault = thetadefault
 
@@ -275,7 +255,7 @@ class Fitter:
         # determine if problem is linear (ie likelihood is purely quadratic)
         self.is_linear = (
             (self.chisqFit or self.covarianceFit)
-            and (self.npoi == 0 or self.allowNegativePOI)
+            and self.poi_model.is_linear
             and self.indata.symmetric_tensor
             and self.indata.systematic_type == "normal"
             and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
@@ -331,8 +311,8 @@ class Fitter:
             self._blinding_values_theta[i] = value
 
         # add offset to pois
-        self._blinding_values_poi = np.ones(self.npoi, dtype=np.float64)
-        for i in range(self.npoi):
+        self._blinding_values_poi = np.ones(self.poi_model.npoi, dtype=np.float64)
+        for i in range(self.poi_model.npoi):
             param = self.indata.signals[i]
             if param in unblind_parameters:
                 continue
@@ -347,21 +327,23 @@ class Fitter:
             self._blinding_offsets_poi.assign(self._blinding_values_poi)
             self._blinding_offsets_theta.assign(self._blinding_values_theta)
         else:
-            self._blinding_offsets_poi.assign(np.ones(self.npoi, dtype=np.float64))
+            self._blinding_offsets_poi.assign(
+                np.ones(self.poi_model.npoi, dtype=np.float64)
+            )
             self._blinding_offsets_theta.assign(
                 np.zeros(self.indata.nsyst, dtype=np.float64)
             )
 
     def get_blinded_theta(self):
-        theta = self.x[self.npoi :]
+        theta = self.x[self.poi_model.npoi :]
         if self.do_blinding:
             return theta + self._blinding_offsets_theta
         else:
             return theta
 
     def get_blinded_poi(self):
-        xpoi = self.x[: self.npoi]
-        if self.allowNegativePOI:
+        xpoi = self.x[: self.poi_model.npoi]
+        if self.poi_model.allowNegativePOI:
             poi = xpoi
         else:
             poi = tf.square(xpoi)
@@ -378,7 +360,7 @@ class Fitter:
 
     def prefit_covariance(self, unconstrained_err=0.0):
         # free parameters are taken to have zero uncertainty for the purposes of prefit uncertainties
-        var_poi = tf.zeros([self.npoi], dtype=self.indata.dtype)
+        var_poi = tf.zeros([self.poi_model.npoi], dtype=self.indata.dtype)
 
         # nuisances have their uncertainty taken from the constraint term, but unconstrained nuisances
         # are set to a placeholder uncertainty (zero by default) for the purposes of prefit uncertainties
@@ -427,10 +409,10 @@ class Fitter:
         self.theta0.assign(tf.zeros([self.indata.nsyst], dtype=self.theta0.dtype))
 
     def xdefaultassign(self):
-        if self.npoi == 0:
+        if self.poi_model.npoi == 0:
             self.x.assign(self.theta0)
         else:
-            self.x.assign(tf.concat([self.xpoidefault, self.theta0], axis=0))
+            self.x.assign(tf.concat([self.poi_model.xpoidefault, self.theta0], axis=0))
 
     def beta0defaultassign(self):
         self.set_beta0(self._default_beta0())
@@ -454,7 +436,7 @@ class Fitter:
 
     def bayesassign(self):
         # FIXME use theta0 as the mean and constraintweight to scale the width
-        if self.npoi == 0:
+        if self.poi_model.npoi == 0:
             self.x.assign(
                 self.theta0
                 + tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
@@ -463,7 +445,7 @@ class Fitter:
             self.x.assign(
                 tf.concat(
                     [
-                        self.xpoidefault,
+                        self.poi_model.xpoidefault,
                         self.theta0
                         + tf.random.normal(
                             shape=self.theta0.shape, dtype=self.theta0.dtype
@@ -652,10 +634,11 @@ class Fitter:
 
             for j, sign in enumerate((1, -1)):
                 variation = (
-                    sign * err_theta[idx - self.npoi] + theta0_tmp[idx - self.npoi]
+                    sign * err_theta[idx - self.poi_model.npoi]
+                    + theta0_tmp[idx - self.poi_model.npoi]
                 )
                 # vary the non-profile parameter
-                self.theta0[idx - self.npoi].assign(variation)
+                self.theta0[idx - self.poi_model.npoi].assign(variation)
                 self.x[idx].assign(
                     variation
                 )  # this should not be needed but should accelerates the minimization
@@ -671,7 +654,9 @@ class Fitter:
                 self.x.assign(x_tmp)
 
             # back to original value
-            self.theta0[idx - self.npoi].assign(theta0_tmp[idx - self.npoi])
+            self.theta0[idx - self.poi_model.npoi].assign(
+                theta0_tmp[idx - self.poi_model.npoi]
+            )
 
         # grouped nonprofiled impacts
         @tf.function
@@ -712,7 +697,9 @@ class Fitter:
         )
 
     def _compute_impact_group(self, v, idxs):
-        cov_reduced = tf.gather(self.cov[self.npoi :, self.npoi :], idxs, axis=0)
+        cov_reduced = tf.gather(
+            self.cov[self.poi_model.npoi :, self.poi_model.npoi :], idxs, axis=0
+        )
         cov_reduced = tf.gather(cov_reduced, idxs, axis=1)
         v_reduced = tf.gather(v, idxs, axis=1)
         invC_v = tf.linalg.solve(cov_reduced, tf.transpose(v_reduced))
@@ -720,10 +707,10 @@ class Fitter:
         return tf.sqrt(v_invC_v)
 
     def _gather_poi_noi_vector(self, v):
-        v_poi = v[: self.npoi]
+        v_poi = v[: self.poi_model.npoi]
         # protection for constained NOIs, set them to 0
         mask = (self.indata.noiidxs >= 0) & (
-            self.indata.noiidxs < tf.shape(v[self.npoi :])[0]
+            self.indata.noiidxs < tf.shape(v[self.poi_model.npoi :])[0]
         )
         safe_idxs = tf.where(mask, self.indata.noiidxs, 0)
         mask = tf.cast(mask, v.dtype)
@@ -733,7 +720,7 @@ class Fitter:
                 [tf.shape(mask), tf.ones(tf.rank(v) - 1, dtype=tf.int32)], axis=0
             ),
         )
-        v_noi = tf.gather(v[self.npoi :], safe_idxs) * mask
+        v_noi = tf.gather(v[self.poi_model.npoi :], safe_idxs) * mask
         v_gathered = tf.concat([v_poi, v_noi], axis=0)
         return v_gathered
 
@@ -743,7 +730,7 @@ class Fitter:
         v = self._gather_poi_noi_vector(self.cov)
         impacts = v / tf.reshape(tf.sqrt(tf.linalg.diag_part(self.cov)), [1, -1])
 
-        nstat = self.npoi + self.indata.nsystnoconstraint
+        nstat = self.poi_model.npoi + self.indata.nsystnoconstraint
         hess_stat = hess[:nstat, :nstat]
         inv_hess_stat = tf.linalg.inv(hess_stat)
 
@@ -772,7 +759,9 @@ class Fitter:
 
         if len(self.indata.systgroupidxs):
             impacts_grouped_syst = tf.map_fn(
-                lambda idxs: self._compute_impact_group(v[:, self.npoi :], idxs),
+                lambda idxs: self._compute_impact_group(
+                    v[:, self.poi_model.npoi :], idxs
+                ),
                 tf.ragged.constant(self.indata.systgroupidxs, dtype=tf.int32),
                 fn_output_signature=tf.TensorSpec(
                     shape=(impacts.shape[0],), dtype=tf.float64
@@ -893,8 +882,10 @@ class Fitter:
     def global_impacts_parms(self):
         # TODO migrate this to a mapping to avoid the below code which is largely duplicated
 
-        idxs_poi = tf.range(self.npoi, dtype=tf.int64)
-        idxs_noi = tf.constant(self.npoi + self.indata.noiidxs, dtype=tf.int64)
+        idxs_poi = tf.range(self.poi_model.npoi, dtype=tf.int64)
+        idxs_noi = tf.constant(
+            self.poi_model.npoi + self.indata.noiidxs, dtype=tf.int64
+        )
         idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
 
         dexpdx = tf.one_hot(idxsout, depth=self.cov.shape[0], dtype=self.cov.dtype)
@@ -919,7 +910,7 @@ class Fitter:
             impacts_beta0_total = tf.sqrt(var_beta0)
 
         impacts_x0 = self._compute_global_impacts_x0(cov_dexpdx)
-        impacts_theta0 = impacts_x0[self.npoi :]
+        impacts_theta0 = impacts_x0[self.poi_model.npoi :]
 
         impacts_theta0 = tf.transpose(impacts_theta0)
         impacts = impacts_theta0
@@ -1144,7 +1135,7 @@ class Fitter:
                 )
 
             impacts_x0 = self._compute_global_impacts_x0(cov_dexpdx)
-            impacts_theta0 = impacts_x0[self.npoi :]
+            impacts_theta0 = impacts_x0[self.poi_model.npoi :]
 
             impacts_theta0 = tf.transpose(impacts_theta0)
             impacts = impacts_theta0
@@ -1236,23 +1227,18 @@ class Fitter:
 
         return expvars
 
-    def _compute_yields_noBBB(self, compute_norm=False, full=True):
-        # compute_norm: compute yields for each process, otherwise inclusive
+    def _compute_yields_noBBB(self, full=True):
         # full: compute yields inclduing masked channels
         poi = self.get_blinded_poi()
         theta = self.get_blinded_theta()
 
         theta = tf.where(
-            self.frozen_params_mask[self.npoi :], tf.stop_gradient(theta), theta
+            self.frozen_params_mask[self.poi_model.npoi :],
+            tf.stop_gradient(theta),
+            theta,
         )
 
-        rnorm = tf.concat(
-            [poi, tf.ones([self.indata.nproc - poi.shape[0]], dtype=self.indata.dtype)],
-            axis=0,
-        )
-
-        mrnorm = tf.expand_dims(rnorm, -1)
-        ernorm = tf.reshape(rnorm, [1, -1])
+        rnorm = self.poi_model.compute(poi)
 
         normcentral = None
         if self.indata.symmetric_tensor:
@@ -1281,7 +1267,7 @@ class Fitter:
                     snorm * self.indata.norm.values
                 )
             elif self.indata.systematic_type == "normal":
-                snormnorm_sparse = self.indata.norm * ernorm
+                snormnorm_sparse = self.indata.norm * rnorm
                 snormnorm_sparse = snormnorm_sparse.with_values(
                     snormnorm_sparse.values + logsnorm
                 )
@@ -1292,15 +1278,12 @@ class Fitter:
                 )
 
             if self.indata.systematic_type == "log_normal":
-                nexpcentral = tf.sparse.sparse_dense_matmul(snormnorm_sparse, mrnorm)
-                nexpcentral = tf.squeeze(nexpcentral, -1)
-                if compute_norm:
-                    snormnorm = tf.sparse.to_dense(snormnorm_sparse)
-                    normcentral = ernorm * snormnorm
+                snormnorm = tf.sparse.to_dense(snormnorm_sparse)
+                normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
-                if compute_norm:
-                    normcentral = tf.sparse.to_dense(snormnorm_sparse)
-                nexpcentral = tf.sparse.reduce_sum(snormnorm_sparse, axis=-1)
+                normcentral = tf.sparse.to_dense(snormnorm_sparse)
+
+            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull
@@ -1328,20 +1311,16 @@ class Fitter:
             if self.indata.systematic_type == "log_normal":
                 snorm = tf.exp(logsnorm)
                 snormnorm = snorm * norm
-                nexpcentral = tf.matmul(snormnorm, mrnorm)
-                nexpcentral = tf.squeeze(nexpcentral, -1)
-                if compute_norm:
-                    normcentral = ernorm * snormnorm
+                normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
-                normcentral = norm * ernorm + logsnorm
-                nexpcentral = tf.reduce_sum(normcentral, axis=-1)
+                normcentral = norm * rnorm + logsnorm
+
+            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
 
         return nexpcentral, normcentral
 
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
-        nexp, norm = self._compute_yields_noBBB(
-            compute_norm or self.binByBinStatMode == "full", full=full
-        )
+        nexp, norm = self._compute_yields_noBBB(full=full)
 
         if self.binByBinStat:
             if profile:

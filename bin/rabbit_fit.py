@@ -14,6 +14,7 @@ import scipy
 from rabbit import fitter, inputdata, io_tools, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
+from rabbit.poi_models import helpers as ph
 from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
@@ -115,11 +116,14 @@ def make_parser():
     )
     parser.add_argument(
         "--expectSignal",
-        default=1.0,
-        type=float,
-        help="rate multiplier for signal expectation (used for fit starting values and for toys)",
+        default=None,
+        nargs=2,
+        action="append",
+        help="""
+        Specify tuple with key and value to be passed to POI model (used for fit starting values and for toys). 
+        E.g. '--expectSignal BSM 0.0 --expectSignal SM 1.0'
+        """,
     )
-    parser.add_argument("--POIMode", default="mu", help="mode for POI's")
     parser.add_argument(
         "--allowNegativePOI",
         default=False,
@@ -279,6 +283,12 @@ def make_parser():
         type=str,
         nargs="*",
         help="run fit on pseudo data with the given name",
+    )
+    parser.add_argument(
+        "--poiModel",
+        default=["Mu"],
+        nargs="+",
+        help="Specify POI model to be used to introduce non standard parameterization",
     )
     parser.add_argument(
         "-m",
@@ -529,7 +539,7 @@ def fit(args, fitter, ws, dofit=True):
     nllvalreduced = fitter.reduced_nll().numpy()
 
     ndfsat = (
-        tf.size(fitter.nobs) - fitter.npoi - fitter.indata.nsystnoconstraint
+        tf.size(fitter.nobs) - fitter.poi_model.npoi - fitter.indata.nsystnoconstraint
     ).numpy()
 
     chi2 = 2.0 * nllvalreduced
@@ -653,7 +663,11 @@ def main():
     blinded_fits = [f == 0 or (f > 0 and args.toysDataMode == "observed") for f in fits]
 
     indata = inputdata.FitInputData(args.filename, args.pseudoData)
-    ifitter = fitter.Fitter(indata, args, do_blinding=any(blinded_fits))
+
+    margs = args.poiModel
+    poi_model = ph.load_model(margs[0], indata, *margs[1:], **vars(args))
+
+    ifitter = fitter.Fitter(indata, poi_model, args, do_blinding=any(blinded_fits))
 
     # mappings for observables and parameters
     if len(args.mapping) == 0 and args.saveHists:
@@ -661,7 +675,7 @@ def main():
         args.mapping = [["BaseMapping"]]
     mappings = []
     for margs in args.mapping:
-        mapping = mh.instance_from_class(margs[0], indata, *margs[1:])
+        mapping = mh.load_mapping(margs[0], indata, *margs[1:])
         mappings.append(mapping)
 
     if args.compositeMapping:
@@ -676,9 +690,9 @@ def main():
     meta = {
         "meta_info": output_tools.make_meta_info_dict(args=args),
         "meta_info_input": ifitter.indata.metadata,
-        "signals": ifitter.indata.signals,
+        "pois": ifitter.poi_model.pois,
         "procs": ifitter.indata.procs,
-        "nois": ifitter.parms[ifitter.npoi :][indata.noiidxs],
+        "nois": ifitter.parms[ifitter.poi_model.npoi :][indata.noiidxs],
     }
 
     with workspace.Workspace(

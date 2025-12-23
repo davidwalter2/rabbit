@@ -1,4 +1,3 @@
-import importlib
 import re
 
 import hist
@@ -6,7 +5,7 @@ import numpy as np
 import tensorflow as tf
 from wums import boostHistHelpers as hh
 
-from rabbit import tfhelpers
+from rabbit import common, tfhelpers
 
 # dictionary with class name and the corresponding filename where it is defined
 baseline_mappings = {
@@ -22,29 +21,10 @@ baseline_mappings = {
 }
 
 
-def instance_from_class(class_name, *args, **kwargs):
-    if "." in class_name:
-        # import from full relative or abslute path
-        parts = class_name.split(".")
-        module_name = ".".join(parts[:-1])
-        class_name = parts[-1]
-    else:
-        # import one of the baseline mappings
-        if class_name not in baseline_mappings:
-            raise ValueError(
-                f"Mapping {class_name} not found, available baseline mappings are {baseline_mappings.keys()}"
-            )
-        module_name = f"rabbit.mappings.{baseline_mappings[class_name]}"
-
-    # Try to import the module
-    module = importlib.import_module(module_name)
-
-    mapping = getattr(module, class_name, None)
-    if mapping is None:
-        raise AttributeError(
-            f"Class '{class_name}' not found in module '{module_name}'."
-        )
-
+def load_mapping(class_name, *args, **kwargs):
+    mapping = common.load_class_from_module(
+        class_name, baseline_mappings, base_dir="rabbit.mappings"
+    )
     return mapping.parse_args(*args, **kwargs)
 
 

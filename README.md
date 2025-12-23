@@ -126,7 +126,7 @@ Bin-by-bin statistical uncertainties on the templates are added by default and c
 Perform mappings on the parameters and observables (the histogram bins in the (masked) channels). 
 Baseline mappings are defined in `rabbit/mappings/` and can be called in `rabbit_fit` with the `--mapping` or `-m` option e.g. `-m Select ch0 -m Project ch1 b`. 
 The first argument is the mapping name followed by arguments passed into the mapping.
-Available physics models are
+Available mappings are:
  * `BaseMapping`: Compute histograms in all bins and all channels.
  * `Select`: To select histograms of a channel, and perform a selection of processes and bins, supporting rebinning.
  * `Project`: To project histograms to lower dimensions, respecting the covariance matrix across bins.
@@ -149,8 +149,18 @@ Custom mappings can be defined.
 They can be specified with the full path to the custom mapping e.g. `-m custom_mapping.MyCustomMapping`. 
 The path must be accessable from your `$PYTHONPATH` variable and an `__ini__.py` file must be in the directory.
 
-### Physics models
-TBD
+### POI models
+POI models can be used to introduce paramter of interests (POIs) and modify the number of predicted events in the fit. 
+Baseline models are defined in `rabbit/poi_models/` and can be called in `rabbit_fit` with the `--poiModel` option, e.g. `--poiModel Mu`.
+Only one POI model at a time can be used at a time.
+Available POI models are:
+* `Mu`: Scale the number of events for each signal process with an unconstrained parameter, and background proesses with 1. This is the default model
+* `Ones`: Return ones, i.e. leave the number of predicted events the same.
+* `Mixture`: Scale the `primary` processes by `x` and the `complementary` processes by `1-x`
+
+Custom POI models can be defined.
+They can be specified with the full path to the custom mapping e.g. `--poiModel custom_model.MyCustomModel`. 
+The path must be accessable from your `$PYTHONPATH` variable and an `__ini__.py` file must be in the directory.
 
 ## Fit diagnostics
 
