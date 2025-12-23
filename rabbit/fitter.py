@@ -2306,29 +2306,28 @@ class Fitter:
 
     def contour_scan(self, param, nll_min, q=1, signs=[-1, 1], fun=None):
 
-        def scipy_grad(xval):
-            self.x.assign(xval)
-            val, grad = self.loss_val_grad()
-            return grad.numpy()
-
-        # def scipy_hessp(xval, pval):
-        #     self.x.assign(xval)
-        #     p = tf.convert_to_tensor(pval, dtype=self.indata.dtype)
-        #     val, grad, hessp = self.loss_val_grad_hessp(p)
-        #     # print("scipy_hessp", val)
-        #     return hessp.numpy()
-
-        def scipy_loss(xval):
-            self.x.assign(xval)
+        def scipy_loss(x):
+            self.x.assign(x)
             val = self.loss_val()
-            return val.numpy() - nll_min - 0.5 * q
+            loss = val.numpy() - nll_min - 0.5 * q
+            return loss[None,]
+
+        def scipy_grad(x):
+            self.x.assign(x)
+            val, grad = self.loss_val_grad()
+            return grad.numpy()[None,]
+
+        def scipy_hess(x, v):
+            self.x.assign(x)
+            val, grad, hess = self.loss_val_grad_hess()
+            return v[0] * hess.numpy()
 
         nlc = scipy.optimize.NonlinearConstraint(
             fun=scipy_loss,
-            lb=-np.inf,
+            lb=0,
             ub=0,
             jac=scipy_grad,
-            hess=scipy.optimize.SR1(),  # TODO: use exact hessian or hessian vector product
+            hess=scipy_hess,
         )
 
         intervals = np.full((len(signs)), np.nan)
@@ -2338,25 +2337,50 @@ class Fitter:
         xval_init = xval.numpy()
 
         idx = np.where(self.parms.astype(str) == param)[0][0]
+        x0 = xval[idx]
+
+        # initial guess from covariance
+        initial_fit = False
+
+        xup = xval[idx] + (self.cov[idx, idx] * q) ** 0.5
+        xdn = xval[idx] - (self.cov[idx, idx] * q) ** 0.5
 
         for i, sign in enumerate(signs):
             # Objective function and its derivatives
+            if sign == -1:
+                xval_init[idx] = xdn
+            else:
+                xval_init[idx] = xup
 
+            if initial_fit:
+                # perform initial fit where contour is expected
+                self.x.assign(xval_init)
+                self.freeze_params(param)
+                self.minimize()
+                self.defreeze_params(param)
+
+            opt = {}
             if fun is None:
                 # contour scan on parameter
-                def objective_val_grad(xval):
-                    val = -sign * xval[idx]
-                    jac = np.zeros_like(xval)
-                    jac[idx] = -sign
-                    return val, jac
+                def objective_val_grad(x):
+                    self.x.assign(x)
+                    val = -sign * (x[idx] - x0)
+                    grad = np.zeros_like(x)
+                    grad[idx] = -sign
 
-                def objective_hessp(params, v):
-                    return np.zeros_like(v)
+                    # logger.info(f"val = {val}")
+                    # logger.info(f"Grad = {grad}")
+                    return val, grad
 
+                from scipy.sparse import csr_matrix
+
+                n_params = len(xval_init)
+                obj_hess = csr_matrix((n_params, n_params))
+                opt["hess"] = lambda x: obj_hess
             else:
                 # contour scan on observable
-                def objective_val_grad(xval):
-                    self.x.assign(xval)
+                def objective_val_grad(x):
+                    self.x.assign(x)
                     with tf.GradientTape() as t:
                         expected = self._compute_expected(
                             fun,
@@ -2369,8 +2393,8 @@ class Fitter:
                     grad = t.gradient(val, self.x)
                     return val.__array__(), grad.__array__()
 
-                def objective_hessp(xval, pval):
-                    self.x.assign(xval)
+                def objective_hessp(x, pval):
+                    self.x.assign(x)
                     p = tf.convert_to_tensor(pval, dtype=self.indata.dtype)
                     p = tf.stop_gradient(p)
                     with tf.GradientTape() as t2:
@@ -2387,28 +2411,35 @@ class Fitter:
                     hessp = t2.gradient(grad, self.x, output_gradients=p)
                     return hessp.__array__()
 
-            callback = FitterCallback(xval)
+                opt["hessp"] = objective_hessp
 
             res = scipy.optimize.minimize(
                 objective_val_grad,
                 xval_init,
                 method="trust-constr",
-                hessp=objective_hessp,
                 jac=True,
                 constraints=[nlc],
-                # options={
-                #     "maxiter": 5000,
-                #     "xtol": 1e-10,
-                #     "gtol": 1e-10,
-                # },
-                tol=0.0,
-                callback=callback,
+                options={
+                    "maxiter": 50000,
+                    "xtol": 1e-10,
+                    "gtol": 1e-10,
+                    # "barrier_tol": 1e-10,
+                },
+                **opt,
             )
 
-            params_values[i] = res["x"] - xval_init
+            logger.info(f"Success: {res.success}")
+            logger.debug(f"Status: {res.status}")
+            if not res.success:
+                logger.warning(f"Message: {res.message}")
+                logger.warning(f"Optimality (gtol): {res.optimality}")
+                logger.warning(f"Constraint Violation: {res.constr_violation}")
+                continue
+
+            params_values[i] = res["x"] - xval
 
             if fun is None:
-                intervals[i] = res["x"][idx] - xval_init[idx]
+                val = res["x"][idx] - x0
             else:
                 self.x.assign(res["x"])
                 val = self._compute_expected(
@@ -2418,10 +2449,10 @@ class Fitter:
                     full=True,
                     need_observables=True,
                 )
-                intervals[i] = val
-
             # reset the parameter values
             self.x.assign(xval)
+
+            intervals[i] = val
 
         return intervals, params_values
 
