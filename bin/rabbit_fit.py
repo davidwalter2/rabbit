@@ -278,7 +278,9 @@ def fit(args, fitter, ws, dofit=True):
         fitter.load_fitresult(args.externalPostfit, args.externalPostfitResult)
     else:
         if dofit:
-            fitter.minimize()
+            cb = fitter.minimize()
+
+            ws.add_loss_time_hist(cb.loss_history, cb.time_history)
 
         if not args.noHessian:
             # compute the covariance matrix and estimated distance to minimum
