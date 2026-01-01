@@ -47,7 +47,15 @@ def common_parser():
         "--minimizerMethod",
         default="trust-krylov",
         type=str,
-        choices=["trust-krylov", "trust-exact"],
+        choices=[
+            "trust-krylov",
+            "trust-exact",
+            "BFGS",
+            "L-BFGS-B",
+            "CG",
+            "trust-ncg",
+            "dogleg",
+        ],
         help="Mnimizer method used in scipy.optimize.minimize for the nominal fit minimization",
     )
     parser.add_argument(
