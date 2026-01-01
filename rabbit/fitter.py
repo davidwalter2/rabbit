@@ -67,14 +67,14 @@ class Fitter:
         else:
             self.binByBinStatType = options.binByBinStatType
 
-        if (
-            self.binByBinStat
-            and self.binByBinStatMode == "full"
-            and not self.binByBinStatType.startswith("normal")
-        ):
-            raise Exception(
-                'bin-by-bin stat only for option "--binByBinStatMode full" with "--binByBinStatType normal"'
-            )
+        # if (
+        #     self.binByBinStat
+        #     and self.binByBinStatMode == "full"
+        #     and not self.binByBinStatType.startswith("normal")
+        # ):
+        #     raise Exception(
+        #         'bin-by-bin stat only for option "--binByBinStatMode full" with "--binByBinStatType normal"'
+        #     )
 
         if (
             options.covarianceFit
@@ -1390,15 +1390,36 @@ class Fitter:
 
                 if self.chisqFit:
                     if self.binByBinStatType == "gamma":
+
                         kstat = self.kstat[: self.indata.nbins]
+                        if self.binByBinStatMode == "lite":
+                            abeta = nexp_profile**2
+                            bbeta = kstat * self.varnobs - nexp_profile * self.nobs
+                            cbeta = -kstat * self.varnobs * beta0
+                            beta = solve_quad_eq(abeta, bbeta, cbeta)
 
-                        abeta = nexp_profile**2
-                        bbeta = kstat * self.varnobs - nexp_profile * self.nobs
-                        cbeta = -kstat * self.varnobs * beta0
-                        beta = solve_quad_eq(abeta, bbeta, cbeta)
+                            betamask = self.betamask[: self.indata.nbins]
+                            beta = tf.where(betamask, beta0, beta)
 
-                        betamask = self.betamask[: self.indata.nbins]
-                        beta = tf.where(betamask, beta0, beta)
+                        elif self.binByBinStatMode == "full":
+                            # compute sum of processes from Gaussian approximation
+                            norm_profile = norm[: self.indata.nbins]
+                            n2kstat = tf.square(norm_profile) / kstat
+                            n2kstat = tf.where(
+                                betamask,
+                                tf.constant(0.0, dtype=self.indata.dtype),
+                                n2kstat,
+                            )
+                            n2kstatsum = tf.reduce_sum(n2kstat, axis=-1)
+
+                            nbeta = (
+                                self.nobs / self.varnobs * n2kstatsum
+                                + tf.reduce_sum(norm_profile * beta0, axis=-1)
+                            ) / (1 + 1 / self.varnobs * n2kstatsum)
+
+                            # individual beta parameter from Gamma distribution
+                            # TODO
+
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
                         betamask = self.betamask[: self.indata.nbins]
@@ -1406,9 +1427,6 @@ class Fitter:
                             beta = (
                                 nexp_profile * self.nobs / self.varnobs + kstat * beta0
                             ) / (kstat + nexp_profile * nexp_profile / self.varnobs)
-
-                            beta = tf.where(betamask, beta0, beta)
-
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
                             n2kstat = tf.square(norm_profile) / kstat
@@ -1429,7 +1447,7 @@ class Fitter:
                                 * norm_profile
                                 / kstat
                             )
-                            beta = tf.where(betamask, beta0, beta)
+                        beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal-additive":
                         varbeta = self.varbeta[: self.indata.nbins]
                         sbeta = tf.math.sqrt(varbeta)
@@ -1475,7 +1493,6 @@ class Fitter:
                             beta = tf.linalg.solve(A, b)
 
                             beta = tf.squeeze(beta, axis=-1)
-                            beta = tf.where(betamask, beta0, beta)
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
 
@@ -1509,7 +1526,7 @@ class Fitter:
                             beta = beta0 - norm_profile / kstat * (
                                 self.data_cov_inv @ (nbeta - self.nobs[:, None])
                             )
-                            beta = tf.where(betamask, beta0, beta)
+                        beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal-additive":
                         varbeta = self.varbeta[: self.indata.nbins]
                         sbeta = tf.math.sqrt(varbeta)
@@ -1546,8 +1563,34 @@ class Fitter:
                         kstat = self.kstat[: self.indata.nbins]
                         betamask = self.betamask[: self.indata.nbins]
 
-                        beta = (self.nobs + kstat * beta0) / (nexp_profile + kstat)
+                        if self.binByBinStatMode == "lite":
+                            beta = (self.nobs + kstat * beta0) / (nexp_profile + kstat)
+                        elif self.binByBinStatMode == "full":
+                            # compute sum of processes from Gaussian approximation
+                            norm_profile = norm[: self.indata.nbins]
+                            n2kstat = tf.square(norm_profile) / kstat
+                            n2kstat = tf.where(
+                                betamask,
+                                tf.constant(0.0, dtype=self.indata.dtype),
+                                n2kstat,
+                            )
+                            pbeta = tf.reduce_sum(
+                                n2kstat - beta0 * norm_profile, axis=-1
+                            )
+                            qbeta = -self.nobs * tf.reduce_sum(n2kstat, axis=-1)
+                            nbeta = solve_quad_eq(1, pbeta, qbeta)
+                            # individual beta parameter from Gamma distribution
+                            beta = (
+                                kstat
+                                * beta0
+                                / (
+                                    norm_profile
+                                    - (self.nobs / nbeta)[..., None] * norm_profile
+                                    + kstat
+                                )
+                            )
                         beta = tf.where(betamask, beta0, beta)
+
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
                         betamask = self.betamask[: self.indata.nbins]
@@ -1556,7 +1599,6 @@ class Fitter:
                             bbeta = nexp_profile - beta0 * kstat
                             cbeta = -self.nobs
                             beta = solve_quad_eq(abeta, bbeta, cbeta)
-                            beta = tf.where(betamask, beta0, beta)
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
                             n2kstat = tf.square(norm_profile) / kstat
@@ -1576,7 +1618,7 @@ class Fitter:
                                 * norm_profile
                                 / kstat
                             )
-                            beta = tf.where(betamask, beta0, beta)
+                        beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal-additive":
                         varbeta = self.varbeta[: self.indata.nbins]
                         sbeta = tf.math.sqrt(varbeta)
@@ -1965,6 +2007,10 @@ class Fitter:
 
         lc = self._compute_lc(full_nll)
 
+        import pdb
+
+        pdb.set_trace()
+
         lbeta = self._compute_lbeta(beta, full_nll)
 
         return ln, lc, lbeta, beta
@@ -1975,8 +2021,18 @@ class Fitter:
         )
         l = ln + lc
 
-        if lbeta is not None:
+        if self.binByBinStat:
             l = l + lbeta
+
+        logger.debug(f"{ln=}; {lc=}; {lbeta=}")
+
+        logger.debug(f"{beta=}")
+
+        betamin = tf.reduce_min(beta)
+        betamax = tf.reduce_max(beta)
+
+        logger.debug(f"{betamin=}")
+        logger.debug(f"{betamax=}")
 
         return l
 
