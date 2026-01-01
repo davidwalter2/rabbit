@@ -67,15 +67,6 @@ class Fitter:
         else:
             self.binByBinStatType = options.binByBinStatType
 
-        # if (
-        #     self.binByBinStat
-        #     and self.binByBinStatMode == "full"
-        #     and not self.binByBinStatType.startswith("normal")
-        # ):
-        #     raise Exception(
-        #         'bin-by-bin stat only for option "--binByBinStatMode full" with "--binByBinStatType normal"'
-        #     )
-
         if (
             options.covarianceFit
             and self.binByBinStat
@@ -125,15 +116,32 @@ class Fitter:
             )
             self.init_blinding_values(options.unblind)
 
-        self.parms = np.concatenate([self.poi_model.pois, self.indata.systs])
-
+        parms = [self.poi_model.pois, self.indata.systs]
         # tf variable containing all fit parameters
         thetadefault = tf.zeros([self.indata.nsyst], dtype=self.indata.dtype)
         if self.poi_model.npoi > 0:
-            xdefault = tf.concat([self.poi_model.xpoidefault, thetadefault], axis=0)
+            xdefault = [self.poi_model.xpoidefault, thetadefault]
         else:
-            xdefault = thetadefault
+            xdefault = [thetadefault]
+        if self.binByBinStatType == "gamma" and self.binByBinStatMode == "full":
+            # explicit parameters for nbeta define as: nbeta = sum(beta_j n_j)/ sum(n_j)
+            nbetadefault = tf.ones([self.indata.nbins], dtype=self.indata.dtype)
+            xdefault.append(nbetadefault)
+            self.nbeta0 = tf.Variable(
+                tf.ones(self.indata.nbins, dtype=self.indata.dtype),
+                trainable=False,
+                name="nbeta0",
+            )
+            parms_nbeta = np.char.add(
+                "nbeta_", np.arange(self.indata.nbins).astype(str)
+            )
+            parms.append(parms_nbeta)
 
+        self.parms = np.concatenate(parms)
+        if len(xdefault) > 1:
+            xdefault = tf.concat(xdefault, axis=0)
+        else:
+            xdefault = xdefault[0]
         self.x = tf.Variable(xdefault, trainable=True, name="x")
 
         # for freezing parameters
@@ -389,8 +397,17 @@ class Fitter:
                 np.zeros(self.indata.nsyst, dtype=np.float64)
             )
 
+    def get_nbeta(self):
+        nbeta = self.x[
+            self.poi_model.npoi
+            + self.indata.nsyst : self.poi_model.npoi
+            + self.indata.nsyst
+            + self.indata.nbins
+        ]
+        return nbeta
+
     def get_blinded_theta(self):
-        theta = self.x[self.poi_model.npoi :]
+        theta = self.x[self.poi_model.npoi : self.poi_model.npoi + self.indata.nsyst]
         if self.do_blinding:
             return theta + self._blinding_offsets_theta
         else:
@@ -424,8 +441,14 @@ class Fitter:
             unconstrained_err**2,
             tf.math.reciprocal(self.indata.constraintweights),
         )
+        vars = [var_poi, var_theta]
 
-        invhessianprefit = tf.linalg.diag(tf.concat([var_poi, var_theta], axis=0))
+        if self.binByBinStatType == "gamma" and self.binByBinStatMode == "full":
+            # uncertainty from explicit nbeta parameters are accounted for by implicit beta parameters
+            var_nbeta = tf.zeros([self.indata.nbins], dtype=self.indata.dtype)
+            vars.append(var_nbeta)
+
+        invhessianprefit = tf.linalg.diag(tf.concat(vars, axis=0))
         return invhessianprefit
 
     @tf.function
@@ -465,9 +488,19 @@ class Fitter:
 
     def xdefaultassign(self):
         if self.poi_model.npoi == 0:
-            self.x.assign(self.theta0)
+            to_assign = [self.theta0]
         else:
-            self.x.assign(tf.concat([self.poi_model.xpoidefault, self.theta0], axis=0))
+            to_assign = [self.poi_model.xpoidefault, self.theta0]
+
+        if self.binByBinStatType == "gamma" and self.binByBinStatMode == "full":
+            to_assign.append(self.nbeta0)
+
+        if len(to_assign) > 1:
+            to_assign = tf.concat(to_assign, axis=0)
+        else:
+            to_assign = to_assign[0]
+
+        self.x.assign(to_assign)
 
     def beta0defaultassign(self):
         self.set_beta0(self._default_beta0())
@@ -512,6 +545,10 @@ class Fitter:
 
         if self.binByBinStat:
             if self.binByBinStatType == "gamma":
+                if self.binByBinStatMode == "full":
+                    raise NotImplementedError(
+                        "Barlow-Beeston full with gamma is not yet implemented"
+                    )
                 # FIXME this is only valid for beta0=beta=1 (but this should always be the case when throwing toys)
                 betagen = (
                     tf.random.gamma(
@@ -547,6 +584,10 @@ class Fitter:
         )
         if self.binByBinStat:
             if self.binByBinStatType == "gamma":
+                if self.binByBinStatMode == "full":
+                    raise NotImplementedError(
+                        "Barlow-Beeston full with gamma is not yet implemented"
+                    )
                 # FIXME this is only valid for beta0=beta=1 (but this should always be the case when throwing toys)
                 beta0gen = (
                     tf.random.poisson(
@@ -1291,7 +1332,9 @@ class Fitter:
             self.frozen_params_mask[: self.poi_model.npoi], tf.stop_gradient(poi), poi
         )
         theta = tf.where(
-            self.frozen_params_mask[self.poi_model.npoi :],
+            self.frozen_params_mask[
+                self.poi_model.npoi : self.poi_model.npoi + self.indata.nsyst
+            ],
             tf.stop_gradient(theta),
             theta,
         )
@@ -1402,20 +1445,26 @@ class Fitter:
                             beta = tf.where(betamask, beta0, beta)
 
                         elif self.binByBinStatMode == "full":
-                            # compute sum of processes from Gaussian approximation
-                            norm_profile = norm[: self.indata.nbins]
-                            n2kstat = tf.square(norm_profile) / kstat
-                            n2kstat = tf.where(
-                                betamask,
-                                tf.constant(0.0, dtype=self.indata.dtype),
-                                n2kstat,
-                            )
-                            n2kstatsum = tf.reduce_sum(n2kstat, axis=-1)
+                            # # compute sum of processes from Gaussian approximation
+                            # norm_profile = norm[: self.indata.nbins]
+                            # n2kstat = tf.square(norm_profile) / kstat
+                            # n2kstat = tf.where(
+                            #     betamask,
+                            #     tf.constant(0.0, dtype=self.indata.dtype),
+                            #     n2kstat,
+                            # )
+                            # n2kstatsum = tf.reduce_sum(n2kstat, axis=-1)
 
-                            nbeta = (
-                                self.nobs / self.varnobs * n2kstatsum
-                                + tf.reduce_sum(norm_profile * beta0, axis=-1)
-                            ) / (1 + 1 / self.varnobs * n2kstatsum)
+                            # nbeta = (
+                            #     self.nobs / self.varnobs * n2kstatsum
+                            #     + tf.reduce_sum(norm_profile * beta0, axis=-1)
+                            # ) / (1 + 1 / self.varnobs * n2kstatsum)
+
+                            raise NotImplementedError(
+                                "Barlow-Beeston full with gamma not yet implemented in chisqFit"
+                            )
+
+                            nbeta = self.x[self.poi_model.npoi + self.indata.nsyst :]
 
                             # individual beta parameter from Gamma distribution
                             # TODO
@@ -1566,26 +1615,31 @@ class Fitter:
                         if self.binByBinStatMode == "lite":
                             beta = (self.nobs + kstat * beta0) / (nexp_profile + kstat)
                         elif self.binByBinStatMode == "full":
-                            # compute sum of processes from Gaussian approximation
                             norm_profile = norm[: self.indata.nbins]
-                            n2kstat = tf.square(norm_profile) / kstat
-                            n2kstat = tf.where(
-                                betamask,
-                                tf.constant(0.0, dtype=self.indata.dtype),
-                                n2kstat,
-                            )
-                            pbeta = tf.reduce_sum(
-                                n2kstat - beta0 * norm_profile, axis=-1
-                            )
-                            qbeta = -self.nobs * tf.reduce_sum(n2kstat, axis=-1)
-                            nbeta = solve_quad_eq(1, pbeta, qbeta)
+
+                            # # compute sum of processes from Gaussian approximation
+                            # n2kstat = tf.square(norm_profile) / kstat
+                            # n2kstat = tf.where(
+                            #     betamask,
+                            #     tf.constant(0.0, dtype=self.indata.dtype),
+                            #     n2kstat,
+                            # )
+                            # pbeta = tf.reduce_sum(
+                            #     n2kstat - beta0 * norm_profile, axis=-1
+                            # )
+                            # qbeta = -self.nobs * tf.reduce_sum(n2kstat, axis=-1)
+                            # nbeta = solve_quad_eq(1, pbeta, qbeta)
+
+                            nbeta = self.x[self.poi_model.npoi + self.indata.nsyst :]
+
                             # individual beta parameter from Gamma distribution
                             beta = (
                                 kstat
                                 * beta0
                                 / (
                                     norm_profile
-                                    - (self.nobs / nbeta)[..., None] * norm_profile
+                                    - (self.nobs / (nexp_profile * nbeta))[..., None]
+                                    * norm_profile
                                     + kstat
                                 )
                             )
@@ -2006,11 +2060,6 @@ class Fitter:
                 )
 
         lc = self._compute_lc(full_nll)
-
-        import pdb
-
-        pdb.set_trace()
-
         lbeta = self._compute_lbeta(beta, full_nll)
 
         return ln, lc, lbeta, beta
