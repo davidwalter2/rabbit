@@ -2192,6 +2192,8 @@ class Fitter:
             del chol
 
             self.x.assign_add(dx)
+
+            callback = None
         else:
 
             def scipy_loss(xval):
