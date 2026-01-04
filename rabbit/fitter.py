@@ -851,12 +851,33 @@ class Fitter:
     @tf.function
     def impacts_parms(self, hess):
         # impact for poi at index i in covariance matrix from nuisance with index j is C_ij/sqrt(C_jj) = <deltax deltatheta>/sqrt(<deltatheta^2>)
-        v = self._gather_poi_noi_vector(self.cov)
-        impacts = v / tf.reshape(tf.sqrt(tf.linalg.diag_part(self.cov)), [1, -1])
-
         nstat = self.poi_model.npoi + self.indata.nsystnoconstraint
-        hess_stat = hess[:nstat, :nstat]
-        inv_hess_stat = tf.linalg.inv(hess_stat)
+
+        if self.binByBinStatMode == "full" and self.binByBinStatType == "gamma":
+            # strip off explicit BB parameters
+            cov = self.cov[
+                : self.poi_model.npoi + self.indata.nsyst,
+                : self.poi_model.npoi + self.indata.nsyst,
+            ]
+            # explicit BB parameters are unconstrained, i.e. stat uncertainty
+            idx_stat = tf.concat(
+                [
+                    tf.range(nstat),
+                    tf.range(
+                        self.poi_model.npoi + self.indata.nsyst,
+                        self.poi_model.npoi + self.indata.nsyst + self.indata.nbins,
+                    ),
+                ],
+                axis=0,
+            )
+            hess_stat = tf.gather(tf.gather(hess, idx_stat, axis=0), idx_stat, axis=1)
+        else:
+            cov = self.cov
+            hess_stat = hess[:nstat, :nstat]
+
+        v = self._gather_poi_noi_vector(cov)
+        impacts = v / tf.reshape(tf.sqrt(tf.linalg.diag_part(cov)), [1, -1])
+        inv_hess_stat = tf.linalg.inv(hess_stat)[:nstat, :nstat]
 
         if self.binByBinStat:
             # impact bin-by-bin stat
@@ -1071,6 +1092,8 @@ class Fitter:
             impacts_grouped_syst = tf.transpose(impacts_grouped_syst)
             impacts_grouped = tf.concat([impacts_grouped_syst, impacts_grouped], axis=1)
 
+        # strip off explicit BB parameters if available
+        impacts = impacts[:, : self.indata.nsyst]
         return impacts, impacts_grouped
 
     def _pd2ldbeta2(self, profile=False):
@@ -1302,6 +1325,8 @@ class Fitter:
                     [impacts_grouped_syst, impacts_grouped], axis=-1
                 )
 
+            # strip off explicit BB parameters if available
+            impacts = impacts[:, : self.indata.nsyst]
             impacts = tf.reshape(impacts, [*expvar.shape, impacts.shape[-1]])
             impacts_grouped = tf.reshape(
                 impacts_grouped, [*expvar.shape, impacts_grouped.shape[-1]]
@@ -1463,7 +1488,6 @@ class Fitter:
 
                 if self.chisqFit:
                     if self.binByBinStatType == "gamma":
-
                         kstat = self.kstat[: self.indata.nbins]
                         if self.binByBinStatMode == "lite":
                             abeta = nexp_profile**2
@@ -1471,15 +1495,19 @@ class Fitter:
                             cbeta = -kstat * self.varnobs * beta0
                             beta = solve_quad_eq(abeta, bbeta, cbeta)
                         elif self.binByBinStatMode == "full":
-                            raise NotImplementedError(
-                                "Barlow-Beeston full with gamma not yet implemented in chisqFit"
-                            )
-
+                            norm_profile = norm[: self.indata.nbins]
                             nbeta = self.x[self.poi_model.npoi + self.indata.nsyst :]
-
-                            # individual beta parameter from Gamma distribution
-                            # TODO
-
+                            beta = (
+                                kstat
+                                * beta0
+                                / (
+                                    ((self.nobs - nexp_profile * nbeta) / self.varnobs)[
+                                        ..., None
+                                    ]
+                                    * norm_profile
+                                    + kstat
+                                )
+                            )
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
                         if self.binByBinStatMode == "lite":
@@ -1622,8 +1650,6 @@ class Fitter:
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
                             nbeta = self.x[self.poi_model.npoi + self.indata.nsyst :]
-
-                            # individual beta parameter from Gamma distribution
                             beta = (
                                 kstat
                                 * beta0
@@ -1634,7 +1660,6 @@ class Fitter:
                                     + kstat
                                 )
                             )
-
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
                         if self.binByBinStatMode == "lite":
