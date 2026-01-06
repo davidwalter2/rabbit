@@ -61,13 +61,12 @@ def read_impacts_poi(
     impacts = h_impacts.values()
     labels = np.array(h_impacts.axes["impacts"])
 
-    if add_total and poi not in labels:
+    #if add_total and poi not in labels:
+    if add_total:
         h_parms = fitresult["parms"].get()
         total = np.sqrt(h_parms[{"parms": poi}].variance)
-
-        if add_total:
-            impacts = np.append(impacts, total)
-            labels = np.append(labels, "Total")
+        impacts = np.append(impacts, total)
+        labels = np.append(labels, "Total")
 
     if pulls:
         pulls_labels, pulls, constraints = get_pulls_and_constraints(
