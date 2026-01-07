@@ -510,6 +510,13 @@ class Workspace:
 
         return name, label
 
+    def add_loss_time_hist(self, loss, time, name="epoch"):
+        axis_epoch = hist.axis.Integer(
+            0, len(loss), underflow=False, overflow=False, name="epoch"
+        )
+        self.add_hist(f"{name}_loss", axis_epoch, loss, label=f"{name} loss")
+        self.add_hist(f"{name}_time", axis_epoch, time, label=f"{name} time")
+
     def write_meta(self, meta):
         ioutils.pickle_dump_h5py("meta", meta, self.fout)
 

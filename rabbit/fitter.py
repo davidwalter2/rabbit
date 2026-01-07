@@ -1,5 +1,6 @@
 import hashlib
 import re
+import time
 
 import h5py
 import numpy as np
@@ -36,10 +37,23 @@ class FitterCallback:
         self.iiter = 0
         self.xval = xv
 
+        self.loss_history = []
+        self.time_history = []
+
+        self.t0 = time.time()
+
     def __call__(self, intermediate_result):
-        logger.debug(f"Iteration {self.iiter}: loss value {intermediate_result.fun}")
-        if np.isnan(intermediate_result.fun):
+        loss = intermediate_result.fun
+
+        logger.debug(
+            f"Iteration {self.iiter}: loss value {loss}"
+        )  # ; status {intermediate_result.status}")
+        if np.isnan(loss):
             raise ValueError(f"Loss value is NaN at iteration {self.iiter}")
+
+        self.loss_history.append(loss)
+        self.time_history.append(time.time() - self.t0)
+
         self.xval = intermediate_result.x
         self.iiter += 1
 
@@ -2075,6 +2089,8 @@ class Fitter:
             del chol
 
             self.x.assign_add(dx)
+
+            callback = None
         else:
 
             def scipy_loss(xval):
@@ -2099,14 +2115,17 @@ class Fitter:
                 return hess.__array__()
 
             xval = self.x.numpy()
+
             callback = FitterCallback(xval)
 
             if self.minimizer_method in [
                 "trust-krylov",
+                "trust-ncg",
             ]:
                 info_minimize = dict(hessp=scipy_hessp)
             elif self.minimizer_method in [
                 "trust-exact",
+                "dogleg",
             ]:
                 info_minimize = dict(hess=scipy_hess)
             else:
@@ -2138,6 +2157,8 @@ class Fitter:
         # usually would have been done during the minimization
         if self.binByBinStat:
             self._profile_beta()
+
+        return callback
 
     def nll_scan(self, param, scan_range, scan_points, use_prefit=False):
         # make a likelihood scan for a single parameter
