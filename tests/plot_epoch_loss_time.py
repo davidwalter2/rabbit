@@ -82,7 +82,7 @@ linestyles = [
     ":",
     "-.",
 ]
-linestyles = linestyles[: len(epochs)]
+linestyles = [linestyles[i % len(linestyles)] for i in range(len(epochs))]
 
 start = args.startEpoch
 stop = None
@@ -142,8 +142,6 @@ for x, y, xlabel, ylabel, stop, suffix in (
         ncols=args.legCols,
         loc=args.legPos,
     )
-
-    # plot_tools.fix_axes(ax1, fig, logy=args.logy)
 
     name = f"epoch_{suffix}"
     to_join = [name, args.postfix]
