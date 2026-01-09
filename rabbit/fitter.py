@@ -2367,6 +2367,9 @@ class Fitter:
         xdn = xval[idx] - (self.cov[idx, idx] * q) ** 0.5
 
         for i, sign in enumerate(signs):
+            logger.info(
+                f"Try to find contour on the {'positive' if sign else 'negative'} side"
+            )
             # Objective function and its derivatives
             if sign == -1:
                 xval_init[idx] = xdn
@@ -2380,7 +2383,7 @@ class Fitter:
                 self.minimize()
                 self.defreeze_params(param)
 
-            opt = {}
+            info_minimize = {}
             if fun is None:
                 # contour scan on parameter
                 def objective_val_grad(x):
@@ -2397,7 +2400,7 @@ class Fitter:
 
                 n_params = len(xval_init)
                 obj_hess = csr_matrix((n_params, n_params))
-                opt["hess"] = lambda x: obj_hess
+                info_minimize["hess"] = lambda x: obj_hess
             else:
                 # contour scan on observable
                 def objective_val_grad(x):
@@ -2432,30 +2435,35 @@ class Fitter:
                     hessp = t2.gradient(grad, self.x, output_gradients=p)
                     return hessp.__array__()
 
-                opt["hessp"] = objective_hessp
+                info_minimize["hessp"] = objective_hessp
 
-            res = scipy.optimize.minimize(
-                objective_val_grad,
-                xval_init,
-                method="trust-constr",
-                jac=True,
-                constraints=[nlc],
-                options={
-                    "maxiter": 50000,
-                    "xtol": 1e-10,
-                    "gtol": 1e-10,
-                    # "barrier_tol": 1e-10,
-                },
-                **opt,
-            )
+            callback = FitterCallback(self)
+
+            try:
+                res = scipy.optimize.minimize(
+                    objective_val_grad,
+                    xval_init,
+                    method="trust-constr",
+                    jac=True,
+                    tol=0.0,
+                    constraints=[nlc],
+                    callback=callback,
+                    **info_minimize,
+                )
+            except Exception as ex:
+                # minimizer could have called the loss or hessp functions with "random" values, so restore the
+                # state from the end of the last iteration before the exception
+                xval = callback.xval
+                logger.debug(ex)
+            else:
+                xval = res["x"]
+                logger.debug(res)
 
             logger.info(f"Success: {res.success}")
             logger.debug(f"Status: {res.status}")
-            if not res.success:
-                logger.warning(f"Message: {res.message}")
-                logger.warning(f"Optimality (gtol): {res.optimality}")
-                logger.warning(f"Constraint Violation: {res.constr_violation}")
-                continue
+            logger.debug(f"Message: {res.message}")
+            logger.debug(f"Optimality (gtol): {res.optimality}")
+            logger.debug(f"Constraint Violation: {res.constr_violation}")
 
             params_values[i] = res["x"] - xval
 
