@@ -69,7 +69,7 @@ class Workspace:
         )
 
         self.parms = fitter.parms
-        self.npoi = fitter.npoi
+        self.npoi = fitter.poi_model.npoi
         self.noiidxs = fitter.indata.noiidxs
 
         self.extension = "hdf5"
@@ -103,15 +103,15 @@ class Workspace:
             file_path = f"{parts[0]}_{postfix}.{parts[1]}"
         return file_path
 
-    def dump_obj(self, obj, key, model_key=None, channel=None):
+    def dump_obj(self, obj, key, mapping_key=None, channel=None):
         result = self.results
 
-        if model_key is not None:
-            if "physics_models" not in result.keys():
-                result["physics_models"] = {}
-            if model_key not in result["physics_models"]:
-                result["physics_models"][model_key] = {}
-            result = result["physics_models"][model_key]
+        if mapping_key is not None:
+            if "mappings" not in result.keys():
+                result["mappings"] = {}
+            if mapping_key not in result["mappings"]:
+                result["mappings"][mapping_key] = {}
+            result = result["mappings"][mapping_key]
 
         if channel is not None:
             if "channels" not in result.keys():
@@ -175,7 +175,7 @@ class Workspace:
         stop=None,
         label=None,
         channel=None,
-        model_key=None,
+        mapping_key=None,
         flow=False,
     ):
         if not isinstance(axes, (list, tuple, np.ndarray)):
@@ -186,29 +186,29 @@ class Workspace:
                 variances = variances[start:stop]
 
         h = self.hist(name, axes, values, variances, label, flow=flow)
-        self.dump_hist(h, model_key, channel)
+        self.dump_hist(h, mapping_key, channel)
 
     def add_value(self, value, name, *args, **kwargs):
         self.dump_obj(value, name, *args, **kwargs)
 
-    def add_chi2(self, chi2, ndf, prefit, model):
+    def add_chi2(self, chi2, ndf, prefit, mapping):
         postfix = "_prefit" if prefit else ""
-        self.add_value(ndf, "ndf" + postfix, model.key)
-        self.add_value(chi2, "chi2" + postfix, model.key)
+        self.add_value(ndf, "ndf" + postfix, mapping.key)
+        self.add_value(chi2, "chi2" + postfix, mapping.key)
 
     def add_observed_hists(
-        self, model, data_obs, nobs, data_cov_inv=None, nobs_cov_inv=None
+        self, mapping, data_obs, nobs, data_cov_inv=None, nobs_cov_inv=None
     ):
         hists_data_obs = {}
         hists_nobs = {}
 
-        values_data_obs, variances_data_obs, cov_data_obs = model.get_data(
+        values_data_obs, variances_data_obs, cov_data_obs = mapping.get_data(
             data_obs, data_cov_inv
         )
-        values_nobs, variances_nobs, cov_nobs = model.get_data(nobs, nobs_cov_inv)
+        values_nobs, variances_nobs, cov_nobs = mapping.get_data(nobs, nobs_cov_inv)
 
         start = 0
-        for channel, info in model.channel_info.items():
+        for channel, info in mapping.channel_info.items():
             axes = info["axes"]
             stop = start + int(np.prod([a.size for a in axes]))
 
@@ -225,7 +225,7 @@ class Workspace:
             opts = dict(
                 start=start,
                 stop=stop,
-                model_key=model.key,
+                mapping_key=mapping.key,
                 channel=channel,
             )
             self.add_hist(
@@ -287,6 +287,27 @@ class Workspace:
             name,
             [axis_impacts_grouped, axis_downUpVar, axis_parms],
             impacts_grouped,
+        )
+
+    def add_limits_hist(
+        self, limits, params, cls_list, clb_list=None, base_name="asymptoticLimits"
+    ):
+        axes = [
+            hist.axis.StrCategory(np.array(params).astype(str), name="parms"),
+            hist.axis.StrCategory(np.array(cls_list).astype(str), name="cls"),
+        ]
+
+        name = base_name
+        if clb_list is not None:
+            axes.append(
+                hist.axis.StrCategory(np.array(clb_list).astype(str), name="clb")
+            )
+
+        self.add_hist(
+            name,
+            axes,
+            limits,
+            label=f"Asymptotic limits (CLs)",
         )
 
     def add_nll_scan_hist(self, param, scan_values, nll_values, base_name="nll_scan"):
@@ -391,7 +412,7 @@ class Workspace:
 
     def add_expected_hists(
         self,
-        model,
+        mapping,
         exp,
         var=None,
         cov=None,
@@ -414,7 +435,7 @@ class Workspace:
             var_axes = [axis_vars, axis_downUpVar]
 
         start = 0
-        for channel, info in model.channel_info.items():
+        for channel, info in mapping.channel_info.items():
             axes = info["axes"]
             flow = info.get("flow", False)
             stop = start + int(np.prod([a.extent if flow else a.size for a in axes]))
@@ -423,7 +444,7 @@ class Workspace:
                 start=start,  # first index in output values for this channel
                 stop=stop,  # last index in output values for this channel
                 label=label,
-                model_key=model.key,
+                mapping_key=mapping.key,
                 channel=channel,
                 flow=flow,
             )
@@ -484,10 +505,17 @@ class Workspace:
                 [flat_axis_x, flat_axis_y],
                 cov,
                 label=f"{label} covariance",
-                model_key=model.key,
+                mapping_key=mapping.key,
             )
 
         return name, label
+
+    def add_loss_time_hist(self, loss, time, name="epoch"):
+        axis_epoch = hist.axis.Integer(
+            0, len(loss), underflow=False, overflow=False, name="epoch"
+        )
+        self.add_hist(f"{name}_loss", axis_epoch, loss, label=f"{name} loss")
+        self.add_hist(f"{name}_time", axis_epoch, time, label=f"{name} time")
 
     def write_meta(self, meta):
         ioutils.pickle_dump_h5py("meta", meta, self.fout)

@@ -1,48 +1,48 @@
 import tensorflow as tf
 
-from rabbit.physicsmodels import helpers
+from rabbit.mappings import helpers
 
 
-class PhysicsModel:
+class Mapping:
     """
-    Processing the flat input vector. can be used to inherit custom physics models from.
+    Processing the flat input vector. can be used to inherit custom mappings from.
     """
 
     need_observables = True  # if observables should be provided to the compute function
     has_data = True  # if data histograms are stored or not, and if chi2 is calculated
 
-    skip_prefit = False  # if the physics model doesn't implement the prefit case
-    skip_incusive = False  # if the physics model doesn't implement compute_flat
+    skip_prefit = False  # if the mapping doesn't implement the prefit case
+    skip_incusive = False  # if the mapping doesn't implement compute_flat
     skip_per_process = (
-        False  # if the physics model doesn't implement compute_flat_per_process
+        False  # if the mapping doesn't implement compute_flat_per_process
     )
     need_processes = False  # if observables are required by process in compute_flat
 
     ndf_reduction = 0  # how much will be subtracted from the ndf / number of bins, e.g. for chi2 calculation
 
     def __init__(self, indata, key):
-        # The result of a model in the output dictionary is stored under 'result = fitresult[cls.name]'
-        #   if the model can have different instances 'self.instance' must be set to a unique string and the result will be stored in 'result = result[self.instance]'
-        #   each model can have different channels that are the same or different from channels from the input data. All channel specific results are stored under 'result["channels"]'
+        # The result of a mapping in the output dictionary is stored under 'result = fitresult[cls.name]'
+        #   if the mapping can have different instances 'self.instance' must be set to a unique string and the result will be stored in 'result = result[self.instance]'
+        #   each mapping can have different channels that are the same or different from channels from the input data. All channel specific results are stored under 'result["channels"]'
         self.key = (
-            key  # where to store the results of this model in the results dictionary
+            key  # where to store the results of this mapping in the results dictionary
         )
 
-    # class function to parse strings as given by the argparse input e.g. -m PhysicsModel <arg[0]> <args[1]> ...
+    # class function to parse strings as given by the argparse input e.g. -m <Mapping> <arg[0]> <args[1]> ...
     @classmethod
     def parse_args(cls, indata, *args):
         key = " ".join([cls.__name__, *args])
         return cls(indata, key, *args)
 
-    # function to compute the transformation of the physics model, has to be differentiable.
-    #    For custom physics models, this function should be overridden.
+    # function to compute the mapping has to be differentiable.
+    #    For custom mappings, this function should be overridden.
     #    observables are the provided histograms inclusive in processes: nbins unless 'need_processes=True'
     #    params are the fit parameters
     def compute_flat(self, params, observables=None):
         return observables
 
-    # function to compute the transformation of the physics model, has to be differentiable.
-    #    For custom physics models, this function can be overridden.
+    # function to compute the mapping has to be differentiable.
+    #    For custom mappings, this function can be overridden.
     #    observables are the provided histograms per process: nbins x nprocesses and the result is expected to be nbins x nprocesses
     #    params are the fit parameters
     def compute_flat_per_process(self, params, observables=None):
@@ -79,20 +79,20 @@ class PhysicsModel:
         return output, variances_output, cov_output
 
 
-class CompositeModel(PhysicsModel):
+class CompositeMapping(Mapping):
     """
-    A composition of different physics models e.g. to compute the covariance across them
+    A composition of different mappings e.g. to compute the covariance across them
     """
 
     def __init__(
         self,
-        models,
+        mappings,
     ):
         self.key = self.__class__.__name__
 
         self.channel_info = {}
 
-        self.models = models
+        self.mappings = mappings
 
         self.ndf_reduction = 0
         self.has_data = True
@@ -100,27 +100,27 @@ class CompositeModel(PhysicsModel):
         self.need_processes = False
         self.skip_per_process = False
 
-        # make a composite model with unique channel names
-        for m in models:
+        # make a composite mapping with unique channel names
+        for m in self.mappings:
             for k, c in m.channel_info.items():
                 self.channel_info[f"{m.key} {k}"] = c
 
             self.ndf_reduction += m.ndf_reduction
-            # if any of the submodels does not process data, the composite model also does not
+            # if any of the submappings does not process data, the composite mapping also does not
             if not m.has_data:
                 self.has_data = False
-            # if any of the submodels needs processes, the composite model also needs processes
+            # if any of the submappings needs processes, the composite mapping also needs processes
             if m.need_processes:
                 self.need_processes = True
-            # if any of the submodels skips the processes step, the composite model also skip the processes
+            # if any of the submappings skips the processes step, the composite mapping also skip the processes
             if m.skip_per_process:
                 self.skip_per_process = True
 
     def compute_flat(self, params, observables=None):
         exp_list = []
-        for m in self.models:
+        for m in self.mappings:
             if self.need_processes and not m.need_processes:
-                # in case the composite model requires processes but one of the submodels does not, sum them up again
+                # in case the composite mapping requires processes but one of the submappings does not, sum them up again
                 observables = tf.reduce_sum(observables, axis=1)
             result = m.compute_flat(params, observables)
             exp_list.append(result)
@@ -130,15 +130,15 @@ class CompositeModel(PhysicsModel):
 
     def compute_flat_per_process(self, params, observables=None):
         exp = tf.concat(
-            [m.compute_flat_per_process(params, observables) for m in self.models],
+            [m.compute_flat_per_process(params, observables) for m in self.mappings],
             axis=0,
         )
         return exp
 
 
-class Basemodel(PhysicsModel):
+class BaseMapping(Mapping):
     """
-    A class to output histograms without any transformation, can be used as base class to inherit custom physics models from.
+    A class to output histograms without any mapping, can be used as base class to inherit custom mappings from.
     """
 
     def __init__(self, indata, key):
@@ -148,9 +148,9 @@ class Basemodel(PhysicsModel):
             c["processes"] = indata.procs
 
 
-class Channelmodel(PhysicsModel):
+class ChannelMapping(Mapping):
     """
-    Abstract physics model to process a specific channel
+    Abstract mapping to process a specific channel
     """
 
     def __init__(
@@ -198,9 +198,9 @@ class Channelmodel(PhysicsModel):
         return exp
 
 
-class Select(Channelmodel):
+class Select(ChannelMapping):
     """
-    A class to output histograms without any transformation for a given channel, can be used as base class to inherit custom physics models from.
+    A class to output histograms without any mapping for a given channel, can be used as base class to inherit custom mappings from.
     """
 
     def __init__(

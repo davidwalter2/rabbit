@@ -1,9 +1,9 @@
 import tensorflow as tf
 
-from rabbit.physicsmodels.physicsmodel import Channelmodel
+from rabbit.mappings.mapping import ChannelMapping
 
 
-class Project(Channelmodel):
+class Project(ChannelMapping):
     """
     A class to project a histogram to lower dimensions.
     The normalization is done to the integral of all processes or data.

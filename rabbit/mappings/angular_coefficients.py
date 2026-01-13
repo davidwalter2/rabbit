@@ -1,10 +1,10 @@
 import tensorflow as tf
 
-from rabbit.physicsmodels import helpers
-from rabbit.physicsmodels.physicsmodel import PhysicsModel
+from rabbit.mappings import helpers
+from rabbit.mappings.mapping import Mapping
 
 
-class AngularCoefficients(PhysicsModel):
+class AngularCoefficients(Mapping):
     """
     A class to compute the angular coefficients as A_i = sigma_i / sigma_UL
 
