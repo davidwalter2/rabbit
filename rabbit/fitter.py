@@ -912,15 +912,17 @@ class Fitter:
                     profile=profile, compute_norm=False, full=False
                 )
                 lbeta = self._compute_lbeta(beta)
-            pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
+            # pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
+            pdlbetadbeta = t1.jacobian(lbeta, self.ubeta)
             dbetadx = t1.jacobian(beta, self.x)
         # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
-        pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
+        # pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
+        sbeta = t2.jacobian(pdlbetadbeta, self.ubeta)
 
         # this the cholesky decomposition of pd2lbetadbeta2
-        sbeta = tf.linalg.LinearOperatorDiag(
-            tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
-        )
+        # sbeta = tf.linalg.LinearOperatorDiag(
+        #     tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
+        # )
 
         impacts_beta_shape = (*self.beta_shape, cov_dexpdx.shape[-1])
         impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=cov_dexpdx.dtype)
@@ -1126,31 +1128,56 @@ class Fitter:
             expcov = None
 
         if pdexpdbeta is not None:
-            pd2ldbeta2 = self._pd2ldbeta2(profile)
+            if self.indata.betavar is not None and full:
+                _0, _1, pd2ldbeta2 = self.loss_val_grad_hess_beta(profile=profile)
 
-            if self.covarianceFit and profile:
-                pd2ldbeta2_pdexpdbeta = pd2ldbeta2.solve(pdexpdbeta, adjoint_arg=True)
-            else:
-                if self.binByBinStatType == "normal-additive":
-                    pd2ldbeta2_pdexpdbeta = pdexpdbeta / pd2ldbeta2[None, :]
-                else:
-                    pd2ldbeta2_pdexpdbeta = tf.where(
-                        self.betamask[None, :],
-                        tf.zeros_like(pdexpdbeta),
-                        pdexpdbeta / pd2ldbeta2[None, :],
-                    )
-
-                # flatten all but first axes
                 batch = tf.shape(pdexpdbeta)[0]
                 pdexpdbeta = tf.reshape(pdexpdbeta, [batch, -1])
-                pd2ldbeta2_pdexpdbeta = tf.transpose(
-                    tf.reshape(pd2ldbeta2_pdexpdbeta, [batch, -1])
+
+                betamask = ~tf.reshape(self.betamask, [-1])
+                pdexpdbeta = tf.boolean_mask(pdexpdbeta, betamask, axis=1)
+
+                chol = tf.linalg.cholesky(pd2ldbeta2)
+                pd2ldbeta2_pdexpdbeta = tf.linalg.cholesky_solve(
+                    chol, tf.transpose(pdexpdbeta)
                 )
 
-            if compute_cov:
-                expcov += pdexpdbeta @ pd2ldbeta2_pdexpdbeta
+                if compute_cov:
+                    expcov += pdexpdbeta @ pd2ldbeta2_pdexpdbeta
+                else:
+                    expvar_flat += tf.einsum(
+                        "ik,ki->i", pdexpdbeta, pd2ldbeta2_pdexpdbeta
+                    )
             else:
-                expvar_flat += tf.einsum("ik,ki->i", pdexpdbeta, pd2ldbeta2_pdexpdbeta)
+                pd2ldbeta2 = self._pd2ldbeta2(profile)
+
+                if self.covarianceFit and profile:
+                    pd2ldbeta2_pdexpdbeta = pd2ldbeta2.solve(
+                        pdexpdbeta, adjoint_arg=True
+                    )
+                else:
+                    if self.binByBinStatType == "normal-additive":
+                        pd2ldbeta2_pdexpdbeta = pdexpdbeta / pd2ldbeta2[None, :]
+                    else:
+                        pd2ldbeta2_pdexpdbeta = tf.where(
+                            self.betamask[None, :],
+                            tf.zeros_like(pdexpdbeta),
+                            pdexpdbeta / pd2ldbeta2[None, :],
+                        )
+
+                    # flatten all but first axes
+                    batch = tf.shape(pdexpdbeta)[0]
+                    pdexpdbeta = tf.reshape(pdexpdbeta, [batch, -1])
+                    pd2ldbeta2_pdexpdbeta = tf.transpose(
+                        tf.reshape(pd2ldbeta2_pdexpdbeta, [batch, -1])
+                    )
+
+                if compute_cov:
+                    expcov += pdexpdbeta @ pd2ldbeta2_pdexpdbeta
+                else:
+                    expvar_flat += tf.einsum(
+                        "ik,ki->i", pdexpdbeta, pd2ldbeta2_pdexpdbeta
+                    )
 
         if compute_cov:
             expvar_flat = tf.linalg.diag_part(expcov)
@@ -1633,6 +1660,23 @@ class Fitter:
                 betamask = self.betamask[: nexp.shape[0]]
                 if self.binByBinStatMode == "full":
                     norm = tf.where(betamask, norm, betasel * norm)
+
+                    if self.indata.betavar is not None and full:
+                        # apply beta variations as normal scaling
+                        n0 = self.indata.norm
+                        sbeta = tf.math.sqrt(self.kstat[: self.indata.nbins])
+                        dbeta = sbeta * (betasel[: self.indata.nbins] - 1)
+                        dbeta = tf.where(
+                            betamask[: self.indata.nbins], tf.zeros_like(dbeta), dbeta
+                        )
+                        var = tf.einsum("ijk,jk->ik", self.indata.betavar, dbeta)
+
+                        safe_n0 = tf.where(
+                            n0 > 0, n0, 1.0
+                        )  # Use 1.0 as a dummy to avoid div by zero
+                        ratio = var / safe_n0
+                        norm = tf.where(n0 > 0, norm * (1 + ratio), norm)
+
                     nexp = tf.reduce_sum(norm, -1)
                 else:
                     nexp = tf.where(betamask, nexp, nexp * betasel)
@@ -2062,6 +2106,14 @@ class Fitter:
                 val = self._compute_loss(profile=profile)
             grad = t1.gradient(val, self.ubeta)
         hess = t2.jacobian(grad, self.ubeta)
+
+        grad = tf.reshape(grad, [-1])
+        hess = tf.reshape(hess, [grad.shape[0], grad.shape[0]])
+
+        betamask = ~tf.reshape(self.betamask, [-1])
+        grad = grad[betamask]
+        hess = tf.boolean_mask(hess, betamask, axis=0)
+        hess = tf.boolean_mask(hess, betamask, axis=1)
 
         return val, grad, hess
 
