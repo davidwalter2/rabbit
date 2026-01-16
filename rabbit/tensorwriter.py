@@ -436,7 +436,7 @@ class TensorWriter:
                     f"Axis {a.name} not found in histogram h with {h.axes.name}"
                 )
 
-        variation = h.project(*source_axes_names, *dest_axes_names).values()
+        variation = h.project(*dest_axes_names, *source_axes_names).values()
         variation = variation.reshape((*norm.shape, -1))
 
         self.dict_beta_variations[dest_channel][process] = variation
