@@ -14,11 +14,13 @@ from plotly.subplots import make_subplots
 
 from rabbit import io_tools
 
-from wums import output_tools, plot_tools  # isort: skip
+from wums import logging, output_tools, plot_tools  # isort: skip
 
 
 # prevent MathJax from bein loaded
 pio.kaleido.scope.mathjax = None
+
+logger = None
 
 
 def writeOutput(fig, outfile, extensions=[], postfix=None, args=None, meta_info=None):
@@ -701,6 +703,17 @@ def parseArgs():
         help="fitresults output hdf5 file from fit",
     )
     parser.add_argument(
+        "-v",
+        "--verbose",
+        type=int,
+        default=3,
+        choices=[0, 1, 2, 3, 4],
+        help="Set verbosity level with logging, the larger the more verbose",
+    )
+    parser.add_argument(
+        "--noColorLogger", action="store_true", help="Do not use logging with colors"
+    )
+    parser.add_argument(
         "--result",
         default=None,
         type=str,
@@ -708,11 +721,30 @@ def parseArgs():
     )
     parser.add_argument(
         "-m",
-        "--physicsModel",
+        "--mapping",
         default=None,
         type=str,
         nargs="+",
-        help="Print impacts on observables use '-m <model> channel axes' for physics model results.",
+        help="Plot impacts on observables use '-m <mapping> channel axes' for mapping results.",
+    )
+    parser.add_argument(
+        "--channel",
+        default=None,
+        type=str,
+        help="Plot impacts for given channel",
+    )
+    parser.add_argument(
+        "--refMapping",
+        default=None,
+        type=str,
+        nargs="+",
+        help="Plot impacts on observables from mapping results for reference.",
+    )
+    parser.add_argument(
+        "--refChannel",
+        default=None,
+        type=str,
+        help="Plot impacts for given channel",
     )
     parser.add_argument(
         "-r",
@@ -1230,17 +1262,21 @@ def produce_plots_hist(
 
 def main():
     args = parseArgs()
+    global logger
+    logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
     config = plot_tools.load_config(args.config)
 
     translate_label = getattr(config, "impact_labels", {})
 
     fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
-    if args.referenceFile is not None or args.refResult is not None:
-        referenceFile = (
-            args.referenceFile if args.referenceFile is not None else args.inputFile
-        )
-        fitresult_ref = io_tools.get_fitresult(referenceFile, args.refResult)
+    if any(
+        x is not None for x in [args.referenceFile, args.refResult, args.refMapping]
+    ):
+        if args.referenceFile is not None:
+            fitresult_ref = io_tools.get_fitresult(args.referenceFile, args.refResult)
+        else:
+            fitresult_ref = fitresult
     else:
         fitresult_ref = None
 
@@ -1275,7 +1311,7 @@ def main():
         if args.grouping is not None:
             grouping = getattr(config, "nuisance_grouping", {}).get(args.grouping, None)
 
-        if args.physicsModel is not None:
+        if args.mapping is not None:
             if args.asymImpacts:
                 raise NotImplementedError(
                     "Asymetric impacts on observables is not yet implemented"
@@ -1285,18 +1321,44 @@ def main():
                     "Only global impacts on observables is implemented (use --globalImpacts)"
                 )
 
-            model_key = " ".join(args.physicsModel)
-            if model_key in fitresult["physics_models"].keys():
-                channels = fitresult["physics_models"][model_key]["channels"]
-            else:
-                keys = [
-                    key
-                    for key in fitresult["physics_models"].keys()
-                    if key.startswith(model_key)
-                ]
-                channels = fitresult["physics_models"][keys[0]]["channels"]
+            def get_mapping_key(result, key):
+
+                res = result.get("mappings", fitresult.get("physics_models"))
+                if key in res.keys():
+                    channels = res[key]["channels"]
+                    return channels, key
+                else:
+                    keys = [k for k in res.keys() if k.startswith(key)]
+                    if len(keys) == 0:
+                        raise ValueError(
+                            f"Mapping {key} not found, available mappings are: {res.keys()}"
+                        )
+
+                    channels = res[keys[0]]["channels"]
+                    logger.info(
+                        f"Found mapping {keys[0]} with channels {[k for k in channels.keys()]}"
+                    )
+
+                    return channels, keys[0]
+
+            mapping_key = " ".join(args.mapping)
+
+            channels, mapping_key = get_mapping_key(fitresult, mapping_key)
+
+            if fitresult_ref:
+                mapping_key_ref = (
+                    " ".join(args.refMapping)
+                    if args.refMapping is not None
+                    else mapping_key
+                )
+
+                channels_ref, mapping_key_ref = get_mapping_key(
+                    fitresult_ref, mapping_key_ref
+                )
 
             for channel, hists in channels.items():
+                if args.channel and channel not in args.channel:
+                    continue
 
                 modes = ["ungrouped", "group"] if args.mode == "both" else [args.mode]
                 for mode in modes:
@@ -1310,14 +1372,23 @@ def main():
 
                     hist = hists[key].get()
 
-                    # TODO: implement ref
-                    # hist_ref
-                    # hist_total_ref
+                    if fitresult_ref:
+                        if args.refChannel:
+                            channel_ref = args.refChannel
+                        elif channel in channels_ref.keys():
+                            channel_ref = channel
+                        elif len(channels_ref.keys()) == 1:
+                            channel_ref = [v for v in channels_ref.keys()][0]
+                        else:
+                            raise NotImplementedError(
+                                f"Could not decide which is the right channel from reference file with channels: {channels_ref.keys()}"
+                            )
 
-                    if fitresult_ref is not None:
-                        hists_ref = fitresult_ref["physics_models"][model_key][
-                            "channels"
-                        ][channel]
+                        res_ref = fitresult_ref.get(
+                            "mappings", fitresult.get("physics_models")
+                        )
+                        hists_ref = res_ref[mapping_key_ref]["channels"][channel_ref]
+
                         hist_ref = hists_ref[key].get()
                         hist_total_ref = hists_ref["hist_postfit_inclusive"].get()
 

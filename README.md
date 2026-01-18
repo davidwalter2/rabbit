@@ -122,19 +122,19 @@ rabbit_fit test_tensor.hdf5 -o results/fitresult.hdf5 -t 0 --doImpacts --globalI
 ### Bin-by-bin statistical uncertainties
 Bin-by-bin statistical uncertainties on the templates are added by default and can be disabled at runtime using the `--noBinByBinStat` option. The Barlow-Beeston lite method is used to add implicit nuisance parameters for each template bin.  By default this is implemented using a gamma distribution for the probability density, but Gaussian uncertainties can also be used with `--binByBinStatType normal`.
 
-### Physics models
-Physics models are used to perform transformation on the parameters and observables (the histogram bins in the (masked) channels). 
-Baseline models are defined in `rabbit/physicsmodels/` and can be called in `rabbit_fit` with the `--PhysicsModel` or `-m` option e.g. `-m Select ch0 -m Project ch1 b`. 
-The first argument is the physics model name followed by arguments passed into the physics model.
-Available physics models are
- * `Basemodel`: Compute histograms in all bins and all channels.
+### Mappings
+Perform mappings on the parameters and observables (the histogram bins in the (masked) channels). 
+Baseline mappings are defined in `rabbit/mappings/` and can be called in `rabbit_fit` with the `--mapping` or `-m` option e.g. `-m Select ch0 -m Project ch1 b`. 
+The first argument is the mapping name followed by arguments passed into the mapping.
+Available mappings are:
+ * `BaseMapping`: Compute histograms in all bins and all channels.
  * `Select`: To select histograms of a channel, and perform a selection of processes and bins, supporting rebinning.
  * `Project`: To project histograms to lower dimensions, respecting the covariance matrix across bins.
  * `Normalize`: To normalize histograms to their sum (and project them) e.g. to compute normalized differential cross sections.
  * `Ratio`: To compute the ratio between channels, processes, or histogram bins.
  * `Normratio`: To compute the ratio of normalized histograms.
 
-Models can be specified in the comand line and can feature different parsing syntax. 
+Mapping can be specified in the comand line and can feature different parsing syntax. 
 A convension is set up for parsing process and axes selections (e.g. in the `Select` and `Ratio` models). For selecting processes a comma separated list, e.g. <process_0>,<process_1>...
 and for axes selecitons <axis_name_0>:<selection_0>,<axis_name_1>:<selection_1>,... i.e. a comma separated list of axis names and selections separated by ":". 
 Selections can be 
@@ -145,10 +145,22 @@ Selections can be
 - `None:None` for whch `None` is returned, indicating no selection
 Multiple selection per axis can be specified, e.g. `x:slice(2,8),x:sum`.
 
-Custom physics models can be used to make the desired transformation.
-They can be specified with the full path to the custom model e.g. `-m custom_models.MyCustomModel`. 
+Custom mappings can be defined.
+They can be specified with the full path to the custom mapping e.g. `-m custom_mapping.MyCustomMapping`. 
 The path must be accessable from your `$PYTHONPATH` variable and an `__ini__.py` file must be in the directory.
 
+### POI models
+POI models can be used to introduce paramter of interests (POIs) and modify the number of predicted events in the fit. 
+Baseline models are defined in `rabbit/poi_models/` and can be called in `rabbit_fit` with the `--poiModel` option, e.g. `--poiModel Mu`.
+Only one POI model at a time can be used at a time.
+Available POI models are:
+* `Mu`: Scale the number of events for each signal process with an unconstrained parameter, and background proesses with 1. This is the default model
+* `Ones`: Return ones, i.e. leave the number of predicted events the same.
+* `Mixture`: Scale the `primary` processes by `x` and the `complementary` processes by `1-x`
+
+Custom POI models can be defined.
+They can be specified with the full path to the custom mapping e.g. `--poiModel custom_model.MyCustomModel`. 
+The path must be accessable from your `$PYTHONPATH` variable and an `__ini__.py` file must be in the directory.
 
 ## Fit diagnostics
 

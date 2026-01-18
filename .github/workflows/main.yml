@@ -156,6 +156,10 @@ jobs:
         run: >-
           python tests/make_tensor.py -o $RABBIT_OUTDIR/
 
+      - name: make bsm tensor
+        run: >-
+          python tests/make_tensor.py -o $RABBIT_OUTDIR/ --bsm --postfix bsm
+
       - name: make symmetric tensor
         run: >-
           python tests/make_tensor.py -o $RABBIT_OUTDIR/ --symmetrizeAll --systematicType normal --postfix symmetric
@@ -207,7 +211,7 @@ jobs:
           -t 0 --unblind --doImpacts --globalImpacts
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistCov --computeHistImpacts --computeVariations
-          -m Basemodel
+          -m BaseMapping
           -m Select ch0 'x:rebin(-5,-2,2,5)'
           -m Project ch1 a 
           -m Project ch1 b 
@@ -217,7 +221,7 @@ jobs:
           -m Ratio ch0 ch1 'None:None' 'b:slice(0,2),b:sum'
           -m Ratio ch0 ch1 'x:slice(None,None,2),x:sum' 'a:sum,b:sum'
           -m Normratio ch1 ch1 sig sig,bkg 'b:sum' 'b:2'
-          -m tests.param_model.Param 'slope_signal' 1 0
+          -m tests.param_mapping.Param 'slope_signal' 1 0
 
       - name: nominal fit
         run: >- 
@@ -225,7 +229,7 @@ jobs:
           -t 0 --unblind '.*' --doImpacts --globalImpacts
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistCov --computeHistImpacts --computeVariations
-          --compositeModel -m Project ch1 a -m Project ch1 b 
+          --compositeMapping -m Project ch1 a -m Project ch1 b 
 
       - name: nominal fit blinded
         run: >- 
@@ -262,6 +266,32 @@ jobs:
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix bb_full
           -t 0 --globalImpacts --binByBinStatType normal-multiplicative --binByBinStatMode full
+
+  bsm:
+    runs-on: [self-hosted, linux, x64]
+    needs: [setenv, make-tensor]
+
+    steps:
+      - env:
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
+          PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
+          PATH: ${{ needs.setenv.outputs.PATH }}
+        run: |
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
+          echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
+          echo "PATH=${PATH}" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v4
+
+      - name: bsm limits
+        run: >-
+          rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
+          -t 0 --unblind --expectSignal bsm1 0 --expectSignal bsm2 1 --allowNegativePOI --asymptoticLimits bsm1 --levels 0.05
+
+      - name: bsm limits on channel 
+        run: >-
+          rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
+          -t 0 --unblind --poiModel Mixture bsm1 sig --expectSignal bsm1_sig_mixing 0 --asymptoticLimits bsm1_sig_mixing --levels 0.05 --allowNegativePOI
 
   plotting:
     runs-on: [self-hosted, linux, x64]
@@ -320,13 +350,13 @@ jobs:
       - name: plot prefit distributions
         run: >-
           rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
-          --extraTextLoc '0.05' '0.7' --legCols 1 -m Basemodel -m Project ch1 a -m Project ch1 b --yscale '1.2' 
+          --extraTextLoc '0.05' '0.7' --legCols 1 -m BaseMapping -m Project ch1 a -m Project ch1 b --yscale '1.2' 
           --subtitle Preliminary --prefit --config tests/style_config.py
 
       - name: plot postfit distributions
         run: >-
           rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
-          --extraTextLoc '0.05' '0.7' --legCols 1 -m Basemodel -m Project ch1 a -m Project ch1 b -m Normalize ch0 x --yscale '1.2' 
+          --extraTextLoc '0.05' '0.7' --legCols 1 -m BaseMapping -m Project ch1 a -m Project ch1 b -m Normalize ch0 x --yscale '1.2' 
           --subtitle Preliminary --varNames 'slope_signal' --varColors orange --config tests/style_config.py --rrange 0.8 1.2
 
       - name: plot histogram uncertainties
@@ -401,7 +431,7 @@ jobs:
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
-    needs: [setenv, symmerizations, plotting, likelihoodscans]
+    needs: [setenv, symmerizations, bsm, plotting, likelihoodscans]
     if: always() 
     steps:
       - env:

@@ -100,13 +100,13 @@ def parseArgs():
     )
     parser.add_argument(
         "-m",
-        "--physicsModel",
+        "--mapping",
         nargs="+",
         action="append",
         default=[],
         help="""
-        Make plot of physics model prefit and postfit histograms. Loop over all by deault. 
-        Can also specify the model name, followed by the arguments, e.g. "-m Project ch0 eta pt". 
+        Make plot of mapping prefit and postfit histograms. Loop over all by deault. 
+        Can also specify the mapping name, followed by the arguments, e.g. "-m Project ch0 eta pt". 
         This argument can be called multiple times.
         """,
     )
@@ -152,6 +152,7 @@ def plot_matrix(
     suffix=None,
     ticklabels=None,
 ):
+    opts = dict()
 
     if not isinstance(matrix, np.ndarray):
         matrix = matrix.values()
@@ -163,10 +164,8 @@ def plot_matrix(
     if args.correlation:
         std_dev = np.sqrt(np.diag(matrix))
         matrix = matrix / np.outer(std_dev, std_dev)
+        opts.update(dict(vmin=-1, vmax=1))
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    opts = dict()
     if ticklabels is not None:
         opts.update(
             dict(
@@ -175,6 +174,7 @@ def plot_matrix(
             )
         )
 
+    fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(
         matrix,
         cmap=cmap,
@@ -291,16 +291,16 @@ def main():
 
     hist_cov_key = f"hist_{'prefit' if args.prefit else 'postfit'}_inclusive_cov"
 
-    results = fitresult["physics_models"]
-    for margs in args.physicsModel:
+    results = fitresult.get("mappings", fitresult.get("physics_models"))
+    for margs in args.mapping:
         if margs == []:
             instance_keys = results.keys()
         else:
-            model_key = " ".join(margs)
-            instance_keys = [k for k in results.keys() if k.startswith(model_key)]
+            mapping_key = " ".join(margs)
+            instance_keys = [k for k in results.keys() if k.startswith(mapping_key)]
             if len(instance_keys) == 0:
                 raise ValueError(
-                    f"No model found under {model_key}, available models are {results.keys()}"
+                    f"No mapping found under {mapping_key}, available mappings are {results.keys()}"
                 )
 
         for instance_key in instance_keys:

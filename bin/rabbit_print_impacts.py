@@ -43,11 +43,11 @@ def parseArgs():
     )
     parser.add_argument(
         "-m",
-        "--physicsModel",
+        "--mapping",
         default=None,
         type=str,
         nargs="+",
-        help="Print impacts on observables use '-m <model> channel axes' for physics model results.",
+        help="Print impacts on observables use '-m <mapping> channel axes' for mapping results.",
     )
     parser.add_argument(
         "--relative",
@@ -139,7 +139,7 @@ def main():
     args = parseArgs()
     fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
 
-    if args.physicsModel is not None:
+    if args.mapping is not None:
         if args.asymImpacts:
             raise NotImplementedError(
                 "Asymetric impacts on observables is not yet implemented"
@@ -149,8 +149,9 @@ def main():
                 "Only global impacts on observables is implemented (use --globalImpacts)"
             )
 
-        model_key = " ".join(args.physicsModel)
-        channels = fitresult["physics_models"][model_key]["channels"]
+        mapping_key = " ".join(args.mapping)
+        results = fitresult.get("mappings", fitresult.get("physics_models"))
+        channels = results[mapping_key]["channels"]
 
         for hists in channels.values():
             key = "hist_postfit_inclusive_global_impacts"

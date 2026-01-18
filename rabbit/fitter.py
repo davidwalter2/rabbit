@@ -1,12 +1,15 @@
 import hashlib
 import re
+import time
 
+import h5py
 import numpy as np
 import scipy
 import tensorflow as tf
 import tensorflow_probability as tfp
 from wums import logging
 
+from rabbit import io_tools
 from rabbit import tfhelpers as tfh
 
 logger = logging.child_logger(__name__)
@@ -34,10 +37,23 @@ class FitterCallback:
         self.iiter = 0
         self.xval = xv
 
+        self.loss_history = []
+        self.time_history = []
+
+        self.t0 = time.time()
+
     def __call__(self, intermediate_result):
-        logger.debug(f"Iteration {self.iiter}: loss value {intermediate_result.fun}")
-        if np.isnan(intermediate_result.fun):
+        loss = intermediate_result.fun
+
+        logger.debug(
+            f"Iteration {self.iiter}: loss value {loss}"
+        )  # ; status {intermediate_result.status}")
+        if np.isnan(loss):
             raise ValueError(f"Loss value is NaN at iteration {self.iiter}")
+
+        self.loss_history.append(loss)
+        self.time_history.append(time.time() - self.t0)
+
         self.xval = intermediate_result.x
         self.iiter += 1
 
@@ -46,10 +62,12 @@ class Fitter:
     valid_bin_by_bin_stat_types = ["gamma", "normal-additive", "normal-multiplicative"]
     valid_systematic_types = ["log_normal", "normal"]
 
-    def __init__(self, indata, options, do_blinding=False):
+    def __init__(
+        self, indata, poi_model, options, globalImpactsFromJVP=True, do_blinding=False
+    ):
         self.indata = indata
 
-        self.globalImpactsFromJVP = not options.globalImpactsDisableJVP
+        self.globalImpactsFromJVP = globalImpactsFromJVP
         self.binByBinStat = not options.noBinByBinStat
         self.binByBinStatMode = options.binByBinStatMode
 
@@ -105,25 +123,12 @@ class Fitter:
             options.prefitUnconstrainedNuisanceUncertainty
         )
 
-        self.pois = []
-
-        if options.POIMode == "mu":
-            self.npoi = self.indata.nsignals
-            poidefault = options.expectSignal * tf.ones(
-                [self.npoi], dtype=self.indata.dtype
-            )
-            for signal in self.indata.signals:
-                self.pois.append(signal)
-        elif options.POIMode == "none":
-            self.npoi = 0
-            poidefault = tf.zeros([], dtype=self.indata.dtype)
-        else:
-            raise Exception("unsupported POIMode")
+        self.poi_model = poi_model
 
         self.do_blinding = do_blinding
         if self.do_blinding:
             self._blinding_offsets_poi = tf.Variable(
-                tf.ones([self.npoi], dtype=self.indata.dtype),
+                tf.ones([self.poi_model.npoi], dtype=self.indata.dtype),
                 trainable=False,
                 name="offset_poi",
             )
@@ -134,25 +139,25 @@ class Fitter:
             )
             self.init_blinding_values(options.unblind)
 
-        self.parms = np.concatenate([self.pois, self.indata.systs])
-
-        self.init_frozen_params(options.freezeParameters)
-
-        self.allowNegativePOI = options.allowNegativePOI
-
-        if self.allowNegativePOI:
-            self.xpoidefault = poidefault
-        else:
-            self.xpoidefault = tf.sqrt(poidefault)
+        self.parms = np.concatenate([self.poi_model.pois, self.indata.systs])
 
         # tf variable containing all fit parameters
         thetadefault = tf.zeros([self.indata.nsyst], dtype=self.indata.dtype)
-        if self.npoi > 0:
-            xdefault = tf.concat([self.xpoidefault, thetadefault], axis=0)
+        if self.poi_model.npoi > 0:
+            xdefault = tf.concat([self.poi_model.xpoidefault, thetadefault], axis=0)
         else:
             xdefault = thetadefault
 
         self.x = tf.Variable(xdefault, trainable=True, name="x")
+
+        # for freezing parameters
+        self.frozen_params = []
+        self.frozen_params_mask = tf.Variable(
+            tf.zeros_like(self.x, dtype=tf.bool), trainable=False, dtype=tf.bool
+        )
+
+        self.frozen_indices = np.array([])
+        self.freeze_params(options.freezeParameters)
 
         # observed number of events per bin
         self.nobs = tf.Variable(
@@ -275,21 +280,65 @@ class Fitter:
         # determine if problem is linear (ie likelihood is purely quadratic)
         self.is_linear = (
             (self.chisqFit or self.covarianceFit)
-            and (self.npoi == 0 or self.allowNegativePOI)
+            and self.poi_model.is_linear
             and self.indata.symmetric_tensor
             and self.indata.systematic_type == "normal"
             and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
         )
 
-    def init_frozen_params(self, frozen_parmeter_expressions):
-        self.frozen_params = match_regexp_params(
-            frozen_parmeter_expressions, self.parms
+    def load_fitresult(self, fitresult_file, fitresult_key):
+        # load results from external fit and set postfit value and covariance elements for common parameters
+        with h5py.File(fitresult_file, "r") as fext:
+            if "x" in fext.keys():
+                # fitresult from combinetf
+                x_ext = fext["x"][...]
+                parms_ext = fext["parms"][...].astype(str)
+                cov_ext = fext["cov"][...]
+            else:
+                # fitresult from rabbit
+                h5results_ext = io_tools.get_fitresult(fext, fitresult_key)
+                h_parms_ext = h5results_ext["parms"].get()
+
+                x_ext = h_parms_ext.values()
+                parms_ext = np.array(h_parms_ext.axes["parms"])
+                cov_ext = h5results_ext["cov"].get().values()
+
+        xvals = self.x.numpy()
+        covval = self.cov.numpy()
+        parms = self.parms.astype(str)
+
+        # Find common elements with their matching indices
+        common_elements, idxs, idxs_ext = np.intersect1d(
+            parms, parms_ext, assume_unique=True, return_indices=True
         )
-        self.frozen_params_mask = np.isin(self.parms, self.frozen_params)
-        self.frozen_indices = np.where(self.frozen_params_mask)[0]
+        xvals[idxs] = x_ext[idxs_ext]
+        covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
+
+        self.x.assign(xvals)
+        self.cov.assign(tf.constant(covval))
+
+    def update_frozen_params(self):
+        new_mask_np = np.isin(self.parms, self.frozen_params)
+
+        self.frozen_params_mask.assign(new_mask_np)
+        self.frozen_indices = np.where(new_mask_np)[0]
+
+    def freeze_params(self, frozen_parmeter_expressions):
+        self.frozen_params.extend(
+            match_regexp_params(frozen_parmeter_expressions, self.parms)
+        )
+        self.update_frozen_params()
+
+    def defreeze_params(self, unfrozen_parmeter_expressions):
+        unfrozen_parmeter = match_regexp_params(
+            unfrozen_parmeter_expressions, self.parms
+        )
+        self.frozen_params = [
+            x for x in self.frozen_params if x not in unfrozen_parmeter
+        ]
+        self.update_frozen_params()
 
     def init_blinding_values(self, unblind_parameter_expressions=[]):
-
         unblind_parameters = match_regexp_params(
             unblind_parameter_expressions,
             [
@@ -331,8 +380,8 @@ class Fitter:
             self._blinding_values_theta[i] = value
 
         # add offset to pois
-        self._blinding_values_poi = np.ones(self.npoi, dtype=np.float64)
-        for i in range(self.npoi):
+        self._blinding_values_poi = np.ones(self.poi_model.npoi, dtype=np.float64)
+        for i in range(self.poi_model.npoi):
             param = self.indata.signals[i]
             if param in unblind_parameters:
                 continue
@@ -347,21 +396,23 @@ class Fitter:
             self._blinding_offsets_poi.assign(self._blinding_values_poi)
             self._blinding_offsets_theta.assign(self._blinding_values_theta)
         else:
-            self._blinding_offsets_poi.assign(np.ones(self.npoi, dtype=np.float64))
+            self._blinding_offsets_poi.assign(
+                np.ones(self.poi_model.npoi, dtype=np.float64)
+            )
             self._blinding_offsets_theta.assign(
                 np.zeros(self.indata.nsyst, dtype=np.float64)
             )
 
     def get_blinded_theta(self):
-        theta = self.x[self.npoi :]
+        theta = self.x[self.poi_model.npoi :]
         if self.do_blinding:
             return theta + self._blinding_offsets_theta
         else:
             return theta
 
     def get_blinded_poi(self):
-        xpoi = self.x[: self.npoi]
-        if self.allowNegativePOI:
+        xpoi = self.x[: self.poi_model.npoi]
+        if self.poi_model.allowNegativePOI:
             poi = xpoi
         else:
             poi = tf.square(xpoi)
@@ -378,7 +429,7 @@ class Fitter:
 
     def prefit_covariance(self, unconstrained_err=0.0):
         # free parameters are taken to have zero uncertainty for the purposes of prefit uncertainties
-        var_poi = tf.zeros([self.npoi], dtype=self.indata.dtype)
+        var_poi = tf.zeros([self.poi_model.npoi], dtype=self.indata.dtype)
 
         # nuisances have their uncertainty taken from the constraint term, but unconstrained nuisances
         # are set to a placeholder uncertainty (zero by default) for the purposes of prefit uncertainties
@@ -427,10 +478,10 @@ class Fitter:
         self.theta0.assign(tf.zeros([self.indata.nsyst], dtype=self.theta0.dtype))
 
     def xdefaultassign(self):
-        if self.npoi == 0:
+        if self.poi_model.npoi == 0:
             self.x.assign(self.theta0)
         else:
-            self.x.assign(tf.concat([self.xpoidefault, self.theta0], axis=0))
+            self.x.assign(tf.concat([self.poi_model.xpoidefault, self.theta0], axis=0))
 
     def beta0defaultassign(self):
         self.set_beta0(self._default_beta0())
@@ -454,7 +505,7 @@ class Fitter:
 
     def bayesassign(self):
         # FIXME use theta0 as the mean and constraintweight to scale the width
-        if self.npoi == 0:
+        if self.poi_model.npoi == 0:
             self.x.assign(
                 self.theta0
                 + tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
@@ -463,7 +514,7 @@ class Fitter:
             self.x.assign(
                 tf.concat(
                     [
-                        self.xpoidefault,
+                        self.poi_model.xpoidefault,
                         self.theta0
                         + tf.random.normal(
                             shape=self.theta0.shape, dtype=self.theta0.dtype
@@ -652,10 +703,11 @@ class Fitter:
 
             for j, sign in enumerate((1, -1)):
                 variation = (
-                    sign * err_theta[idx - self.npoi] + theta0_tmp[idx - self.npoi]
+                    sign * err_theta[idx - self.poi_model.npoi]
+                    + theta0_tmp[idx - self.poi_model.npoi]
                 )
                 # vary the non-profile parameter
-                self.theta0[idx - self.npoi].assign(variation)
+                self.theta0[idx - self.poi_model.npoi].assign(variation)
                 self.x[idx].assign(
                     variation
                 )  # this should not be needed but should accelerates the minimization
@@ -671,7 +723,9 @@ class Fitter:
                 self.x.assign(x_tmp)
 
             # back to original value
-            self.theta0[idx - self.npoi].assign(theta0_tmp[idx - self.npoi])
+            self.theta0[idx - self.poi_model.npoi].assign(
+                theta0_tmp[idx - self.poi_model.npoi]
+            )
 
         # grouped nonprofiled impacts
         @tf.function
@@ -712,7 +766,9 @@ class Fitter:
         )
 
     def _compute_impact_group(self, v, idxs):
-        cov_reduced = tf.gather(self.cov[self.npoi :, self.npoi :], idxs, axis=0)
+        cov_reduced = tf.gather(
+            self.cov[self.poi_model.npoi :, self.poi_model.npoi :], idxs, axis=0
+        )
         cov_reduced = tf.gather(cov_reduced, idxs, axis=1)
         v_reduced = tf.gather(v, idxs, axis=1)
         invC_v = tf.linalg.solve(cov_reduced, tf.transpose(v_reduced))
@@ -720,10 +776,10 @@ class Fitter:
         return tf.sqrt(v_invC_v)
 
     def _gather_poi_noi_vector(self, v):
-        v_poi = v[: self.npoi]
+        v_poi = v[: self.poi_model.npoi]
         # protection for constained NOIs, set them to 0
         mask = (self.indata.noiidxs >= 0) & (
-            self.indata.noiidxs < tf.shape(v[self.npoi :])[0]
+            self.indata.noiidxs < tf.shape(v[self.poi_model.npoi :])[0]
         )
         safe_idxs = tf.where(mask, self.indata.noiidxs, 0)
         mask = tf.cast(mask, v.dtype)
@@ -733,7 +789,7 @@ class Fitter:
                 [tf.shape(mask), tf.ones(tf.rank(v) - 1, dtype=tf.int32)], axis=0
             ),
         )
-        v_noi = tf.gather(v[self.npoi :], safe_idxs) * mask
+        v_noi = tf.gather(v[self.poi_model.npoi :], safe_idxs) * mask
         v_gathered = tf.concat([v_poi, v_noi], axis=0)
         return v_gathered
 
@@ -743,7 +799,7 @@ class Fitter:
         v = self._gather_poi_noi_vector(self.cov)
         impacts = v / tf.reshape(tf.sqrt(tf.linalg.diag_part(self.cov)), [1, -1])
 
-        nstat = self.npoi + self.indata.nsystnoconstraint
+        nstat = self.poi_model.npoi + self.indata.nsystnoconstraint
         hess_stat = hess[:nstat, :nstat]
         inv_hess_stat = tf.linalg.inv(hess_stat)
 
@@ -772,7 +828,9 @@ class Fitter:
 
         if len(self.indata.systgroupidxs):
             impacts_grouped_syst = tf.map_fn(
-                lambda idxs: self._compute_impact_group(v[:, self.npoi :], idxs),
+                lambda idxs: self._compute_impact_group(
+                    v[:, self.poi_model.npoi :], idxs
+                ),
                 tf.ragged.constant(self.indata.systgroupidxs, dtype=tf.int32),
                 fn_output_signature=tf.TensorSpec(
                     shape=(impacts.shape[0],), dtype=tf.float64
@@ -891,10 +949,12 @@ class Fitter:
 
     @tf.function
     def global_impacts_parms(self):
-        # TODO migrate this to a physics model to avoid the below code which is largely duplicated
+        # TODO migrate this to a mapping to avoid the below code which is largely duplicated
 
-        idxs_poi = tf.range(self.npoi, dtype=tf.int64)
-        idxs_noi = tf.constant(self.npoi + self.indata.noiidxs, dtype=tf.int64)
+        idxs_poi = tf.range(self.poi_model.npoi, dtype=tf.int64)
+        idxs_noi = tf.constant(
+            self.poi_model.npoi + self.indata.noiidxs, dtype=tf.int64
+        )
         idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
 
         dexpdx = tf.one_hot(idxsout, depth=self.cov.shape[0], dtype=self.cov.dtype)
@@ -919,7 +979,7 @@ class Fitter:
             impacts_beta0_total = tf.sqrt(var_beta0)
 
         impacts_x0 = self._compute_global_impacts_x0(cov_dexpdx)
-        impacts_theta0 = impacts_x0[self.npoi :]
+        impacts_theta0 = impacts_x0[self.poi_model.npoi :]
 
         impacts_theta0 = tf.transpose(impacts_theta0)
         impacts = impacts_theta0
@@ -1144,7 +1204,7 @@ class Fitter:
                 )
 
             impacts_x0 = self._compute_global_impacts_x0(cov_dexpdx)
-            impacts_theta0 = impacts_x0[self.npoi :]
+            impacts_theta0 = impacts_x0[self.poi_model.npoi :]
 
             impacts_theta0 = tf.transpose(impacts_theta0)
             impacts = impacts_theta0
@@ -1236,23 +1296,21 @@ class Fitter:
 
         return expvars
 
-    def _compute_yields_noBBB(self, compute_norm=False, full=True):
-        # compute_norm: compute yields for each process, otherwise inclusive
+    def _compute_yields_noBBB(self, full=True):
         # full: compute yields inclduing masked channels
         poi = self.get_blinded_poi()
         theta = self.get_blinded_theta()
 
+        poi = tf.where(
+            self.frozen_params_mask[: self.poi_model.npoi], tf.stop_gradient(poi), poi
+        )
         theta = tf.where(
-            self.frozen_params_mask[self.npoi :], tf.stop_gradient(theta), theta
+            self.frozen_params_mask[self.poi_model.npoi :],
+            tf.stop_gradient(theta),
+            theta,
         )
 
-        rnorm = tf.concat(
-            [poi, tf.ones([self.indata.nproc - poi.shape[0]], dtype=self.indata.dtype)],
-            axis=0,
-        )
-
-        mrnorm = tf.expand_dims(rnorm, -1)
-        ernorm = tf.reshape(rnorm, [1, -1])
+        rnorm = self.poi_model.compute(poi)
 
         normcentral = None
         if self.indata.symmetric_tensor:
@@ -1281,7 +1339,7 @@ class Fitter:
                     snorm * self.indata.norm.values
                 )
             elif self.indata.systematic_type == "normal":
-                snormnorm_sparse = self.indata.norm * ernorm
+                snormnorm_sparse = self.indata.norm * rnorm
                 snormnorm_sparse = snormnorm_sparse.with_values(
                     snormnorm_sparse.values + logsnorm
                 )
@@ -1292,15 +1350,12 @@ class Fitter:
                 )
 
             if self.indata.systematic_type == "log_normal":
-                nexpcentral = tf.sparse.sparse_dense_matmul(snormnorm_sparse, mrnorm)
-                nexpcentral = tf.squeeze(nexpcentral, -1)
-                if compute_norm:
-                    snormnorm = tf.sparse.to_dense(snormnorm_sparse)
-                    normcentral = ernorm * snormnorm
+                snormnorm = tf.sparse.to_dense(snormnorm_sparse)
+                normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
-                if compute_norm:
-                    normcentral = tf.sparse.to_dense(snormnorm_sparse)
-                nexpcentral = tf.sparse.reduce_sum(snormnorm_sparse, axis=-1)
+                normcentral = tf.sparse.to_dense(snormnorm_sparse)
+
+            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull
@@ -1328,20 +1383,16 @@ class Fitter:
             if self.indata.systematic_type == "log_normal":
                 snorm = tf.exp(logsnorm)
                 snormnorm = snorm * norm
-                nexpcentral = tf.matmul(snormnorm, mrnorm)
-                nexpcentral = tf.squeeze(nexpcentral, -1)
-                if compute_norm:
-                    normcentral = ernorm * snormnorm
+                normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
-                normcentral = norm * ernorm + logsnorm
-                nexpcentral = tf.reduce_sum(normcentral, axis=-1)
+                normcentral = norm * rnorm + logsnorm
+
+            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
 
         return nexpcentral, normcentral
 
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
-        nexp, norm = self._compute_yields_noBBB(
-            compute_norm or self.binByBinStatMode == "full", full=full
-        )
+        nexp, norm = self._compute_yields_noBBB(full=full)
 
         if self.binByBinStat:
             if profile:
@@ -1745,7 +1796,7 @@ class Fitter:
 
     def expected_events(
         self,
-        model,
+        mapping,
         inclusive=True,
         compute_variance=True,
         compute_cov=False,
@@ -1761,7 +1812,7 @@ class Fitter:
         ):
             raise NotImplementedError()
 
-        fun = model.compute_flat if inclusive else model.compute_flat_per_process
+        fun = mapping.compute_flat if inclusive else mapping.compute_flat_per_process
 
         aux = [None] * 4
         if compute_cov or compute_variance or compute_global_impacts:
@@ -1771,8 +1822,8 @@ class Fitter:
                     profile=profile,
                     compute_cov=compute_cov,
                     compute_global_impacts=compute_global_impacts,
-                    need_observables=model.need_observables,
-                    inclusive=inclusive and not model.need_processes,
+                    need_observables=mapping.need_observables,
+                    inclusive=inclusive and not mapping.need_processes,
                 )
             )
             aux = [exp_var, exp_cov, exp_impacts, exp_impacts_grouped]
@@ -1780,22 +1831,22 @@ class Fitter:
             exp = self.expected_variations(
                 fun,
                 correlations=correlated_variations,
-                inclusive=inclusive and not model.need_processes,
-                need_observables=model.need_observables,
+                inclusive=inclusive and not mapping.need_processes,
+                need_observables=mapping.need_observables,
             )
         else:
             exp = self._compute_expected(
                 fun,
-                inclusive=inclusive and not model.need_processes,
+                inclusive=inclusive and not mapping.need_processes,
                 profile=profile,
-                need_observables=model.need_observables,
+                need_observables=mapping.need_observables,
             )
 
         if compute_chi2:
             chi2val, ndf = self.chi2(
-                model.compute_flat,
-                model._get_data,
-                model.ndf_reduction,
+                mapping.compute_flat,
+                mapping._get_data,
+                mapping.ndf_reduction,
                 profile=profile,
             )
 
@@ -2038,6 +2089,8 @@ class Fitter:
             del chol
 
             self.x.assign_add(dx)
+
+            callback = None
         else:
 
             def scipy_loss(xval):
@@ -2062,14 +2115,17 @@ class Fitter:
                 return hess.__array__()
 
             xval = self.x.numpy()
+
             callback = FitterCallback(xval)
 
             if self.minimizer_method in [
                 "trust-krylov",
+                "trust-ncg",
             ]:
                 info_minimize = dict(hessp=scipy_hessp)
             elif self.minimizer_method in [
                 "trust-exact",
+                "dogleg",
             ]:
                 info_minimize = dict(hess=scipy_hess)
             else:
@@ -2101,6 +2157,8 @@ class Fitter:
         # usually would have been done during the minimization
         if self.binByBinStat:
             self._profile_beta()
+
+        return callback
 
     def nll_scan(self, param, scan_range, scan_points, use_prefit=False):
         # make a likelihood scan for a single parameter
@@ -2267,82 +2325,157 @@ class Fitter:
         self.x.assign(xval)
         return x_scans, y_scans, dnlls
 
-    def contour_scan(self, param, nll_min, cl=1):
+    def contour_scan(self, param, nll_min, q=1, signs=[-1, 1], fun=None):
 
-        def scipy_grad(xval):
-            self.x.assign(xval)
-            val, grad = self.loss_val_grad()
-            return grad.numpy()
-
-        # def scipy_hessp(xval, pval):
-        #     self.x.assign(xval)
-        #     p = tf.convert_to_tensor(pval)
-        #     val, grad, hessp = self.loss_val_grad_hessp(p)
-        #     # print("scipy_hessp", val)
-        #     return hessp.numpy()
-
-        def scipy_loss(xval):
-            self.x.assign(xval)
+        def scipy_loss(x):
+            self.x.assign(x)
             val = self.loss_val()
-            return val.numpy() - nll_min - 0.5 * cl**2
+            loss = val.numpy() - nll_min - 0.5 * q
+            return loss[None,]
+
+        def scipy_grad(x):
+            self.x.assign(x)
+            val, grad = self.loss_val_grad()
+            return grad.numpy()[None,]
+
+        def scipy_hess(x, v):
+            self.x.assign(x)
+            val, grad, hess = self.loss_val_grad_hess()
+            return v[0] * hess.numpy()
 
         nlc = scipy.optimize.NonlinearConstraint(
             fun=scipy_loss,
             lb=0,
             ub=0,
             jac=scipy_grad,
-            hess=scipy.optimize.SR1(),  # TODO: use exact hessian or hessian vector product
+            hess=scipy_hess,
         )
 
-        # initial guess from covariance
-        idx = np.where(self.parms.astype(str) == param)[0][0]
+        intervals = np.full((len(signs)), np.nan)
+        params_values = np.full((len(signs), len(self.parms)), np.nan)
+
         xval = tf.identity(self.x)
-
-        xup = xval[idx] + self.cov[idx, idx] ** 0.5
-        xdn = xval[idx] - self.cov[idx, idx] ** 0.5
-
         xval_init = xval.numpy()
 
-        intervals = np.full((2, len(self.parms)), np.nan)
-        for i, sign in enumerate([-1.0, 1.0]):
-            if sign == 1.0:
+        idx = np.where(self.parms.astype(str) == param)[0][0]
+        x0 = xval[idx]
+
+        # initial guess from covariance
+        initial_fit = False
+
+        xup = xval[idx] + (self.cov[idx, idx] * q) ** 0.5
+        xdn = xval[idx] - (self.cov[idx, idx] * q) ** 0.5
+
+        for i, sign in enumerate(signs):
+            # Objective function and its derivatives
+            if sign == -1:
                 xval_init[idx] = xdn
             else:
                 xval_init[idx] = xup
 
-            # Objective function and its derivatives
-            def objective(params):
-                return sign * params[idx]
+            if initial_fit:
+                # perform initial fit where contour is expected
+                self.x.assign(xval_init)
+                self.freeze_params(param)
+                self.minimize()
+                self.defreeze_params(param)
 
-            def objective_jac(params):
-                jac = np.zeros_like(params)
-                jac[idx] = sign
-                return jac
+            opt = {}
+            if fun is None:
+                # contour scan on parameter
+                def objective_val_grad(x):
+                    self.x.assign(x)
+                    val = -sign * (x[idx] - x0)
+                    grad = np.zeros_like(x)
+                    grad[idx] = -sign
 
-            def objective_hessp(params, v):
-                return np.zeros_like(v)
+                    # logger.info(f"val = {val}")
+                    # logger.info(f"Grad = {grad}")
+                    return val, grad
+
+                from scipy.sparse import csr_matrix
+
+                n_params = len(xval_init)
+                obj_hess = csr_matrix((n_params, n_params))
+                opt["hess"] = lambda x: obj_hess
+            else:
+                # contour scan on observable
+                def objective_val_grad(x):
+                    self.x.assign(x)
+                    with tf.GradientTape() as t:
+                        expected = self._compute_expected(
+                            fun,
+                            inclusive=True,
+                            profile=True,
+                            full=True,
+                            need_observables=True,
+                        )
+                        val = -sign * tf.squeeze(expected)
+                    grad = t.gradient(val, self.x)
+                    return val.__array__(), grad.__array__()
+
+                def objective_hessp(x, pval):
+                    self.x.assign(x)
+                    p = tf.convert_to_tensor(pval, dtype=self.indata.dtype)
+                    p = tf.stop_gradient(p)
+                    with tf.GradientTape() as t2:
+                        with tf.GradientTape() as t1:
+                            expected = self._compute_expected(
+                                fun,
+                                inclusive=True,
+                                profile=True,
+                                full=True,
+                                need_observables=True,
+                            )
+                            val = -sign * tf.squeeze(expected)
+                        grad = t1.gradient(val, self.x)
+                    hessp = t2.gradient(grad, self.x, output_gradients=p)
+                    return hessp.__array__()
+
+                opt["hessp"] = objective_hessp
 
             res = scipy.optimize.minimize(
-                objective,
+                objective_val_grad,
                 xval_init,
                 method="trust-constr",
-                jac=objective_jac,
-                hessp=objective_hessp,
+                jac=True,
                 constraints=[nlc],
                 options={
-                    "maxiter": 5000,
+                    "maxiter": 50000,
                     "xtol": 1e-10,
                     "gtol": 1e-10,
-                    # "verbose": 3
+                    # "barrier_tol": 1e-10,
                 },
+                **opt,
             )
 
-            if res["success"]:
-                intervals[i] = res["x"] - xval.numpy()
+            logger.info(f"Success: {res.success}")
+            logger.debug(f"Status: {res.status}")
+            if not res.success:
+                logger.warning(f"Message: {res.message}")
+                logger.warning(f"Optimality (gtol): {res.optimality}")
+                logger.warning(f"Constraint Violation: {res.constr_violation}")
+                continue
 
+            params_values[i] = res["x"] - xval
+
+            if fun is None:
+                val = res["x"][idx] - x0
+            else:
+                self.x.assign(res["x"])
+                val = self._compute_expected(
+                    fun,
+                    inclusive=True,
+                    profile=True,
+                    full=True,
+                    need_observables=True,
+                )
+            # reset the parameter values
             self.x.assign(xval)
 
-        return intervals
+            intervals[i] = val
+
+        return intervals, params_values
 
     def contour_scan2D(self, param_tuple, nll_min, cl=1, n_points=16):
         # Not yet working

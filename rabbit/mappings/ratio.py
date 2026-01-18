@@ -1,11 +1,11 @@
 import hist
 import tensorflow as tf
 
-from rabbit.physicsmodels import helpers
-from rabbit.physicsmodels.physicsmodel import PhysicsModel
+from rabbit.mappings import helpers
+from rabbit.mappings.mapping import Mapping
 
 
-class Ratio(PhysicsModel):
+class Ratio(Mapping):
     """
     A class to compute ratios of channels, processes, or bins.
     Optionally the numerator and denominator can be normalized.
@@ -202,5 +202,21 @@ class Asymmetry(Ratio):
         num = self.num.select(observables, inclusive=True)
         den = self.den.select(observables, inclusive=True)
         exp = (num - den) / (num + den)
+        exp = tf.reshape(exp, [-1])
+        return exp
+
+
+class Difference(Ratio):
+    """
+    Same as Ratio but compute the difference of numerator and denominator
+    """
+
+    def init(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def compute_flat(self, params, observables):
+        num = self.num.select(observables, normalize=True, inclusive=True)
+        den = self.den.select(observables, normalize=True, inclusive=True)
+        exp = num - den
         exp = tf.reshape(exp, [-1])
         return exp

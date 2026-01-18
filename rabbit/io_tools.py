@@ -26,7 +26,9 @@ def get_fitresult(fitresult_filename, result=None, meta=False):
 
 
 def get_poi_names(meta):
-    return np.concatenate((meta["signals"], meta["nois"])).astype(str)
+    return np.concatenate((meta.get("pois", meta.get("signals")), meta["nois"])).astype(
+        str
+    )
 
 
 def get_syst_labels(fitresult):
@@ -61,7 +63,7 @@ def read_impacts_poi(
     impacts = h_impacts.values()
     labels = np.array(h_impacts.axes["impacts"])
 
-    #if add_total and poi not in labels:
+    # if add_total and poi not in labels:
     if add_total:
         h_parms = fitresult["parms"].get()
         total = np.sqrt(h_parms[{"parms": poi}].variance)
@@ -155,17 +157,18 @@ def get_pulls_and_constraints(
     return labels, pulls, constraints
 
 
-def get_postfit_hist_cov(fitresult, physics_model="Basemodel", channels=None):
+def get_postfit_hist_cov(fitresult, mapping="BaseMapping", channels=None):
     """
     Return postfit histogram and covariance matrix from selected channels (all if channel is None)
     """
     print(f"Load postfit histogram and covariance matrix")
 
-    if physics_model not in fitresult["physics_models"].keys():
+    result = fitresult.get("mappings", fitresult.get("physics_models"))
+    if mapping not in result.keys():
         raise IOError(
-            f"{physics_model} not found in fitresults, available models are {fitresult['physics_models'].keys()}"
+            f"{mapping} not found in fitresults, available mappings are {result.keys()}"
         )
-    result = fitresult["physics_models"][physics_model]
+    result = result[mapping]
 
     cov = result["hist_postfit_inclusive_cov"].get().values()
     if channels is not None:
