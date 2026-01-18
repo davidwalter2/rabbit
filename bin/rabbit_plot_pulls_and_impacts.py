@@ -16,7 +16,6 @@ from rabbit import io_tools
 
 from wums import logging, output_tools, plot_tools  # isort: skip
 
-
 # prevent MathJax from bein loaded
 pio.kaleido.scope.mathjax = None
 
@@ -1066,7 +1065,9 @@ def load_dataframe_parms(
             stat=args.stat / 100.0,
             normalize=normalize,
             grouping=grouping,
-            scale=args.scaleImpactsRef if args.scaleImpactsRef > 0 else args.scaleImpacts,
+            scale=(
+                args.scaleImpactsRef if args.scaleImpactsRef > 0 else args.scaleImpacts
+            ),
             diff_pulls=not args.pullsNoDiff,
         )
         df = df.merge(df_ref, how="outer", on="label", suffixes=("", "_ref"))
@@ -1114,7 +1115,9 @@ def load_dataframe_hists(
     else:
         scale = args.scaleImpacts
         if fitresult_ref:
-            scale_ref = args.scaleImpactsRef if args.scaleImpactsRef > 0 else args.scaleImpacts
+            scale_ref = (
+                args.scaleImpactsRef if args.scaleImpactsRef > 0 else args.scaleImpacts
+            )
 
     df = readHistImpacts(
         fitresult,
