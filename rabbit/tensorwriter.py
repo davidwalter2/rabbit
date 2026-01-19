@@ -780,6 +780,8 @@ class TensorWriter:
                     "systematic_type": self.systematic_type,
                 }
             )
+            if "meta_info" not in meta_data_dict:
+                meta_data_dict["meta_info"] = {}
 
         ioutils.pickle_dump_h5py("meta", meta_data_dict, f)
 
