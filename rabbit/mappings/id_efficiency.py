@@ -1,12 +1,11 @@
 import hist
 import tensorflow as tf
-
-from rabbit.physicsmodels import helpers
-from rabbit.physicsmodels.physicsmodel import PhysicsModel
+from rabbit.mappings import helpers
+from rabbit.mappings.mapping import Mapping
 
 import pdb
 
-class ID(PhysicsModel):
+class ID(Mapping):
     """
     A class to compute ratios of channels, processes, or bins.
     Optionally the numerator and denominator can be normalized.

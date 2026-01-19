@@ -46,11 +46,6 @@ def parseArgs():
         help="Base path for output",
     )
     parser.add_argument(
-        "--eoscp",
-        action="store_true",
-        help="Override use of xrdcp and use the mount instead",
-    )
-    parser.add_argument(
         "--config",
         type=str,
         default=None,
@@ -131,7 +126,7 @@ def parseArgs():
         "--n_params", type = int, default = 0, help = "last N paramters in the matrix. Used to not plot normalization parameters"
     )
     parser.add_argument(
-        "--cols", nargs='*', default = [], help = "Specify the labels each row/column"
+        "--cols", nargs='*', default = [], help = "Specify the labels each row/column" ## okay i want to implement this in a better way first
     )
     parser.add_argument(
         "--annot", type = bool, default = False, help="display values in center of the cell"
@@ -185,15 +180,6 @@ def plot_matrix(
         yticklabels = args.cols if len(args.cols) != 0 else np.linspace(0, matrix.shape[0], matrix.shape[0]), 
         fmt = ".3f"
     )
-
-    xlabel = plot_tools.get_axis_label(config, axes, args.xlabel)
-    ylabel = plot_tools.get_axis_label(config, axes, args.ylabel)
-
-    # xlabel = ['liv_fit', '$c^{11}=-c^{22}$', '$c^{12}=c^{21}$', '$c^{13}=c^{31}$', '$c^{23}=c^{32}$']
-    # ylabel = xlabel
-    # ax.set_xlabel(xlabel)
-    # ax.set_ylabel(ylabel)
-
 
     plot_tools.add_decor(
         ax,

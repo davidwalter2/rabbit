@@ -1,12 +1,12 @@
 import hist
 import tensorflow as tf
 
-from rabbit.physicsmodels import helpers
-from rabbit.physicsmodels.physicsmodel import PhysicsModel
+from rabbit.mappings import helpers
+from rabbit.mappings.mapping import Mapping
 
 import pdb
 
-class ISO(PhysicsModel):
+class ISO(Mapping):
     """
     A class to compute ratios of channels, processes, or bins.
     Optionally the numerator and denominator can be normalized.
@@ -76,13 +76,6 @@ class ISO(PhysicsModel):
 
         # The output of ratios will always be without process axis
         self.skip_per_process = True
-
-        # if [a.size for a in self.h3.channel_axes] != [
-        #     a.size for a in self.h2.channel_axes
-        # ]:
-        #     raise RuntimeError(
-        #         "Channel axes for numerator and denominator must have the same number of bins"
-        #     )
         
         hist_axes = self.h3.channel_axes
 
@@ -183,7 +176,6 @@ class NormISO(ISO):
         h3 = self.h3.select(observables, normalize = True, inclusive=True)
         h2 = self.h2.select(observables, normalize = True, inclusive=True)
         eps_iso = 2*h3/(h2 + 2*h3)
-        # pdb.set_trace()
         eps_iso = tf.reshape(eps_iso, [-1])
 
         return eps_iso

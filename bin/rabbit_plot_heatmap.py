@@ -5,6 +5,10 @@ import inspect
 import itertools
 import os
 
+import ROOT
+from utilities import common
+import pdb
+
 import hist
 import matplotlib.pyplot as plt
 import mplhep as hep
@@ -12,10 +16,7 @@ import numpy as np
 import pandas as pd
 import scipy.stats
 from matplotlib import colormaps
-from matplotlib.lines import Line2D
 
-
-import seaborn as sns
 import rabbit.io_tools
 
 from wums import boostHistHelpers as hh  # isort: skip
@@ -199,7 +200,7 @@ def parseArgs():
     )
     parser.add_argument(
         "-m",
-        "--physicsModel",
+        "--Mapping",
         nargs="+",
         action="append",
         default=[],
@@ -369,10 +370,38 @@ def parseArgs():
     )
     
     parser.add_argument(
-        "--annot", type = bool, default = False, help="display values in center of the cell"
+        "--annot", 
+        type = bool, 
+        default = False, 
+        help="display values in center of the cell"
     )
-        
-        
+
+    parser.add_argument(
+        "--comm_data_dir", 
+        type = str, 
+        default = common.data_dir, 
+        help = "common data directory for all the reference efficiencies"
+    )
+
+    parser.add_argument(
+        "--data_dir", 
+        type = str, 
+        default = "muonSF/tagAndProbe/2016/",  ###a bit snobby of me because this is the one directory i need but oh well
+        help = "common data directory for all the reference efficiencies"
+    )
+           
+    parser.add_argument(
+        "--root_dataname", 
+        type = str, 
+        default = "",  ###a bit snobby of me because this is the one directory i need but oh well
+        help = "the sepecific data you want to access in the root file. hopefully will be automated in the future to retrieve the correct ones"
+    )
+    parser.add_argument(
+        "--era", 
+        type = str, 
+        default = "2016_PostVFP", 
+        help = "data era"
+    )
     
     
     args = parser.parse_args()
@@ -407,7 +436,8 @@ def make_plot(
     is_normalized=False,
     binwnorm=1.0,
     counts=True,
-    cmap = "coolwarm"
+    cmap = "coolwarm",
+    root_sf = False,
 ):
         
     params = list(h_data.axes.name)
@@ -420,8 +450,10 @@ def make_plot(
 
     ### NEED TO FIX THIS
     # pdb.set_trace()
-    h_data = h_data[{f"{args.fixed_param}": 1}]
-    h_inclusive = h_inclusive[{f"{args.fixed_param}": 1}]
+    
+    if not root_sf:
+        h_data = h_data[{f"{args.fixed_param}": 1}]
+        h_inclusive = h_inclusive[{f"{args.fixed_param}": 1}]
 
     if len(h_data.shape) > 2:
         flat = np.prod(h_data.shape[: len(h_data.shape) // 2])
@@ -429,42 +461,48 @@ def make_plot(
 
         h_inclusive = h_inclusive.reshape((flat, flat))
         
+    if not root_sf: 
+        fig, ax = plt.subplots(figsize=(8, 6))
+        # sns.color_palette("Spectral", as_cmap=True)
         
-    fig, ax = plt.subplots(figsize=(8, 6))
-    # sns.color_palette("Spectral", as_cmap=True)
-    
-    if args.useData  == True:
-        mesh = ax.pcolormesh(axis_2, axis_1, h_data.values(), cmap='Spectral_r')
-    else:
-        mesh = ax.pcolormesh(axis_2, axis_1, h_inclusive.values(), cmap='Spectral_r')
-    
-    ax.set_aspect('auto')
-    plt.colorbar(mesh, ax=ax, label='efficiency')
+        if args.useData  == True:
+            mesh = ax.pcolormesh(axis_2, axis_1, h_data.values(), cmap='Spectral_r')
+        else:
+            mesh = ax.pcolormesh(axis_2, axis_1, h_inclusive.values(), cmap='Spectral_r')
         
-    outfile = f"{varying_params[0]}_{varying_params[1]}_{args.title}"
+        ax.set_aspect('auto')
+        plt.colorbar(mesh, ax=ax, label='Efficiency')
+            
+        outfile = f"{varying_params[0]}_{varying_params[1]}_{args.title}"
 
-    plot_tools.add_decor(
-        ax,
-        outfile,
-        args.subtitle,
-        lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
-        loc=args.titlePos,
-        text_size=args.legSize,
-    )
-    
-    ax.set_xlabel(varying_params[1])
-    ax.set_ylabel(varying_params[0])
+        plot_tools.add_decor(
+            ax,
+            outfile,
+            args.subtitle,
+            lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
+            loc=args.titlePos,
+            text_size=args.legSize,
+        )
+        
+        ax.set_xlabel(varying_params[1])
+        ax.set_ylabel(varying_params[0])
 
-    if args.prefit:
-        outfile += "_prefit"
-    
-    if args.useData == True:
-        ax.set_title("Data")
-        outfile += "_data"
-    else:
-        ax.set_title("MC") 
-        outfile += "_mc"
-    plot_tools.save_pdf_and_png(outdir, outfile)
+        if args.prefit:
+            outfile += "_prefit"
+        
+        if args.useData == True:
+            ax.set_title("Data")
+            outfile += "_data"
+        else:
+            ax.set_title("MC") 
+            outfile += "_mc"
+        plot_tools.save_pdf_and_png(outdir, outfile)
+
+    if root_sf: 
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.set_aspect('auto')
+        outfile = f"eta_pt_{args.title}"
+        fig.colorbar(mesh, label = 'Efficiency', ax = ax)
 
 
 
@@ -472,7 +510,8 @@ def make_plot(
     h_scale = hh.divideHists(h_data, h_inclusive, rel_unc = True, cutoff = 1e-8)
     mesh = ax.pcolormesh(axis_2, axis_1, h_scale.values(), cmap='Spectral_r')
 
-
+    if not root_sf:
+        ax.set_ylim(25, 65)
     plot_tools.add_decor(
         ax,
         outfile,
@@ -484,12 +523,18 @@ def make_plot(
     
     ax.set_xlabel(varying_params[1])
     ax.set_ylabel(varying_params[0])
+    
 
     if args.prefit:
         outfile += "_prefit"
     
-    ax.set_title("Scale factor")
-    outfile += "_SF"
+    if not root_sf:
+        ax.set_title("Scale factor")
+        outfile += "_SF"
+
+    else:
+        ax.set_title("WMass Scale factor")
+        outfile += "_Wmass_SF"
     plot_tools.save_pdf_and_png(outdir, outfile)
 
 
@@ -503,14 +548,14 @@ def make_plot(
         else:
             analysis_meta_info = {"AnalysisOutput": meta["meta_info"]}
 
-    output_tools.write_index_and_log(
-        outdir,
-        outfile,
-        analysis_meta_info={
-            **analysis_meta_info,
-            },
-            args=args,
-        )
+    # output_tools.write_index_and_log(
+    #     outdir,
+    #     outfile,
+    #     analysis_meta_info={
+    #         **analysis_meta_info,
+    #         },
+    #         args=args,
+    #     )
 
 
 def make_plots(
@@ -783,119 +828,193 @@ def main():
             ]
 
     fittype = "prefit" if args.prefit else "postfit"
-
-    # load .hdf5 file first, must exist in combinetf and rabbit
-    fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
-
-    plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
-
-    channel_info = meta["meta_info_input"]["channel_info"]
-
-    procs = meta["procs"].astype(str)[::-1]
-    if args.filterProcs is not None:
-        procs = [p for p in procs if p in args.filterProcs]
-
-    if hasattr(config, "get_labels_colors_procs_sorted"):
-        labels, colors, procs = config.get_labels_colors_procs_sorted(procs)
-    else:
-        labels = procs[:]
-        cmap = plt.get_cmap("tab10")
-        proc_colors = getattr(config, "process_colors", {})
-        colors = [proc_colors.get(p, cmap(i % cmap.N)) for i, p in enumerate(procs)]
-
     outdir = output_tools.make_plot_dir(args.outpath, eoscp=args.eoscp)
 
-    opts = dict(
-        args=args,
-        procs=procs,
-        labels=labels,
-        colors=colors,
-        meta=meta,
-        fittype=fittype,
-        varNames=varNames,
-        varLabels=varLabels,
-        varColors=varColors,
-    )
+    # load .hdf5 file first, must exist in combinetf and rabbit
+    if "root" not in args.infile:
+        fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
 
-    results = fitresult["physics_models"]
-    for margs in args.physicsModel:
-        if margs == []:
-            instance_keys = results.keys()
+
+        plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
+
+        channel_info = meta["meta_info_input"]["channel_info"]
+
+        procs = meta["procs"].astype(str)[::-1]
+        if args.filterProcs is not None:
+            procs = [p for p in procs if p in args.filterProcs]
+
+        if hasattr(config, "get_labels_colors_procs_sorted"):
+            labels, colors, procs = config.get_labels_colors_procs_sorted(procs)
         else:
-            model_key = " ".join(margs)
-            instance_keys = [k for k in results.keys() if k.startswith(model_key)]
-            if len(instance_keys) == 0:
-                raise ValueError(f"No model found under {model_key}")
+            labels = procs[:]
+            cmap = plt.get_cmap("tab10")
+            proc_colors = getattr(config, "process_colors", {})
+            colors = [proc_colors.get(p, cmap(i % cmap.N)) for i, p in enumerate(procs)]
 
-        for instance_key in instance_keys:
 
-            is_normalized = any(
-                instance_key.startswith(x) for x in ["Normalize", "Normratio"]
-            )
+        opts = dict(
+            args=args,
+            procs=procs,
+            labels=labels,
+            colors=colors,
+            meta=meta,
+            fittype=fittype,
+            varNames=varNames,
+            varLabels=varLabels,
+            varColors=varColors,
+        )
 
-            instance = results[instance_key]
+        results = fitresult["mappings"]
+        for margs in args.Mapping:
+            if margs == []:
+                instance_keys = results.keys()
+            else:
+                model_key = " ".join(margs)
+                instance_keys = [k for k in results.keys() if k.startswith(model_key)]
+                if len(instance_keys) == 0:
+                    raise ValueError(f"No model found under {model_key}")
 
-            chi2, ndf, saturated_chi2 = get_chi2(
-                (
-                    fitresult
-                    if fittype == "postfit"
-                    and (
-                        (instance_key == "Basemodel" and args.chisq != "linear")
-                        or args.chisq == "saturated"
-                    )
-                    else instance
-                ),
-                args.chisq in [" ", "none", None],
-                fittype,
-            )
+            for instance_key in instance_keys:
 
-            for channel, result in instance["channels"].items():
-                if args.channels is not None and channel not in args.channels:
-                    continue
-                logger.info(f"Make plot for {instance_key} in channel {channel}")
-
-                info = channel_info.get(channel, {})
-
-                suffix = f"{channel}_{instance_key}"
-                for sign, rpl in [
-                    (" ", "_"),
-                    (".", "p"),
-                    ("-", "m"),
-                    (":", ""),
-                    (",", ""),
-                    ("slice(None)", ""),
-                    ("(", ""),
-                    (")", ""),
-                    (":", ""),
-                ]:
-                    suffix = suffix.replace(sign, rpl)
-
-                counts = not args.unfoldedXsec  # if histograms represent counts or not
-                binwnorm = (
-                    1.0
-                    if any(
-                        instance_key.startswith(x)
-                        for x in ["Basemodel", "Project", "Select", "Norm"]
-                    )
-                    and not args.noBinWidthNorm
-                    else None
+                is_normalized = any(
+                    instance_key.startswith(x) for x in ["Normalize", "Normratio"]
                 )
 
-                opts["counts"] = counts
+                instance = results[instance_key]
 
-                make_plots(
-                    result,
-                    outdir,
-                    config,
-                    channel=suffix,
-                    chi2=[chi2, ndf],
-                    saturated_chi2=saturated_chi2,
-                    lumi=info.get("lumi", None),
-                    is_normalized=is_normalized,
-                    binwnorm=binwnorm,
-                    **opts,
+                chi2, ndf, saturated_chi2 = get_chi2(
+                    (
+                        fitresult
+                        if fittype == "postfit"
+                        and (
+                            (instance_key == "Basemodel" and args.chisq != "linear")
+                            or args.chisq == "saturated"
+                        )
+                        else instance
+                    ),
+                    args.chisq in [" ", "none", None],
+                    fittype,
                 )
 
+                for channel, result in instance["channels"].items():
+                    if args.channels is not None and channel not in args.channels:
+                        continue
+                    logger.info(f"Make plot for {instance_key} in channel {channel}")
+
+                    info = channel_info.get(channel, {})
+
+                    suffix = f"{channel}_{instance_key}"
+                    for sign, rpl in [
+                        (" ", "_"),
+                        (".", "p"),
+                        ("-", "m"),
+                        (":", ""),
+                        (",", ""),
+                        ("slice(None)", ""),
+                        ("(", ""),
+                        (")", ""),
+                        (":", ""),
+                    ]:
+                        suffix = suffix.replace(sign, rpl)
+
+                    counts = not args.unfoldedXsec  # if histograms represent counts or not
+                    binwnorm = (
+                        1.0
+                        if any(
+                            instance_key.startswith(x)
+                            for x in ["Basemodel", "Project", "Select", "Norm"]
+                        )
+                        and not args.noBinWidthNorm
+                        else None
+                    )
+
+                    opts["counts"] = counts
+
+                    make_plots(
+                        result,
+                        outdir,
+                        config,
+                        channel=suffix,
+                        chi2=[chi2, ndf],
+                        saturated_chi2=saturated_chi2,
+                        lumi=info.get("lumi", None),
+                        is_normalized=is_normalized,
+                        binwnorm=binwnorm,
+                        **opts,
+                    )
+    else:        
+        filename = args.comm_data_dir + args.data_dir + args.infile ### i don't want to run this from inside the common data folder
+        print(filename)
+        fdata = ROOT.TFile.Open(filename)
+        datahist = fdata.Get(args.root_dataname).Clone()
+
+        datahist.SetDirectory(0)  ### i don't know what this does
+        fdata.Close()
+
+        nx = datahist.GetNbinsX()
+        ny = datahist.GetNbinsY()
+        nz = datahist.GetNbinsZ()
+        # Create a NumPy array with the same shape
+        data_array = np.zeros((nx, ny))
+        ### axes: eta-pt-ut
+        for i in range(1, nx+1): # eta
+            for j in range(1, ny+1): # pt
+                    data_array[i-1, j-1] = datahist.GetBinContent(i, j, nz)
+        
+        pt_ax = []
+        eta_ax = []
+
+        xaxis = datahist.GetXaxis()
+        yaxis = datahist.GetYaxis()
+
+        for i in range(1, xaxis.GetNbins() + 2):
+            eta_ax.append(xaxis.GetBinLowEdge(i))
+        for i in range(1, yaxis.GetNbins() + 2):
+            pt_ax.append(yaxis.GetBinLowEdge(i))
+            ### i need to get the axis spacing as well
+        
+        result = hist.Hist(
+            hist.axis.Variable(pt_ax, name="pt"),
+            hist.axis.Variable(eta_ax, name="eta"),
+            data=data_array.T,
+        )
+        print(pt_ax)
+        print(eta_ax)
+        
+        suffix = args.root_dataname
+        
+        try:
+            plus_minus_ind = filename.find("_plus")
+            
+        except:
+            plus_minus_ind = filename.find("_minus")
+       
+        i = plus_minus_ind - 1
+        while filename[i] != "_":
+            i -= 1
+        
+        suffix = filename[i+1:plus_minus_ind]
+        chi2, ndf, saturated_chi2 = None, None, False ## hard coding but I think this is correct?
+        opts = dict(
+            args=args,
+            fittype=fittype,
+        )
+        axes = [a for a in result.axes]
+        
+        make_plot(
+                        result,
+                        hh.divideHists(result, result),
+                        hh.scaleHist(result, 0),
+                        axes,
+                        outdir,
+                        config,
+                        chi2=[chi2, ndf],
+                        saturated_chi2=saturated_chi2,
+                        root_sf = True,
+                        **opts
+                    )
+            
+            
     if output_tools.is_eosuser_path(args.outpath) and args.eoscp:
         output_tools.copy_to_eos(outdir, args.outpath)
 

@@ -405,6 +405,19 @@ def parseArgs():
     return args
 
 
+def sum_in_quadrature(arr, start_ind, end_ind, axis = "pt"):
+    i = start_ind
+    combined = 0
+    while i >= start_ind and i <= end_ind:
+        if axis == "pt":
+            combined += arr[i, :]**2
+        else: 
+            combined += arr[i]**2
+        i += 1
+    return np.sqrt(combined)*1/(end_ind - start_ind)
+
+    
+
 def make_plot(
     h_data,
     h_inclusive,
@@ -438,13 +451,6 @@ def make_plot(
     diff = not args.noLowerPanel and args.diff and h_data is not None ### FALSE
     data = not args.noData and h_data is not None ## TRUE
 
-    def sum_in_quadrature(arr, start_ind, end_ind):
-        i = start_ind
-        combined = 0
-        while i >= start_ind and i <= end_ind:
-            combined += arr[i, :]**2
-            i += 1
-        return np.sqrt(combined)*1/(end_ind - start_ind)
     
             
     axes_names = [a.name for a in axes] ## [time, pt_probe, eta_probe]
@@ -477,154 +483,12 @@ def make_plot(
         other_axis = varying_params[1]
         if axis_name == varying_params[1]:
             other_axis = varying_params[0]
-        xlabel = f"{other_axis}" ### for now am going to hard code this in
-        # xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel)
-
+        xlabel = f"{other_axis}" 
+        
         rlabel = args.dataName.replace(" ", r"\ ")
-
         rlabel += r"\,/\,"
         rlabel = f"${rlabel} Pred.$"
-        ### this creates the fiugre style. so i need 
-        fig, ax1 = plot_tools.figure(
-            h_inclusive[{f"{axis_name}": 0}], ### just to make the right dimensions
-            xlabel,
-            ylabel,
-            args.ylim,
-            xlim=args.axlim,
-            width_scale=(
-                args.customFigureWidth
-                if args.customFigureWidth is not None
-                else 1.25 if len(axes_names) == 1 else 1
-            ),
-            automatic_scale=args.customFigureWidth is None,
-        )
-        
-        for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
-            
-            this_color = colormaps["tab20"](j)
-            if other_axis == "pt":
-                this_color = eta_colormap[j]
-            
-
-            hep.histplot(
-                h_inclusive[{f"{axis_name}": j}],
-                histtype = histtype_mc,
-                xerr=False,
-                yerr=False,
-                color=this_color,
-                label = f"{axis_name} bin {j}",
-                binwnorm=binwnorm,
-                ax=ax1,
-                zorder = 1,
-                flow="none",
-            )
-            data_color = this_color
-            if args.fixed_param != "time":
-                data_color = this_color
-            if data:
-                hscale = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}], rel_unc=True)
-                # print(True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5) ### so this is the only thing that changes but this is supposedly data which shouldnt change. crap.
-
-                if j == 0:
-                    hep.histplot(
-                        h_data[{f"{axis_name}": j}],
-                        yerr=True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5,
-                        histtype=histtype_data,
-                        color=data_color,
-                        label=args.dataName,
-                        binwnorm=binwnorm,
-                        ax=ax1,
-                        zorder=2,
-                        flow="none",
-                    )
-                else:
-                    hep.histplot(
-                        h_data[{f"{axis_name}": j}],
-                        yerr=True if counts else h_data[{f"{axis_name}": j}].variances() ** 0.5,
-                        histtype=histtype_data,
-                        color=data_color,
-                        binwnorm=binwnorm,
-                        ax=ax1,
-                        alpha=1.0,
-                        zorder=2,
-                        flow="none",
-                    )
-
-                if h_data_stat is not None:
-                    var_stat = h_data_stat[{f"{axis_name}": j}].values() ** 2
-                    h_data_stat = h_data[{f"{axis_name}": j}].copy()
-                    h_data_stat.variances()[...] = var_stat
-
-                    hep.histplot(
-                        h_data_stat,
-                        yerr=True if counts else h_data_stat.variances() ** 0.5,
-                        histtype=histtype_data,
-                        color=data_color,
-                        binwnorm=binwnorm,
-                        capsize=2,
-                        ax=ax1,
-                        alpha=1.0,
-                        zorder=2,
-                        flow="none",
-                    )
-            edges = h_inclusive[{f"{axis_name}": 0}].axes[0].edges
-            other_edges = h_inclusive[{f"{other_axis}": 0}].axes[0].edges
-            edges_centers = np.array([np.average((edges[i], edges[i+1])) for i in range(edges.shape[0]-1)])
-            binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
-
-            nom = h_inclusive[{f"{axis_name}": j}].values() / binwidth
-            std = np.sqrt(h_inclusive[{f"{axis_name}": j}].variances()) / binwidth ### so this doesnt change which is wrong. i feel like this should be changing. or its converging on the same 
-
-            hatchstyle = None
-            # label_unc = "Pred. unc."
-            default_unc_label = (
-                "Normalized model unc." if is_normalized else "Model unc."
-            )
-            label_unc = default_unc_label if not args.unfoldedXsec else "Prefit unc."
-            if args.uncertaintyLabel:
-                label_unc = args.uncertaintyLabel
-                
-            if args.upperPanelUncertaintyBand:
-                ax1.fill_between(
-                    edges,
-                    np.append((nom + std), ((nom + std))[-1]),
-                    np.append((nom - std), ((nom - std))[-1]),
-                    step="step",
-                    facecolor="black",
-                    zorder=0,
-                    hatch=hatchstyle,
-                    edgecolor="k",
-                    linewidth=0.0,
-                    label=label_unc,
-                )
-                    
-        ax1.legend(loc='upper right', ncols = 2, fontsize = 14)
-        # need to divide by bin width
-        
-        if args.ylim is None and binwnorm is None:
-            max_y = np.max(h_inclusive.values() + h_inclusive.variances() ** 0.5)
-            min_y = np.min(h_inclusive.values() - h_inclusive.variances() ** 0.5)
-
-        if h_data is not None:
-            max_y = max(max_y, np.max(h_data.values() + h_data.variances() ** 0.5))
-            min_y = min(min_y, np.min(h_data.values() - h_data.variances() ** 0.5))
-
-        range_y = max_y - min_y
-        
-        if args.title == "HLT":
-            if other_axis == "eta_probe":
-                ax1.set_ylim(min_y - range_y * 0.1, max_y + range_y * 0.35)
-            else:
-                ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
-        if args.title == "ID":
-            if other_axis == "eta_probe":
-                ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
-            else:
-                ax1.set_ylim(min_y - range_y * 0.05, max_y + range_y * 0.35)
-        if args.title == "ISO":
-            # ax1.set_ylim(0.8, 1.05)
-            ax1.set_ylim(0.95, 1.02)
-            
+       
         outfile = f"{other_axis}_{axis_name}_{args.title}"
 
         if other_axis == "time":
@@ -633,44 +497,13 @@ def make_plot(
         if args.prefit:
             outfile += "_prefit"
 
-        plot_tools.add_decor(
-            ax1,
-            args.title,
-            args.subtitle,
-            data=data or "Nonprompt" in labels,
-            lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
-            loc=args.titlePos,
-            text_size=args.legSize,
-        )
-
-        plot_tools.save_pdf_and_png(outdir, outfile)
-
-        analysis_meta_info = None
-        if meta is not None:
-            if "meta_info_input" in meta:
-                analysis_meta_info = {
-                    "RabbitOutput": meta["meta_info"],
-                    "AnalysisOutput": meta["meta_info_input"]["meta_info"],
-                }
-            else:
-                analysis_meta_info = {"AnalysisOutput": meta["meta_info"]}
-
-        output_tools.write_index_and_log(
-            outdir,
-            outfile,
-            analysis_meta_info={
-                **analysis_meta_info,
-            },
-            args=args,
-        )
-        
         ### scale factor ### 
-        root_comp = False
-        if len(args.root_filename) != 0:
-            root_comp = True
+        comp_type_list = ["SF", "effDATA", "effMC"]
+        comp_type_graphname = {"SF": "SF2D_nominal", "effMC": "EffMC2D", "effDATA": "EffData2D"}
+        for comp_type in comp_type_list:
             filename = args.comm_data_dir + args.data_dir + args.root_filename ### i don't want to run this from inside the common data folder
             fdata = ROOT.TFile.Open(filename)
-            datahist = fdata.Get(args.root_dataname).Clone()
+            datahist = fdata.Get(comp_type_graphname[comp_type]).Clone()
             
             # datahist.SetDirectory(0)  ### i don't know what this does
 
@@ -698,12 +531,9 @@ def make_plot(
             pt_ax_centers = [np.average((pt_ax[i], pt_ax[i+1])) for i in range(len(pt_ax)-1)]
             root_errors = np.zeros((nx, ny))
             for j in range(0, ny): #pt
-                err = fdata.Get(f"Graph_SF_eta_pt_{int(pt_ax[j])}p0To{int(pt_ax[j+1])}p0")
+                err = fdata.Get(f"Graph_{comp_type}_eta_pt_{int(pt_ax[j])}p0To{int(pt_ax[j+1])}p0")
                 for i in range(0, nx):
                     root_errors[i-1, j-1] = err.GetEY()[i]
-            # for i in range(0, len(pt_ax)):
-            #     for j in range(0, len(pt_ax)):
-            #         root_errors[i-1, j-1] = 
             
             fdata.Close()
 
@@ -721,114 +551,124 @@ def make_plot(
                     automatic_scale=args.customFigureWidth is None,
                 )
 
-        for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
-            cutoff = 0.01
-            this_color = colormaps["tab20"](j)
-            if other_axis == "pt":
-                this_color = eta_colormap[j]
+            for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
             
-            scale_hist = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}], rel_unc = True, cutoff = 1e-8)
             
-            vals = scale_hist.values()
-            unc = scale_hist.variances()**0.5
+                edges = h_inclusive[{f"{axis_name}": 0}].axes[0].edges
+                other_edges = h_inclusive[{f"{other_axis}": 0}].axes[0].edges
+                edges_centers = np.array([np.average((edges[i], edges[i+1])) for i in range(edges.shape[0]-1)])
 
-            avg = np.average(vals, weights =unc)
-            chi_squared = np.sum([(vals[i]-avg)**2/unc[i]**2 for i in range(1, len(vals))])
-            print(f"CHI SQUARED/DOF: {chi_squared/(len(vals)-1)}, DOF: {len(vals)-1}")
-            #### SHOULD CODE IN A P VALUE CALCULATOR
-            
-            if not root_comp: 
-                hep.histplot(
-                    scale_hist,
-                    histtype = "step",
-                    yerr=True,
-                    color=this_color,
-                    label = f"{axis_name} bin {j}",
-                    binwnorm=binwnorm,
-                    ax=ax1,
-                    zorder = 1,
-                    flow="none",
-                )
-            ### should instead structure this to look for the closest pt value or eta value to get the best match
-            
 
-            if root_comp: 
+                if comp_type == "SF":
+                    scale_hist = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}], rel_unc = True, cutoff = 1e-8)
+                    vals = scale_hist.values()
+                    unc = scale_hist.variances()**0.5
+                elif comp_type == "effMC":
+                    vals = h_inclusive[{f"{axis_name}": j}].values()
+                    unc = h_inclusive[{f"{axis_name}": j}].variances()**0.5
+                elif comp_type == "effDATA":
+                    vals = h_data[{f"{axis_name}": j}].values()
+                    unc = h_data[{f"{axis_name}": j}].variances()**0.5
+
+                avg = np.average(vals, weights =unc)
+                chi_squared = np.sum([(vals[i]-avg)**2/unc[i]**2 for i in range(1, len(vals))])
+                # print(f"CHI SQUARED/DOF: {chi_squared/(len(vals)-1)}, DOF: {len(vals)-1}")
+                #### SHOULD CODE IN A P VALUE CALCULATOR
+                
+                ### should instead structure this to look for the closest pt value or eta value to get the best match
+        
                 if other_axis == "eta_probe":
                     if pt_ax[j] in other_edges:
                         ind = np.where(other_edges == pt_ax[j])[0][0]
-                        ### this is not working 
                         #this isn't really legit because it isn't the same pt binning
+                        
+                        ## this is to show the average wmass
+                        avg_root = np.zeros(edges_centers.shape)
+                        avg_err = np.zeros(edges_centers.shape)
+                        for k in range(1, len(edges)):
+                            ind_start = np.where(eta_ax == edges[k-1])[0][0]
+                            ind_end = np.where(eta_ax == edges[k])[0][0] - 1
+                            avg_root[k-1] = np.average(np.concatenate((root_result[ind_start:ind_end, j], np.array([root_result[ind_start:ind_end, j][-1]])))) 
+                            avg_err[k-1] = sum_in_quadrature(root_errors[:, j], ind_start, ind_end, "eta")
                         
                         
                         plt.clf()
-                        plt.step(eta_ax, np.concatenate((root_result[:, j], np.array([root_result[:, j][-1]]))), color = "k", label = f"WMass, pt = {pt_ax[j]}", where = "post")
+                        plt.step(eta_ax, np.concatenate((root_result[:, j], np.array([root_result[:, j][-1]]))), color = "gray", label = f"WMass, pt = {pt_ax[j]}", where = "post")
+                        plt.step(edges, np.concatenate((avg_root, np.array([avg_root[-1]]))), color = "C1", label = f"WMass average, pt = {pt_ax[j]}", where = "post")
                         plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis, pt = {other_edges[ind]}", where = "post")
+                        
                         plt.legend()
-                        plt.errorbar(eta_ax_centers, root_result[:, j], yerr = root_errors[:, j], color = 'k', fmt = ".")
-                                           
+                        plt.errorbar(eta_ax_centers, root_result[:, j], yerr = root_errors[:, j], color = "gray", fmt = ".")
+                        plt.errorbar(edges_centers, avg_root, yerr = avg_err, color = 'C1', fmt = ".")                       
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
-                        plt.ylabel("scale factor")
                         plt.xlim([eta_ax[0], eta_ax[-1]])
                         plt.xlabel("eta")
                         min_val = np.min([np.min(root_result[:, j]), np.min(vals)])
                         max_val = np.max([np.max(root_result[:, j]), np.max(vals)])
                         plt.ylim(min_val * 0.98, max_val*1.02)
+                        
+                        
                     
                 elif other_axis == "pt_probe": 
                     if j > 0:
                         ind_start = np.where(eta_ax == other_edges[j-1])[0][0]
-                        ind_end = np.where(eta_ax == other_edges[j])[0][0]
+                        ind_end = np.where(eta_ax == other_edges[j])[0][0] - 1
                         avg_root = np.average(np.concatenate((root_result[ind_start:ind_end, :], root_result[ind_start:ind_end, :][:, -1][:, None]), axis = 1), axis = 0)
                         
                         avg_err = sum_in_quadrature(root_errors, ind_start, ind_end)
                         plt.clf()
-                        plt.step(pt_ax, avg_root, color = "k", label = f"WMass, eta = {other_edges[j-1]} to {other_edges[j]}", where = "post")
+                        plt.step(pt_ax, avg_root, color = "gray", label = f"WMass, eta = {other_edges[j-1]} to {other_edges[j]}", where = "post")
                         
                         plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis, eta = {other_edges[j-1]} to {other_edges[j]}", where = "post")
                         plt.legend()
                         # pdb.set_trace()
-                        plt.errorbar(pt_ax_centers, avg_root[:-1], yerr = avg_err, color = 'k', fmt = ".")                       
+                        plt.errorbar(pt_ax_centers, avg_root[:-1], yerr = avg_err, color = "gray", fmt = ".")                       
                         
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
-                        plt.ylabel("scale factor")
                         plt.xlim([edges[0], edges[-1]])
                         plt.xlabel("pt")
                         min_val = np.min([np.min(avg_root), np.min(vals)])
                         max_val = np.max([np.max(avg_root), np.max(vals)])
                         plt.ylim(min_val * 0.98, max_val*1.02)
 
-                    
-                    
                 
-            ### need a better way of doing this. maybe through standard deviation
-            # if args.title == "ID":
-            #     ax1.set_ylim(0.97, 1.02)
-            # elif args.title == "ISO":
-            #     ax1.set_ylim(0.99, 1.02)
-            # else:
-            #     ax1.set_ylim(0.9, 1.02)
+                plot_tools.add_decor(
+                ax1,
+                args.title,
+                args.subtitle,
+                data=data or "Nonprompt" in labels,
+                lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
+                loc=args.titlePos,
+                text_size=args.legSize,
+                )
 
-            plot_tools.add_decor(
-            ax1,
-            args.title,
-            args.subtitle,
-            data=data or "Nonprompt" in labels,
-            lumi=lumi,  # if args.dataName == "Data" and not args.noData else None,
-            loc=args.titlePos,
-            text_size=args.legSize,
-            )
+                ax1.legend(loc='upper right', ncols = 2, fontsize = 14)
+                ax1.set_ylabel(comp_type)
+                this_filename = outfile + f"_{comp_type}_{j}"
+                plot_tools.save_pdf_and_png(outdir + f"{comp_type}", this_filename)
+                    
+                    
+                analysis_meta_info = None
+                if meta is not None:
+                    if "meta_info_input" in meta:
+                        analysis_meta_info = {
+                            "RabbitOutput": meta["meta_info"],
+                            "AnalysisOutput": meta["meta_info_input"]["meta_info"],
+                        }
+                    else:
+                        analysis_meta_info = {"AnalysisOutput": meta["meta_info"]}
 
-            ax1.legend(loc='upper right', ncols = 2, fontsize = 14)
-            ax1.set_ylabel("scale factor")
-            if root_comp:
-                outfile += f"_scale_{j}"
-                plot_tools.save_pdf_and_png(outdir, outfile)
-                outfile = outfile[:-8]
-
-        if not root_comp:
-            outfile += "_scale"
-            plot_tools.save_pdf_and_png(outdir, outfile)
-       
+                output_tools.write_index_and_log(
+                    outdir+ f"{comp_type}",
+                    outfile,
+                    analysis_meta_info={
+                        **analysis_meta_info,
+                    },
+                    args=args,
+                )
+            
+        
+    
 
 def make_plots(
     result,
@@ -1118,6 +958,9 @@ def main():
         colors = [proc_colors.get(p, cmap(i % cmap.N)) for i, p in enumerate(procs)]
 
     outdir = output_tools.make_plot_dir(args.outpath, eoscp=args.eoscp)
+    sf_outdir = output_tools.make_plot_dir(args.outpath + "SF/", eoscp=args.eoscp)
+    mc_outdir = output_tools.make_plot_dir(args.outpath + "effMC/", eoscp=args.eoscp)
+    data_outdir = output_tools.make_plot_dir(args.outpath + "effDATA/", eoscp=args.eoscp)
 
     opts = dict(
         args=args,
