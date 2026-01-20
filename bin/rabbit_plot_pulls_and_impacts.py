@@ -16,7 +16,6 @@ from rabbit import io_tools
 
 from wums import logging, output_tools, plot_tools  # isort: skip
 
-
 # prevent MathJax from bein loaded
 pio.kaleido.scope.mathjax = None
 
@@ -914,6 +913,12 @@ def parseArgs():
         help="Scale impacts by this number",
     )
     parser.add_argument(
+        "--scaleImpactsRef",
+        type=float,
+        default=-1.0,
+        help="Scale impacts of reference by this number (default uses same as nominal)",
+    )
+    parser.add_argument(
         "--pullsNoDiff",
         action="store_true",
         help="Plot actual nuisance parameter value, by default nuisance parameter difference w.r.t. prefit value",
@@ -1060,7 +1065,9 @@ def load_dataframe_parms(
             stat=args.stat / 100.0,
             normalize=normalize,
             grouping=grouping,
-            scale=args.scaleImpacts,
+            scale=(
+                args.scaleImpactsRef if args.scaleImpactsRef > 0 else args.scaleImpacts
+            ),
             diff_pulls=not args.pullsNoDiff,
         )
         df = df.merge(df_ref, how="outer", on="label", suffixes=("", "_ref"))
@@ -1101,11 +1108,16 @@ def load_dataframe_hists(
     if args.relative:
         scale = args.scaleImpacts * 1.0 / hist_total.value
         if fitresult_ref:
-            scale_ref = args.scaleImpacts * 1.0 / hist_total_ref.value
+            if args.scaleImpactsRef > 0:
+                scale_ref = args.scaleImpactsRef * 1.0 / hist_total_ref.value
+            else:
+                scale_ref = args.scaleImpacts * 1.0 / hist_total_ref.value
     else:
         scale = args.scaleImpacts
         if fitresult_ref:
-            scale_ref = args.scaleImpacts
+            scale_ref = (
+                args.scaleImpactsRef if args.scaleImpactsRef > 0 else args.scaleImpacts
+            )
 
     df = readHistImpacts(
         fitresult,
