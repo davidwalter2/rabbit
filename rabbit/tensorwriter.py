@@ -7,7 +7,7 @@ import numpy as np
 
 from rabbit import common, h5pyutils
 
-from wums import ioutils, logging, output_tools  # isort: skip
+from wums import ioutils, logging  # isort: skip
 
 logger = logging.child_logger(__name__)
 
@@ -485,7 +485,7 @@ class TensorWriter:
             for group in groups:
                 self.dict_systgroups[group].add(name)
 
-    def write(self, outfolder="./", outfilename="rabbit_input.hdf5", args={}):
+    def write(self, outfolder="./", outfilename="rabbit_input.hdf5", meta_data_dict={}):
 
         if self.signals.intersection(self.bkgs):
             raise RuntimeError(
@@ -772,17 +772,18 @@ class TensorWriter:
         logger.info(f"Write output file {outpath}")
         f = h5py.File(outpath, rdcc_nbytes=self.chunkSize, mode="w")
 
-        # propagate meta info into result file
-        meta = {
-            "meta_info": output_tools.make_meta_info_dict(
-                args=args, wd=common.base_dir
-            ),
-            "channel_info": self.channels,
-            "symmetric_tensor": self.symmetric_tensor,
-            "systematic_type": self.systematic_type,
-        }
+        if meta_data_dict is not None:
+            meta_data_dict.update(
+                {
+                    "channel_info": self.channels,
+                    "symmetric_tensor": self.symmetric_tensor,
+                    "systematic_type": self.systematic_type,
+                }
+            )
+            if "meta_info" not in meta_data_dict:
+                meta_data_dict["meta_info"] = {}
 
-        ioutils.pickle_dump_h5py("meta", meta, f)
+        ioutils.pickle_dump_h5py("meta", meta_data_dict, f)
 
         noiidxs = self.get_noiidxs()
         systsnoconstraint = self.get_systsnoconstraint()
