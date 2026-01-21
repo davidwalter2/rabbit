@@ -91,13 +91,6 @@ class HLT(Mapping):
         # The output of ratios will always be without process axis
         self.skip_per_process = True
 
-        # if [a.size for a in self.h3.channel_axes] != [
-        #     a.size for a in self.h2.channel_axes
-        # ]:
-        #     raise RuntimeError(
-        #         "Channel axes for numerator and denominator must have the same number of bins"
-        #     )
-        
         hist_axes = self.h2.channel_axes
 
         if h3_channel == h2_channel:

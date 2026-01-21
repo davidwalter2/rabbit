@@ -16,14 +16,36 @@ from matplotlib.lines import Line2D
 
 import ROOT
 from utilities import common
-
+import pickle
 
 import rabbit.io_tools
 
 from wums import boostHistHelpers as hh  # isort: skip
 from wums import logging, output_tools, plot_tools  # isort: skip
+from wums.boostHistHelpers import (
+    addHists,
+    divideHists,
+    multiplyHists,
+    scaleHist,
+)
+
+
 
 import pdb
+
+import h5py
+from uncertainty_tools import (
+    get_era_vals,
+    get_mc_lumis,
+    make_mutually_exclusive,
+    remove_low_bins,
+)
+from utilities.io_tools import input_tools
+
+from wums.boostHistHelpers import (
+    divideHists,
+    multiplyHists,
+)
 
 hep.style.use(hep.style.ROOT)
 
@@ -190,6 +212,7 @@ def parseArgs():
         help="Which data to plot ('data_obs': data histogram provided in input data; 'nobs': Plot (pseudo) data used in the fit)",
     )
     parser.add_argument("--noData", action="store_true", help="Don't plot the data")
+    
     parser.add_argument(
         "--noUncertainty", action="store_true", help="Don't plot total uncertainty band"
     )
@@ -356,7 +379,7 @@ def parseArgs():
         default=None,
         help="Label for uncertainty shown in the (ratio) plot",
     )
-    
+
     parser.add_argument(
         "--fixed_param",
         type=str,
@@ -416,6 +439,63 @@ def sum_in_quadrature(arr, start_ind, end_ind, axis = "pt"):
         i += 1
     return np.sqrt(combined)*1/(end_ind - start_ind)
 
+
+
+    
+def get_true_efficiencies():
+    
+    with open("mutually_exclusive_iso.pkl", "rb") as f:
+        iso_mc = pickle.load(f)
+    with open("mutually_exclusive_dtdt.pkl", "rb") as f:
+        dtdt_prpg_mc = pickle.load(f)
+    with open("mutually_exclusive_dtst.pkl", "rb") as f:
+        dtst_prpg_mc = pickle.load(f)
+    with open("mutually_exclusive_stst.pkl", "rb") as f:
+        stst_prpg_mc = pickle.load(f)
+    
+    # pdb.set_trace()
+    iso = iso_mc.project("time", "pt_probe", "eta_probe")
+    dtdt = dtdt_prpg_mc.project("time", "pt_probe", "eta_probe")
+    dtst = dtst_prpg_mc.project("time", "pt_probe", "eta_probe")
+    stst = stst_prpg_mc.project("time", "pt_probe", "eta_probe")
+
+    # dtdt_extra = np.zeros(dtdt.values().shape)[:, :1, :]
+    # dtdt_extra = np.concatenate([dtdt_extra, dtdt.values()], axis = 1)
+    # dtdt_exp =  hist.Hist(*dtst.axes, data = dtdt_extra)
+    # true_iso = divideHists(iso, addHists(iso, dtdt_exp))
+    
+    # dtst_shrink = hist.Hist(*dtdt.axes, data = dtst.values()[:, 1:, :])
+    # iso_shrink = hist.Hist(*dtdt.axes, data = iso.values()[:, 1:, :])
+    # true_hlt = divideHists(addHists(dtdt, iso_shrink), addHists(dtst_shrink, addHists(dtdt, iso_shrink)))
+    
+    # true_id = divideHists(addHists(dtst, addHists(dtdt_exp, iso)), addHists(stst, addHists(dtst, addHists(dtdt_exp, iso))))
+    
+    h1_iso = dtdt.values()[:, :1, :]## assuming this is time, pt, eta
+    
+    h2_iso_vals = np.concatenate([h1_iso, dtdt], axis = 1)
+    h2_iso_hist = hist.Hist(*stst.axes, data = h2_iso_vals)
+    true_iso = divideHists(scaleHist(iso, 1), (addHists(h2_iso_hist, scaleHist(iso, 1))))
+    
+    h1_hlt = dtst.values()[:, 1:, :]
+    h1_hlt_hist = hist.Hist(*dtdt.axes, data = h1_hlt)
+    
+    true_iso_trunc = true_iso.values()[:, 1:, :]
+    true_iso_trunc_hist = hist.Hist(*dtdt.axes, data = true_iso_trunc)
+    
+    ones = divideHists(dtdt, dtdt)
+    true_hlt = divideHists(dtdt, addHists(dtdt, multiplyHists(h1_hlt_hist, addHists(ones, scaleHist(true_iso_trunc_hist, -1)))))
+    # true_hlt = dtdt/(dtdt + h1_hlt_hist*(1-true_iso_trunc_hist))
+    
+    eps_hlt_expanded = np.zeros(true_hlt.values().shape)[:, :1, :]
+    eps_hlt_expanded = np.concatenate([eps_hlt_expanded, true_hlt.values()], axis = 1)
+    eps_hlt_exp_hist = hist.Hist(*dtst.axes, data = eps_hlt_expanded)
+    
+    ones = divideHists(dtst, dtst)
+    true_id = divideHists(dtst, addHists(dtst, multiplyHists(stst, addHists(ones, scaleHist(eps_hlt_exp_hist, -1)))))
+    # true_id = dtst/(dtst + stst*(1-eps_hlt_exp_hist))
+    
+    return true_hlt, true_id, true_iso
+
     
 
 def make_plot(
@@ -464,14 +544,18 @@ def make_plot(
     params = list(h_data.axes.name)
     varying_params = [p for p in params if p != args.fixed_param]
 
-    eta_colormap = ["C0", "C1", "C2", "C3", "C4", "C5"]
-    histtype_data = "errorbar"
-    # histtype_mc = "fill" if not args.unfoldedXsec else "errorbar"
-    histtype_mc = "step"
+
+    if args.Mappings[0][0] == "HLT":
+        true_eff, _, _= get_true_efficiencies()
+    elif args.Mappings[0][0] == "ID":
+        _, true_eff, _ = get_true_efficiencies()
+    elif args.Mappings[0][0] == "ISO":
+        _, _, true_eff = get_true_efficiencies()
 
     #len(h_inclusive.axes)): ## the first axis should be time. should implement time into this but for now am only going to take the average
     h_data = h_data[{f"{args.fixed_param}": 1}]
     h_inclusive = h_inclusive[{f"{args.fixed_param}": 1}]
+    true_eff = true_eff[{f"{args.fixed_param}": 1}]
     
     if args.normToData and h_data is not None:
         scale = h_data.values().sum() / h_inclusive.values().sum()
@@ -553,11 +637,9 @@ def make_plot(
 
             for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
             
-            
                 edges = h_inclusive[{f"{axis_name}": 0}].axes[0].edges
                 other_edges = h_inclusive[{f"{other_axis}": 0}].axes[0].edges
                 edges_centers = np.array([np.average((edges[i], edges[i+1])) for i in range(edges.shape[0]-1)])
-
 
                 if comp_type == "SF":
                     scale_hist = hh.divideHists(h_data[{f"{axis_name}": j}], h_inclusive[{f"{axis_name}": j}], rel_unc = True, cutoff = 1e-8)
@@ -565,18 +647,20 @@ def make_plot(
                     unc = scale_hist.variances()**0.5
                 elif comp_type == "effMC":
                     vals = h_inclusive[{f"{axis_name}": j}].values()
-                    unc = h_inclusive[{f"{axis_name}": j}].variances()**0.5
+                    unc = np.zeros(vals.shape)
                 elif comp_type == "effDATA":
                     vals = h_data[{f"{axis_name}": j}].values()
                     unc = h_data[{f"{axis_name}": j}].variances()**0.5
+                if args.Mappings[0][0] == "HLT":
+                    true_eff_vals = true_eff[{f"{axis_name}": j-1}].values()
+                else:
+                    true_eff_vals = true_eff[{f"{axis_name}": j}].values()
 
-                avg = np.average(vals, weights =unc)
-                chi_squared = np.sum([(vals[i]-avg)**2/unc[i]**2 for i in range(1, len(vals))])
                 # print(f"CHI SQUARED/DOF: {chi_squared/(len(vals)-1)}, DOF: {len(vals)-1}")
                 #### SHOULD CODE IN A P VALUE CALCULATOR
                 
                 ### should instead structure this to look for the closest pt value or eta value to get the best match
-        
+                
                 if other_axis == "eta_probe":
                     if pt_ax[j] in other_edges:
                         ind = np.where(other_edges == pt_ax[j])[0][0]
@@ -593,13 +677,21 @@ def make_plot(
                         
                         
                         plt.clf()
+                        #w mass
                         plt.step(eta_ax, np.concatenate((root_result[:, j], np.array([root_result[:, j][-1]]))), color = "gray", label = f"WMass, pt = {pt_ax[j]}", where = "post")
-                        plt.step(edges, np.concatenate((avg_root, np.array([avg_root[-1]]))), color = "C1", label = f"WMass average, pt = {pt_ax[j]}", where = "post")
-                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis, pt = {other_edges[ind]}", where = "post")
+                        plt.step(edges, np.concatenate((avg_root, np.array([avg_root[-1]]))), color = "C1", label = f"WMass average", where = "post")
+                        # this analysis
+                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis fitted efficiency, pt = {other_edges[ind]}", where = "post")
+                        
+                        
+                        if j != 0 and comp_type == "effMC": 
+                            plt.step(edges, np.concatenate((true_eff_vals, np.array([true_eff_vals[-1]]))), color = 'C2', label = f"this analysis true efficiency", where = "post")
                         
                         plt.legend()
+                        #w mass
                         plt.errorbar(eta_ax_centers, root_result[:, j], yerr = root_errors[:, j], color = "gray", fmt = ".")
-                        plt.errorbar(edges_centers, avg_root, yerr = avg_err, color = 'C1', fmt = ".")                       
+                        plt.errorbar(edges_centers, avg_root, yerr = avg_err, color = 'C1', fmt = ".")           
+                        # this analysis            
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
                         plt.xlim([eta_ax[0], eta_ax[-1]])
                         plt.xlabel("eta")
@@ -608,20 +700,25 @@ def make_plot(
                         plt.ylim(min_val * 0.98, max_val*1.02)
                         
                         
-                    
+                
                 elif other_axis == "pt_probe": 
                     if j > 0:
                         ind_start = np.where(eta_ax == other_edges[j-1])[0][0]
-                        ind_end = np.where(eta_ax == other_edges[j])[0][0] - 1
+                        ind_end = np.where(eta_ax == other_edges[j])[0][0]
                         avg_root = np.average(np.concatenate((root_result[ind_start:ind_end, :], root_result[ind_start:ind_end, :][:, -1][:, None]), axis = 1), axis = 0)
                         
                         avg_err = sum_in_quadrature(root_errors, ind_start, ind_end)
                         plt.clf()
                         plt.step(pt_ax, avg_root, color = "gray", label = f"WMass, eta = {other_edges[j-1]} to {other_edges[j]}", where = "post")
                         
-                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis, eta = {other_edges[j-1]} to {other_edges[j]}", where = "post")
+                        
+                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis fitted efficiency, eta = {other_edges[j-1]} to {other_edges[j]}", where = "post")
+                        
+                        if j != 0  and comp_type == "effMC": 
+                            plt.step(edges, np.concatenate((true_eff_vals, np.array([true_eff_vals[-1]]))), color = 'C2', label = f"this analysis, true efficiency", where = "post")
+                        
+                        
                         plt.legend()
-                        # pdb.set_trace()
                         plt.errorbar(pt_ax_centers, avg_root[:-1], yerr = avg_err, color = "gray", fmt = ".")                       
                         
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
@@ -669,7 +766,7 @@ def make_plot(
             
         
     
-
+    
 def make_plots(
     result,
     outdir,
