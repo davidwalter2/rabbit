@@ -817,6 +817,7 @@ def make_plot(
             h_den = h_inclusive
 
         if diff:
+            h0 = hh.addHists(h_num, h_num, scale2=-1)
             h1 = hh.addHists(h_inclusive, h_den, scale2=-1)
             h2 = hh.addHists(h_data, h_den, scale2=-1)
             if h_data_stat is not None:
@@ -824,6 +825,14 @@ def make_plot(
                     h_data_stat, h_den, cutoff=cutoff, rel_unc=True
                 )
         else:
+            h0 = hh.divideHists(
+                h_num,
+                h_num,
+                cutoff=1e-8,
+                rel_unc=True,
+                flow=False,
+                by_ax_name=False,
+            )
             h1 = hh.divideHists(
                 h_inclusive,
                 h_den,
@@ -839,7 +848,7 @@ def make_plot(
                 )
 
         hep.histplot(
-            h1,
+            h0,
             histtype="step",
             color="grey",
             alpha=0.5,

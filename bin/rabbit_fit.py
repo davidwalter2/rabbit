@@ -150,6 +150,12 @@ def make_parser():
         help="Specify result from external postfit file",
     )
     parser.add_argument(
+        "--noPostfitProfile",
+        default=False,
+        action="store_true",
+        help="Do not profile beta parameters in the postfit (e.g. when using --externalPostfit).",
+    )
+    parser.add_argument(
         "--doImpacts",
         default=False,
         action="store_true",
@@ -333,7 +339,7 @@ def fit(args, fitter, ws, dofit=True):
             "nllvalreduced": nllvalreduced,
             "ndfsat": ndfsat,
             "edmval": edmval,
-            "postfit_profile": args.externalPostfit is None,
+            "postfit_profile": not args.noPostfitProfile,
         }
     )
 
@@ -561,7 +567,7 @@ def main():
                             ifitter,
                             ws,
                             prefit=False,
-                            profile=args.externalPostfit is None,
+                            profile=not args.noPostfitProfile,
                         )
                 else:
                     fit_time.append(time.time())
