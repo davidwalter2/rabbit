@@ -55,6 +55,7 @@ class TensorWriter:
         self.dict_logkhalfdiff = {}  # [channel][proc][syst]
         self.dict_logkavg_indices = {}
         self.dict_logkhalfdiff_indices = {}
+        self.dict_beta_variations = {}  # [channel][syst][process]
 
         self.clipSystVariations = False
         if self.clipSystVariations > 0.0:
@@ -160,6 +161,7 @@ class TensorWriter:
         self.nbinschan[name] = ibins
         self.dict_norm[name] = {}
         self.dict_sumw2[name] = {}
+        self.dict_beta_variations[name] = {}
 
         # add masked channels last and not masked channels first
         this_channel = {"axes": [a for a in axes], "masked": masked, "flow": flow}
@@ -391,6 +393,53 @@ class TensorWriter:
         self.book_systematic(
             var_name_out, add_to_data_covariance=add_to_data_covariance, **kargs
         )
+
+    def add_beta_variations(
+        self,
+        h,
+        process,
+        source_channel,
+        dest_channel,
+    ):
+        """
+        Adds a template variation in the destination channel that is correlated with the beta variation in the source channel for a given process
+        h: must be a histogram with the axes of the source channel and destiation channel.
+        """
+        if self.sparse:
+            raise NotImplementedError("Sparse implementation not yet implemented")
+
+        if source_channel not in self.channels.keys():
+            raise RuntimeError(f"Channel {source_channel} not known!")
+        if dest_channel not in self.channels.keys():
+            raise RuntimeError(f"Channel {dest_channel} not known!")
+        if not self.channels[dest_channel]["masked"]:
+            raise RuntimeError(
+                f"Beta variations can only be applied to masked channels"
+            )
+
+        norm = self.dict_norm[dest_channel][process]
+
+        source_axes = self.channels[source_channel]["axes"]
+        dest_axes = self.channels[dest_channel]["axes"]
+
+        source_axes_names = [a.name for a in source_axes]
+        dest_axes_names = [a.name for a in dest_axes]
+
+        for a in source_axes:
+            if a.name not in h.axes.name:
+                raise RuntimeError(
+                    f"Axis {a.name} not found in histogram h with {h.axes.name}"
+                )
+        for a in dest_axes:
+            if a.name not in h.axes.name:
+                raise RuntimeError(
+                    f"Axis {a.name} not found in histogram h with {h.axes.name}"
+                )
+
+        variation = h.project(*dest_axes_names, *source_axes_names).values()
+        variation = variation.reshape((*norm.shape, -1))
+
+        self.dict_beta_variations[dest_channel][process] = variation
 
     def get_logk(self, syst, norm, kfac=1.0, systematic_type=None):
         if not np.all(np.isfinite(syst)):
@@ -714,6 +763,7 @@ class TensorWriter:
             else:
                 logk = np.zeros([nbinsfull, nproc, 2, nsyst], self.dtype)
 
+            beta_variations = np.zeros([nbinsfull, nbins, nproc], self.dtype)
             for chan in self.channels.keys():
                 nbinschan = self.nbinschan[chan]
                 dict_norm_chan = self.dict_norm[chan]
@@ -744,6 +794,10 @@ class TensorWriter:
                                 logk[ibin : ibin + nbinschan, iproc, 1, isyst] = (
                                     dict_logkhalfdiff_proc[syst]
                                 )
+
+                    if proc in self.dict_beta_variations[chan]:
+                        beta_vars = self.dict_beta_variations[chan][proc]
+                        beta_variations[ibin : ibin + nbinschan, :, iproc] = beta_vars
 
                 ibin += nbinschan
 
@@ -915,6 +969,11 @@ class TensorWriter:
                 logk, f, "hlogk", maxChunkBytes=self.chunkSize
             )
             logk = None
+
+            nbytes += h5pyutils.writeFlatInChunks(
+                beta_variations, f, "hbetavariations", maxChunkBytes=self.chunkSize
+            )
+            beta_variations = None
 
         logger.info(f"Total raw bytes in arrays = {nbytes}")
 
