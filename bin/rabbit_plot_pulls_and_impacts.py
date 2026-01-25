@@ -325,7 +325,7 @@ def plotImpacts(
                     size=8,
                 ),
                 error_x=error_x,
-                name="Pulls ± Constraints",
+                name=f"Pulls ± Constraints ({name})",
                 showlegend=include_ref,
             ),
             row=1,
