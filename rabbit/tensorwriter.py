@@ -439,7 +439,10 @@ class TensorWriter:
         variation = h.project(*dest_axes_names, *source_axes_names).values()
         variation = variation.reshape((*norm.shape, -1))
 
-        self.dict_beta_variations[dest_channel][process] = variation
+        if source_channel not in self.dict_beta_variations[dest_channel].keys():
+            self.dict_beta_variations[dest_channel][source_channel] = {}
+
+        self.dict_beta_variations[dest_channel][source_channel][process] = variation
 
     def get_logk(self, syst, norm, kfac=1.0, systematic_type=None):
         if not np.all(np.isfinite(syst)):
@@ -795,9 +798,31 @@ class TensorWriter:
                                     dict_logkhalfdiff_proc[syst]
                                 )
 
-                    if proc in self.dict_beta_variations[chan]:
-                        beta_vars = self.dict_beta_variations[chan][proc]
-                        beta_variations[ibin : ibin + nbinschan, :, iproc] = beta_vars
+                    for (
+                        source_channel,
+                        source_channel_dict,
+                    ) in self.dict_beta_variations[chan].items():
+                        if proc in source_channel_dict:
+
+                            # find the bins of the source channel
+                            ibin_start = 0
+                            for c, nb in self.nbinschan.items():
+                                if self.channels[c]["masked"]:
+                                    continue  # masked channels can not be source channels
+                                if c == source_channel:
+                                    ibin_end = ibin_start + nb
+                                    break
+                                else:
+                                    ibin_start += nb
+                            else:
+                                raise RuntimeError(
+                                    f"Did not find source channel {source_channel} in list of channels {[k for k in self.nbinschan.keys()]}"
+                                )
+
+                            beta_vars = source_channel_dict[proc]
+                            beta_variations[
+                                ibin : ibin + nbinschan, ibin_start:ibin_end, iproc
+                            ] = beta_vars
 
                 ibin += nbinschan
 
