@@ -29,6 +29,9 @@ from wums.boostHistHelpers import (
     scaleHist,
 )
 
+from scripts.plotting.uncertainty_tools import (
+    all_mc_corrections,
+)
 
 
 import pdb
@@ -444,57 +447,37 @@ def sum_in_quadrature(arr, start_ind, end_ind, axis = "pt"):
     
 def get_true_efficiencies():
     
-    with open("mutually_exclusive_iso.pkl", "rb") as f:
-        iso_mc = pickle.load(f)
-    with open("mutually_exclusive_dtdt.pkl", "rb") as f:
-        dtdt_prpg_mc = pickle.load(f)
-    with open("mutually_exclusive_dtst.pkl", "rb") as f:
-        dtst_prpg_mc = pickle.load(f)
-    with open("mutually_exclusive_stst.pkl", "rb") as f:
-        stst_prpg_mc = pickle.load(f)
-    
-    # pdb.set_trace()
-    iso = iso_mc.project("time", "pt_probe", "eta_probe")
-    dtdt = dtdt_prpg_mc.project("time", "pt_probe", "eta_probe")
-    dtst = dtst_prpg_mc.project("time", "pt_probe", "eta_probe")
-    stst = stst_prpg_mc.project("time", "pt_probe", "eta_probe")
+    file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
+    file_in_name = file_in + "mz_dilepton_liv_scetlib_dyturboCorr.hdf5"  # _maxFiles_20
+    h5file = h5py.File(file_in_name, "r")
+    results = input_tools.load_results_h5py(h5file)
+    MC_Zmumu = results["ZmumuPostVFP"]["output"]
+    data_output = results["dataPostVFP"]["output"]
+    lumi_output = results["dataPostVFP"]["lumi_outout"]
 
-    # dtdt_extra = np.zeros(dtdt.values().shape)[:, :1, :]
-    # dtdt_extra = np.concatenate([dtdt_extra, dtdt.values()], axis = 1)
-    # dtdt_exp =  hist.Hist(*dtst.axes, data = dtdt_extra)
-    # true_iso = divideHists(iso, addHists(iso, dtdt_exp))
+    iso = MC_Zmumu["pos_iso"].get()
+    dtdt = MC_Zmumu["pos_trig"].get()
     
-    # dtst_shrink = hist.Hist(*dtdt.axes, data = dtst.values()[:, 1:, :])
-    # iso_shrink = hist.Hist(*dtdt.axes, data = iso.values()[:, 1:, :])
-    # true_hlt = divideHists(addHists(dtdt, iso_shrink), addHists(dtst_shrink, addHists(dtdt, iso_shrink)))
+    weightsum = results["ZmumuPostVFP"]["weight_sum"]
+    cross_sec = results["ZmumuPostVFP"]["dataset"]["xsec"]
     
-    # true_id = divideHists(addHists(dtst, addHists(dtdt_exp, iso)), addHists(stst, addHists(dtst, addHists(dtdt_exp, iso))))
-    
-    h1_iso = dtdt.values()[:, :1, :]## assuming this is time, pt, eta
-    
-    h2_iso_vals = np.concatenate([h1_iso, dtdt], axis = 1)
-    h2_iso_hist = hist.Hist(*stst.axes, data = h2_iso_vals)
-    true_iso = divideHists(scaleHist(iso, 1), (addHists(h2_iso_hist, scaleHist(iso, 1))))
-    
-    h1_hlt = dtst.values()[:, 1:, :]
-    h1_hlt_hist = hist.Hist(*dtdt.axes, data = h1_hlt)
-    
-    true_iso_trunc = true_iso.values()[:, 1:, :]
-    true_iso_trunc_hist = hist.Hist(*dtdt.axes, data = true_iso_trunc)
-    
-    ones = divideHists(dtdt, dtdt)
-    true_hlt = divideHists(dtdt, addHists(dtdt, multiplyHists(h1_hlt_hist, addHists(ones, scaleHist(true_iso_trunc_hist, -1)))))
-    # true_hlt = dtdt/(dtdt + h1_hlt_hist*(1-true_iso_trunc_hist))
-    
-    eps_hlt_expanded = np.zeros(true_hlt.values().shape)[:, :1, :]
-    eps_hlt_expanded = np.concatenate([eps_hlt_expanded, true_hlt.values()], axis = 1)
-    eps_hlt_exp_hist = hist.Hist(*dtst.axes, data = eps_hlt_expanded)
-    
-    ones = divideHists(dtst, dtst)
-    true_id = divideHists(dtst, addHists(dtst, multiplyHists(stst, addHists(ones, scaleHist(eps_hlt_exp_hist, -1)))))
-    # true_id = dtst/(dtst + stst*(1-eps_hlt_exp_hist))
-    
-    return true_hlt, true_id, true_iso
+    lumi_scaling = lumi_output["lumi_nom"].get()
+    time_proj_low_all = data_output["time_proj"].get()
+
+    time_proj_low = time_proj_low_all[{"mll": 9, "pt_tag": 3, "eta_tag": 3}]
+
+    iso_corr = all_mc_corrections(
+        iso.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
+    )
+    dtdt_corr = all_mc_corrections(
+        dtdt.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
+    )
+
+    true_iso = divideHists(iso_corr, dtdt_corr) ## problematic because this isn't less than one
+    iso_vals = true_iso.values()
+    # iso_vals = np.concatenate((iso_vals[:, 0, :], iso_vals))
+    # true_iso_exp = hist.Hist(dtdt.axes, data = iso_vals)
+    return true_iso
 
     
 
@@ -550,7 +533,7 @@ def make_plot(
     elif args.Mappings[0][0] == "ID":
         _, true_eff, _ = get_true_efficiencies()
     elif args.Mappings[0][0] == "ISO":
-        _, _, true_eff = get_true_efficiencies()
+        true_eff = get_true_efficiencies()
 
     #len(h_inclusive.axes)): ## the first axis should be time. should implement time into this but for now am only going to take the average
     h_data = h_data[{f"{args.fixed_param}": 1}]
