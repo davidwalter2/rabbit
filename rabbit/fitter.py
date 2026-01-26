@@ -2157,12 +2157,6 @@ class Fitter:
 
             self.x.assign(xval)
 
-        # force profiling of beta with final parameter values
-        # TODO avoid the extra calculation and jitting if possible since the relevant calculation
-        # usually would have been done during the minimization
-        if self.binByBinStat:
-            self._profile_beta()
-
         return callback
 
     def nll_scan(self, param, scan_range, scan_points, use_prefit=False):

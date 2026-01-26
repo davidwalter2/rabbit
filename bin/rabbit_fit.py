@@ -283,11 +283,14 @@ def fit(args, fitter, ws, dofit=True):
     if args.externalPostfit is not None:
         fitter.load_fitresult(args.externalPostfit, args.externalPostfitResult)
 
-        if fitter.binByBinStat:
-            fitter._profile_beta()
-
     if dofit:
         cb = fitter.minimize()
+
+        # force profiling of beta with final parameter values
+        # TODO avoid the extra calculation and jitting if possible since the relevant calculation
+        # usually would have been done during the minimization
+        if fitter.binByBinStat and not args.noPostfitProfile:
+            fitter._profile_beta()
 
         if cb is not None:
             ws.add_loss_time_hist(cb.loss_history, cb.time_history)
