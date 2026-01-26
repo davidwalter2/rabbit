@@ -153,7 +153,7 @@ def make_parser():
         "--noPostfitProfile",
         default=False,
         action="store_true",
-        help="Do not profile beta parameters in the postfit (e.g. when using --externalPostfit).",
+        help="Do not profile the bin-by-bin parameters in the postfit (e.g. if parameters are loaded from another fit using --externalPostfit and/or no data is available to be profiled).",
     )
     parser.add_argument(
         "--doImpacts",
