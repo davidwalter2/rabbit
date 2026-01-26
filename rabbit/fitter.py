@@ -403,19 +403,30 @@ class Fitter:
                 np.zeros(self.indata.nsyst, dtype=np.float64)
             )
 
-    def get_blinded_theta(self):
+    def get_theta(self):
+        theta = self.x[self.poi_model.npoi : self.poi_model.npoi + self.indata.nsyst]
+        theta = tf.where(
+            self.frozen_params_mask[
+                self.poi_model.npoi : self.poi_model.npoi + self.indata.nsyst
+            ],
+            tf.stop_gradient(theta),
+            theta,
+        )
         theta = self.x[self.poi_model.npoi :]
         if self.do_blinding:
             return theta + self._blinding_offsets_theta
         else:
             return theta
 
-    def get_blinded_poi(self):
+    def get_poi(self):
         xpoi = self.x[: self.poi_model.npoi]
         if self.poi_model.allowNegativePOI:
             poi = xpoi
         else:
             poi = tf.square(xpoi)
+        poi = tf.where(
+            self.frozen_params_mask[: self.poi_model.npoi], tf.stop_gradient(poi), poi
+        )
         if self.do_blinding:
             return poi * self._blinding_offsets_poi
         else:
@@ -1298,17 +1309,8 @@ class Fitter:
 
     def _compute_yields_noBBB(self, full=True):
         # full: compute yields inclduing masked channels
-        poi = self.get_blinded_poi()
-        theta = self.get_blinded_theta()
-
-        poi = tf.where(
-            self.frozen_params_mask[: self.poi_model.npoi], tf.stop_gradient(poi), poi
-        )
-        theta = tf.where(
-            self.frozen_params_mask[self.poi_model.npoi :],
-            tf.stop_gradient(theta),
-            theta,
-        )
+        poi = self.get_poi()
+        theta = self.get_theta()
 
         rnorm = self.poi_model.compute(poi)
 
@@ -1877,7 +1879,7 @@ class Fitter:
 
     def _compute_lc(self, full_nll=False):
         # constraints
-        theta = self.get_blinded_theta()
+        theta = self.get_theta()
         lc = self.indata.constraintweights * 0.5 * tf.square(theta - self.theta0)
         if full_nll:
             # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
