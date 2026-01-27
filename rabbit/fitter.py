@@ -288,12 +288,14 @@ class Fitter:
 
     def load_fitresult(self, fitresult_file, fitresult_key):
         # load results from external fit and set postfit value and covariance elements for common parameters
+        cov_ext = None
         with h5py.File(fitresult_file, "r") as fext:
             if "x" in fext.keys():
                 # fitresult from combinetf
                 x_ext = fext["x"][...]
                 parms_ext = fext["parms"][...].astype(str)
-                cov_ext = fext["cov"][...]
+                if "cov" in fext.keys():
+                    cov_ext = fext["cov"][...]
             else:
                 # fitresult from rabbit
                 h5results_ext = io_tools.get_fitresult(fext, fitresult_key)
@@ -301,10 +303,10 @@ class Fitter:
 
                 x_ext = h_parms_ext.values()
                 parms_ext = np.array(h_parms_ext.axes["parms"])
-                cov_ext = h5results_ext["cov"].get().values()
+                if "cov" in h5results_ext.keys():
+                    cov_ext = h5results_ext["cov"].get().values()
 
         xvals = self.x.numpy()
-        covval = self.cov.numpy()
         parms = self.parms.astype(str)
 
         # Find common elements with their matching indices
@@ -312,10 +314,13 @@ class Fitter:
             parms, parms_ext, assume_unique=True, return_indices=True
         )
         xvals[idxs] = x_ext[idxs_ext]
-        covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
 
         self.x.assign(xvals)
-        self.cov.assign(tf.constant(covval))
+
+        if cov_ext is not None:
+            covval = self.cov.numpy()
+            covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
+            self.cov.assign(tf.constant(covval))
 
     def update_frozen_params(self):
         new_mask_np = np.isin(self.parms, self.frozen_params)
@@ -2153,12 +2158,6 @@ class Fitter:
                 logger.debug(res)
 
             self.x.assign(xval)
-
-        # force profiling of beta with final parameter values
-        # TODO avoid the extra calculation and jitting if possible since the relevant calculation
-        # usually would have been done during the minimization
-        if self.binByBinStat:
-            self._profile_beta()
 
         return callback
 

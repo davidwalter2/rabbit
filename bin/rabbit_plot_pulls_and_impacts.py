@@ -206,6 +206,9 @@ def plotImpacts(
         else:
             text_on_bars = True
 
+    name_suffix = f" ({name})" if name else ""
+    ref_name_suffix = f" ({ref_name})" if ref_name else ""
+
     if impacts:
 
         def make_bar(
@@ -234,7 +237,7 @@ def plotImpacts(
             )
 
         sign = "+/-" if (oneSidedImpacts and not any(df["impact_down"] > 0)) else "+"
-        label = f"{sign}1σ impact ({name})" if name else f"{sign}1σ impact"
+        label = f"{sign}1σ impact{name_suffix}"
         fig.add_trace(
             make_bar(
                 key="impact_up",
@@ -249,7 +252,7 @@ def plotImpacts(
             fig.add_trace(
                 make_bar(
                     key="impact_up_ref",
-                    name=f"{sign}1σ impact ({ref_name})",
+                    name=f"{sign}1σ impact{ref_name_suffix}",
                     filled=False,
                 ),
                 row=1,
@@ -260,7 +263,7 @@ def plotImpacts(
             fig.add_trace(
                 make_bar(
                     key="impact_down",
-                    name=f"-1σ impact ({name})" if name else "-1σ impact",
+                    name=f"-1σ impact{name_suffix}",
                     color="#e41a1c",
                     text_on_bars=text_on_bars,
                     opacity=0.5 if include_ref else 1,
@@ -272,7 +275,7 @@ def plotImpacts(
                 fig.add_trace(
                     make_bar(
                         key="impact_down_ref",
-                        name=f"-1σ impact ({ref_name})",
+                        name=f"-1σ impact{ref_name_suffix}",
                         color="#e41a1c",
                         filled=False,
                     ),
@@ -325,7 +328,7 @@ def plotImpacts(
                     size=8,
                 ),
                 error_x=error_x,
-                name="Pulls ± Constraints",
+                name=f"Pulls ± Constraints{name_suffix}",
                 showlegend=include_ref,
             ),
             row=1,
@@ -346,7 +349,7 @@ def plotImpacts(
                     y=labels,
                     orientation="h",
                     **get_marker(filled=False, color="black"),
-                    name=f"Pulls ± Constraints ({ref_name})",
+                    name=f"Pulls ± Constraints{ref_name_suffix}",
                     showlegend=True,
                 ),
                 row=1,
@@ -386,7 +389,7 @@ def plotImpacts(
                                 width=1
                             ),  # Adjust the thickness of the marker lines
                         ),
-                        name=f"Asym. pulls ({ref_name})",
+                        name=f"Asym. pulls{ref_name_suffix}",
                         showlegend=include_ref,
                     ),
                     row=1,
@@ -760,11 +763,13 @@ def parseArgs():
     parser.add_argument(
         "--refName",
         type=str,
+        default="ref.",
         help="Name of reference input for legend",
     )
     parser.add_argument(
         "--name",
         type=str,
+        default=None,
         help="Name of input for legend",
     )
     parser.add_argument(
