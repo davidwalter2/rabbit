@@ -141,12 +141,27 @@ class Fitter:
 
         self.parms = np.concatenate([self.poi_model.pois, self.indata.systs])
 
+        # tf tensor containing default constraint minima
+        theta0default = np.zeros(self.indata.nsyst)
+        for parm, val in options.setConstraintMinimum:
+            idx = np.where(self.indata.systs.astype(str) == parm)[0]
+            if len(idx) != 1:
+                raise RuntimeError(
+                    f"Expect to find exactly one match for {parm} to set constraint minimum, but found {len(idx)}"
+                )
+            theta0default[idx[0]] = val
+
+        self.theta0default = tf.convert_to_tensor(
+            theta0default, dtype=self.indata.dtype
+        )
+
         # tf variable containing all fit parameters
-        thetadefault = tf.zeros([self.indata.nsyst], dtype=self.indata.dtype)
         if self.poi_model.npoi > 0:
-            xdefault = tf.concat([self.poi_model.xpoidefault, thetadefault], axis=0)
+            xdefault = tf.concat(
+                [self.poi_model.xpoidefault, self.theta0default], axis=0
+            )
         else:
-            xdefault = thetadefault
+            xdefault = self.theta0default
 
         self.x = tf.Variable(xdefault, trainable=True, name="x")
 
@@ -186,7 +201,7 @@ class Fitter:
 
         # constraint minima for nuisance parameters
         self.theta0 = tf.Variable(
-            tf.zeros([self.indata.nsyst], dtype=self.indata.dtype),
+            self.theta0default,
             trainable=False,
             name="theta0",
         )
@@ -491,7 +506,7 @@ class Fitter:
         self.logbeta0.assign(tf.math.log(beta0safe))
 
     def theta0defaultassign(self):
-        self.theta0.assign(tf.zeros([self.indata.nsyst], dtype=self.theta0.dtype))
+        self.theta0.assign(self.theta0default)
 
     def xdefaultassign(self):
         if self.poi_model.npoi == 0:

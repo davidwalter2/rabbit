@@ -94,6 +94,13 @@ def common_parser():
         """,
     )
     parser.add_argument(
+        "--setConstraintMinimum",
+        default=[],
+        nargs=2,
+        action="append",
+        help="Set the constraint minima of specified parameter to specified value",
+    )
+    parser.add_argument(
         "--freezeParameters",
         type=str,
         default=[],
