@@ -147,7 +147,7 @@ class Fitter:
             idx = np.where(self.indata.systs.astype(str) == parm)[0]
             if len(idx) != 1:
                 raise RuntimeError(
-                    f"Expect to find exactly one match for {parm} to set constraint minimum, but found {len(len(idx))}"
+                    f"Expect to find exactly one match for {parm} to set constraint minimum, but found {len(idx)}"
                 )
             theta0default[idx[0]] = val
 
