@@ -1654,6 +1654,22 @@ class Fitter:
             if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
                 betamask = self.betamask[: nexp.shape[0]]
                 if self.binByBinStatMode == "full":
+
+                    if self.indata.betavar is not None and full:
+                        # apply beta variations as normal scaling
+                        n0 = self.indata.norm
+                        sbeta = tf.math.sqrt(self.kstat[: self.indata.nbins])
+                        dbeta = sbeta * (betasel[: self.indata.nbins] - 1)
+                        dbeta = tf.where(
+                            betamask[: self.indata.nbins], tf.zeros_like(dbeta), dbeta
+                        )
+                        var = tf.einsum("ijk,jk->ik", self.indata.betavar, dbeta)
+                        safe_n0 = tf.where(
+                            n0 > 0, n0, 1.0
+                        )  # Use 1.0 as a dummy to avoid div by zero
+                        ratio = var / safe_n0
+                        norm = tf.where(n0 > 0, norm * (1 + ratio), norm)
+
                     norm = tf.where(betamask, norm, betasel * norm)
                     nexp = tf.reduce_sum(norm, -1)
                 else:
@@ -2084,6 +2100,14 @@ class Fitter:
                 val = self._compute_loss(profile=profile)
             grad = t1.gradient(val, self.ubeta)
         hess = t2.jacobian(grad, self.ubeta)
+
+        grad = tf.reshape(grad, [-1])
+        hess = tf.reshape(hess, [grad.shape[0], grad.shape[0]])
+
+        betamask = ~tf.reshape(self.betamask, [-1])
+        grad = grad[betamask]
+        hess = tf.boolean_mask(hess, betamask, axis=0)
+        hess = tf.boolean_mask(hess, betamask, axis=1)
 
         return val, grad, hess
 
