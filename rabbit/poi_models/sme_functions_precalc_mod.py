@@ -186,34 +186,25 @@ def integrate_sigma_hat_prime_sme(tau, flavor, Q2):
     
 
 
-def d_sigma(Q2, p1, p2, quark_couplings, precomputed = False, Q_min = 0, Q_max = 0, num_steps = 100):
+def d_sigma(Q2, p1, p2, quark_couplings, precomputed = False, precomputed_values = []):
     tau = Q2 / s
     d_sigmaL = 0
     d_sigmaR = 0
     i = 0
     
+    computed_values = []
     for flavor, e_f, g_fR, g_fL, CL, CR in quark_couplings:
+        
         if precomputed:
-            filename = f"precomputed_sme/{Q_min}_to_{Q_max}_{Q2}GeV_{flavor}_{num_steps}.pkl"
-            try:
-                with open(filename, "rb") as f:
-                    combined_array = pickle.load(f)
-                    pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = combined_array
-            except: 
-                precomputed = False
-        if not precomputed:
+            pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = precomputed_values[i]
+        else:
             pipi_L, pipj_L = integrate_sigma_hat_prime_sme(tau, flavor, Q2)
             pipi_R, pipj_R = integrate_sigma_hat_prime_sme(tau, flavor, Q2)
             
             sum_terms_L = summation_terms(Q2, e_f, g_fL)
             sum_terms_R = summation_terms(Q2, e_f, g_fR)
-        
-            
-            filename = f"precomputed_sme/{Q_min}_to_{Q_max}_{Q2}GeV^2_{quarks[flavor-1]}_{num_steps}_steps.pkl"
-            ## store left and right in the same file
-            combined_array = np.array([pipi_L,pipj_L, sum_terms_L, pipi_R, pipj_R,  sum_terms_R])
-            with open(filename, "wb") as f:
-                pickle.dump(combined_array, f)
+            ### currently this only saves the last one
+            computed_values.append([pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R])
                 
         contraction_p1p1_L = tn.einsum('mn,m,n->', CL, p1, p1)
         contraction_p1p2_L = tn.einsum('mn,m,n->', CL, p1, p2)
@@ -234,15 +225,15 @@ def d_sigma(Q2, p1, p2, quark_couplings, precomputed = False, Q_min = 0, Q_max =
 
         integral1 = pipi_L * contraction_pipi_L + pipj_L* contraction_pipj_L
         integral2 = pipi_R * contraction_pipi_R + pipj_R* contraction_pipj_R
-
-
+        
         d_sigmaL +=  sum_terms_L * integral1
         d_sigmaR += sum_terms_R * integral2
-        
-
+    
         i += 1
-
-    return factor * 0.389379 * 1e9*(d_sigmaL + d_sigmaR)  # This is d\sigma / dQ^2
+    if precomputed:
+        return factor * 0.389379 * 1e9*(d_sigmaL + d_sigmaR)  # This is d\sigma / dQ^2
+    else: 
+        return factor * 0.389379 * 1e9*(d_sigmaL + d_sigmaR), computed_values  # This is d\sigma / dQ^2
 
 
 
@@ -252,8 +243,22 @@ def sme(Q_min, Q_max, p1, p2, quark_couplings, num_steps_Q2 = 100, precomputed =
     if num_steps_Q2 % 2 == 0:
         num_steps_Q2 += 1
     Q2_values = np.linspace(Q_min**2, Q_max**2, num_steps_Q2)
+    filename = f"precomputed_sme/{Q_min}_to_{Q_max}_GeV_{num_steps_Q2}_steps.pkl"
+    if precomputed:
+        try:
+            with open(filename, "rb") as f:
+                combined_array = pickle.load(f)
+            integrand_values = np.array([d_sigma(Q2_values[i], p1, p2, quark_couplings, True, combined_array[i]) for i in range(len(Q2_values))])
+        except: 
+            precomputed = False
+    if not precomputed:
+        integrand_values, combined_array = zip(*[d_sigma(Q2, p1, p2, quark_couplings) for Q2 in Q2_values])
+        ## store left and right in the same file
+        with open(filename, "wb") as f:
+            pickle.dump(combined_array, f)
+            
+                
 
-    integrand_values = np.array([d_sigma(Q2, p1, p2, quark_couplings,precomputed, Q_min, Q_max) for Q2 in Q2_values])
     
     # Use Simpson's rule to integrate over the Q2_values array
     integral_liv = simpson(integrand_values, Q2_values)
@@ -267,7 +272,7 @@ t = time.time()
 # sme(70, 80, pm[0], pn[0], wilson_couplings)
 
 mybins = [15, 25, 28, 30, 32, 34, 36, 38, 40, 42, 47, 55, 60, 65, 80]
-# for i in range(len(mybins) - 1):
-for i in range(0, 1):
-    sme(mybins[i], mybins[i+1], pm[0], pn[0], wilson_couplings)
-print(t - time.time())
+for i in range(len(mybins) - 1):
+# for i in range(0, 1):
+    sme(mybins[i], mybins[i+1], pm[0], pn[0], wilson_couplings, precomputed = True)
+print(time.time() - t)
