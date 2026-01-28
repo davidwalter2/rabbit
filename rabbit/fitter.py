@@ -132,12 +132,27 @@ class Fitter:
 
         self.parms = np.concatenate([self.poi_model.pois, self.indata.systs])
 
+        # tf tensor containing default constraint minima
+        theta0default = np.zeros(self.indata.nsyst)
+        for parm, val in options.setConstraintMinimum:
+            idx = np.where(self.indata.systs.astype(str) == parm)[0]
+            if len(idx) != 1:
+                raise RuntimeError(
+                    f"Expect to find exactly one match for {parm} to set constraint minimum, but found {len(idx)}"
+                )
+            theta0default[idx[0]] = val
+
+        self.theta0default = tf.convert_to_tensor(
+            theta0default, dtype=self.indata.dtype
+        )
+
         # tf variable containing all fit parameters
-        thetadefault = tf.zeros([self.indata.nsyst], dtype=self.indata.dtype)
         if self.poi_model.npoi > 0:
-            xdefault = tf.concat([self.poi_model.xpoidefault, thetadefault], axis=0)
+            xdefault = tf.concat(
+                [self.poi_model.xpoidefault, self.theta0default], axis=0
+            )
         else:
-            xdefault = thetadefault
+            xdefault = self.theta0default
 
         self.x = tf.Variable(xdefault, trainable=True, name="x")
 
@@ -177,7 +192,7 @@ class Fitter:
 
         # constraint minima for nuisance parameters
         self.theta0 = tf.Variable(
-            tf.zeros([self.indata.nsyst], dtype=self.indata.dtype),
+            self.theta0default,
             trainable=False,
             name="theta0",
         )
@@ -284,12 +299,14 @@ class Fitter:
 
     def load_fitresult(self, fitresult_file, fitresult_key):
         # load results from external fit and set postfit value and covariance elements for common parameters
+        cov_ext = None
         with h5py.File(fitresult_file, "r") as fext:
             if "x" in fext.keys():
                 # fitresult from combinetf
                 x_ext = fext["x"][...]
                 parms_ext = fext["parms"][...].astype(str)
-                cov_ext = fext["cov"][...]
+                if "cov" in fext.keys():
+                    cov_ext = fext["cov"][...]
             else:
                 # fitresult from rabbit
                 h5results_ext = io_tools.get_fitresult(fext, fitresult_key)
@@ -297,10 +314,10 @@ class Fitter:
 
                 x_ext = h_parms_ext.values()
                 parms_ext = np.array(h_parms_ext.axes["parms"])
-                cov_ext = h5results_ext["cov"].get().values()
+                if "cov" in h5results_ext.keys():
+                    cov_ext = h5results_ext["cov"].get().values()
 
         xvals = self.x.numpy()
-        covval = self.cov.numpy()
         parms = self.parms.astype(str)
 
         # Find common elements with their matching indices
@@ -308,10 +325,13 @@ class Fitter:
             parms, parms_ext, assume_unique=True, return_indices=True
         )
         xvals[idxs] = x_ext[idxs_ext]
-        covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
 
         self.x.assign(xvals)
-        self.cov.assign(tf.constant(covval))
+
+        if cov_ext is not None:
+            covval = self.cov.numpy()
+            covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
+            self.cov.assign(tf.constant(covval))
 
     def update_frozen_params(self):
         new_mask_np = np.isin(self.parms, self.frozen_params)
@@ -399,19 +419,30 @@ class Fitter:
                 np.zeros(self.indata.nsyst, dtype=np.float64)
             )
 
-    def get_blinded_theta(self):
+    def get_theta(self):
+        theta = self.x[self.poi_model.npoi : self.poi_model.npoi + self.indata.nsyst]
+        theta = tf.where(
+            self.frozen_params_mask[
+                self.poi_model.npoi : self.poi_model.npoi + self.indata.nsyst
+            ],
+            tf.stop_gradient(theta),
+            theta,
+        )
         theta = self.x[self.poi_model.npoi :]
         if self.do_blinding:
             return theta + self._blinding_offsets_theta
         else:
             return theta
 
-    def get_blinded_poi(self):
+    def get_poi(self):
         xpoi = self.x[: self.poi_model.npoi]
         if self.poi_model.allowNegativePOI:
             poi = xpoi
         else:
             poi = tf.square(xpoi)
+        poi = tf.where(
+            self.frozen_params_mask[: self.poi_model.npoi], tf.stop_gradient(poi), poi
+        )
         if self.do_blinding:
             return poi * self._blinding_offsets_poi
         else:
@@ -471,7 +502,7 @@ class Fitter:
         self.logbeta0.assign(tf.math.log(beta0safe))
 
     def theta0defaultassign(self):
-        self.theta0.assign(tf.zeros([self.indata.nsyst], dtype=self.theta0.dtype))
+        self.theta0.assign(self.theta0default)
 
     def xdefaultassign(self):
         if self.poi_model.npoi == 0:
@@ -1294,17 +1325,8 @@ class Fitter:
 
     def _compute_yields_noBBB(self, full=True):
         # full: compute yields inclduing masked channels
-        poi = self.get_blinded_poi()
-        theta = self.get_blinded_theta()
-
-        poi = tf.where(
-            self.frozen_params_mask[: self.poi_model.npoi], tf.stop_gradient(poi), poi
-        )
-        theta = tf.where(
-            self.frozen_params_mask[self.poi_model.npoi :],
-            tf.stop_gradient(theta),
-            theta,
-        )
+        poi = self.get_poi()
+        theta = self.get_theta()
 
         rnorm = self.poi_model.compute(poi)
 
@@ -1754,6 +1776,22 @@ class Fitter:
             if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
                 betamask = self.betamask[: nexp.shape[0]]
                 if self.binByBinStatMode == "full":
+
+                    if self.indata.betavar is not None and full:
+                        # apply beta variations as normal scaling
+                        n0 = self.indata.norm
+                        sbeta = tf.math.sqrt(self.kstat[: self.indata.nbins])
+                        dbeta = sbeta * (betasel[: self.indata.nbins] - 1)
+                        dbeta = tf.where(
+                            betamask[: self.indata.nbins], tf.zeros_like(dbeta), dbeta
+                        )
+                        var = tf.einsum("ijk,jk->ik", self.indata.betavar, dbeta)
+                        safe_n0 = tf.where(
+                            n0 > 0, n0, 1.0
+                        )  # Use 1.0 as a dummy to avoid div by zero
+                        ratio = var / safe_n0
+                        norm = tf.where(n0 > 0, norm * (1 + ratio), norm)
+
                     norm = tf.where(betamask, norm, betasel * norm)
                     nexp = tf.reduce_sum(norm, -1)
                 else:
@@ -1999,7 +2037,7 @@ class Fitter:
 
     def _compute_lc(self, full_nll=False):
         # constraints
-        theta = self.get_blinded_theta()
+        theta = self.get_theta()
         lc = self.indata.constraintweights * 0.5 * tf.square(theta - self.theta0)
         if full_nll:
             # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
@@ -2281,12 +2319,6 @@ class Fitter:
                 logger.debug(res)
 
             self.x.assign(xval)
-
-        # force profiling of beta with final parameter values
-        # TODO avoid the extra calculation and jitting if possible since the relevant calculation
-        # usually would have been done during the minimization
-        if self.binByBinStat:
-            self._profile_beta()
 
         return callback
 

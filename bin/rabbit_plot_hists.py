@@ -817,16 +817,16 @@ def make_plot(
             h_den = h_inclusive
 
         if diff:
-            h1 = hh.addHists(h_inclusive, h_den, scale2=-1)
+            h0 = hh.addHists(h_num, h_num, scale2=-1)
             h2 = hh.addHists(h_data, h_den, scale2=-1)
             if h_data_stat is not None:
                 h2_stat = hh.divideHists(
                     h_data_stat, h_den, cutoff=cutoff, rel_unc=True
                 )
         else:
-            h1 = hh.divideHists(
-                h_inclusive,
-                h_den,
+            h0 = hh.divideHists(
+                h_num,
+                h_num,
                 cutoff=1e-8,
                 rel_unc=True,
                 flow=False,
@@ -839,7 +839,7 @@ def make_plot(
                 )
 
         hep.histplot(
-            h1,
+            h0,
             histtype="step",
             color="grey",
             alpha=0.5,
@@ -1311,14 +1311,7 @@ def make_plots(
                 h_data_stat = None
 
             if hists_up is not None:
-                hup = [
-                    (
-                        h[{k.replace("Sig", ""): v for k, v in idxs.items()}]
-                        if h is not None
-                        else None
-                    )
-                    for h in hists_up
-                ]
+                hup = [h[idxs] if h is not None else None for h in hists_up]
             else:
                 hup = None
 
