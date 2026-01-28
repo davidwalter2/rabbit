@@ -818,7 +818,6 @@ def make_plot(
 
         if diff:
             h0 = hh.addHists(h_num, h_num, scale2=-1)
-            h1 = hh.addHists(h_inclusive, h_den, scale2=-1)
             h2 = hh.addHists(h_data, h_den, scale2=-1)
             if h_data_stat is not None:
                 h2_stat = hh.divideHists(
@@ -828,14 +827,6 @@ def make_plot(
             h0 = hh.divideHists(
                 h_num,
                 h_num,
-                cutoff=1e-8,
-                rel_unc=True,
-                flow=False,
-                by_ax_name=False,
-            )
-            h1 = hh.divideHists(
-                h_inclusive,
-                h_den,
                 cutoff=1e-8,
                 rel_unc=True,
                 flow=False,
@@ -1320,14 +1311,7 @@ def make_plots(
                 h_data_stat = None
 
             if hists_up is not None:
-                hup = [
-                    (
-                        h[{k.replace("Sig", ""): v for k, v in idxs.items()}]
-                        if h is not None
-                        else None
-                    )
-                    for h in hists_up
-                ]
+                hup = [h[idxs] if h is not None else None for h in hists_up]
             else:
                 hup = None
 

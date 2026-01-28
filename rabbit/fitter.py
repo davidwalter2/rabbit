@@ -145,7 +145,7 @@ class Fitter:
             idx = np.where(self.indata.systs.astype(str) == parm)[0]
             if len(idx) != 1:
                 raise RuntimeError(
-                    f"Expect to find exactly one match for {parm} to set constraint minimum, but found {len(len(idx))}"
+                    f"Expect to find exactly one match for {parm} to set constraint minimum, but found {len(idx)}"
                 )
             theta0default[idx[0]] = val
 
@@ -421,7 +421,7 @@ class Fitter:
                 np.zeros(self.indata.nsyst, dtype=np.float64)
             )
 
-    def get_blinded_theta(self):
+    def get_theta(self):
         theta = self.x[self.poi_model.npoi : self.poi_model.npoi + self.indata.nsyst]
         theta = tf.where(
             self.frozen_params_mask[
@@ -430,12 +430,13 @@ class Fitter:
             tf.stop_gradient(theta),
             theta,
         )
+        theta = self.x[self.poi_model.npoi :]
         if self.do_blinding:
             return theta + self._blinding_offsets_theta
         else:
             return theta
 
-    def get_blinded_poi(self):
+    def get_poi(self):
         xpoi = self.x[: self.poi_model.npoi]
         if self.poi_model.allowNegativePOI:
             poi = xpoi
@@ -1326,8 +1327,8 @@ class Fitter:
 
     def _compute_yields_noBBB(self, full=True):
         # full: compute yields inclduing masked channels
-        poi = self.get_blinded_poi()
-        theta = self.get_blinded_theta()
+        poi = self.get_poi()
+        theta = self.get_theta()
 
         rnorm = self.poi_model.compute(poi)
 
@@ -1912,7 +1913,7 @@ class Fitter:
 
     def _compute_lc(self, full_nll=False):
         # constraints
-        theta = self.get_blinded_theta()
+        theta = self.get_theta()
         lc = self.indata.constraintweights * 0.5 * tf.square(theta - self.theta0)
         if full_nll:
             # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
@@ -2196,12 +2197,6 @@ class Fitter:
             callback = None
         else:
             callback = self.fit()
-
-        # force profiling of beta with final parameter values
-        # TODO avoid the extra calculation and jitting if possible since the relevant calculation
-        # usually would have been done during the minimization
-        if self.binByBinStat:
-            self._profile_beta()
 
         return callback
 

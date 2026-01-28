@@ -138,14 +138,12 @@ def do_asymptotic_limits(args, fitter, ws, data_values, mapping=None, fit_data=F
             idx = np.where(fitter.parms.astype(str) == key)[0][0]
             if key in fitter.poi_model.pois.astype(str):
                 is_poi = True
-                xbest = fitter_asimov.get_blinded_poi()[idx]
-                xobs = fitter.get_blinded_poi()[idx]
+                xbest = fitter_asimov.get_poi()[idx]
+                xobs = fitter.get_poi()[idx]
             elif key in fitter.parms.astype(str):
                 is_poi = False
-                xbest = fitter_asimov.get_blinded_theta()[
-                    idx - fitter_asimov.poi_model.npoi
-                ]
-                xobs = fitter.get_blinded_theta()[idx - fitter.poi_model.npoi]
+                xbest = fitter_asimov.get_theta()[idx - fitter_asimov.poi_model.npoi]
+                xobs = fitter.get_theta()[idx - fitter.poi_model.npoi]
 
             xerr = fitter_asimov.cov[idx, idx] ** 0.5
 

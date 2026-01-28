@@ -150,10 +150,10 @@ def make_parser():
         help="Specify result from external postfit file",
     )
     parser.add_argument(
-        "--noPostfitProfile",
+        "--noPostfitProfileBB",
         default=False,
         action="store_true",
-        help="Do not profile beta parameters in the postfit (e.g. when using --externalPostfit).",
+        help="Do not profile the bin-by-bin parameters in the postfit (e.g. if parameters are loaded from another fit using --externalPostfit and/or no data is available to be profiled).",
     )
     parser.add_argument(
         "--doImpacts",
@@ -290,11 +290,14 @@ def fit(args, fitter, ws, dofit=True):
     if args.externalPostfit is not None:
         fitter.load_fitresult(args.externalPostfit, args.externalPostfitResult)
 
-        if fitter.binByBinStat:
-            fitter._profile_beta()
-
     if dofit:
         cb = fitter.minimize()
+
+        # force profiling of beta with final parameter values
+        # TODO avoid the extra calculation and jitting if possible since the relevant calculation
+        # usually would have been done during the minimization
+        if fitter.binByBinStat and not args.noPostfitProfileBB:
+            fitter._profile_beta()
 
         if cb is not None:
             ws.add_loss_time_hist(cb.loss_history, cb.time_history)
@@ -346,7 +349,7 @@ def fit(args, fitter, ws, dofit=True):
             "nllvalreduced": nllvalreduced,
             "ndfsat": ndfsat,
             "edmval": edmval,
-            "postfit_profile": not args.noPostfitProfile,
+            "postfit_profile": not args.noPostfitProfileBB,
         }
     )
 
@@ -574,7 +577,7 @@ def main():
                             ifitter,
                             ws,
                             prefit=False,
-                            profile=not args.noPostfitProfile,
+                            profile=not args.noPostfitProfileBB,
                         )
                 else:
                     fit_time.append(time.time())
