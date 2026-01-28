@@ -84,10 +84,10 @@ This is often the case in the standard profile likelihood unfolding.
 By default, systematic variations are asymmetric. 
 However, defining only symmetric variations can be beneficial as a fully symmetric tensor has reduced memory consumption, simplifications in the likelihood function in the fit, and is usually numerically more stable. 
 Different symmetrization options are supported:
- * "average": TBD
- * "conservative": TBD
- * "linear": TBD
- * "quadratic": TBD
+ * "average": In each bin average the up and down variation and mirror. This is the recommended option for vairations that are expected to be symmetric.
+ * "conservative": In each bin use the larger variation between up and down and mirror. This option is less recommended but can be used as cross check against "average".
+ * "linear": The up and down variations are decomposed into the components for the average and difference with a scale factor for the difference shape of 1, corresponding to linear interpolation. This option is recommended for variations that are expected to be asymmetric.
+ * "quadratic": This option is recommended for variations that are expected to be asymmetric with a scale factor for the difference shape of $\sqrt{3}$, corresponding to quadratic interpolation and more conservative than "linear".
 If a systematic variation is added by providing a single histogram, the variation is mirrored. 
 
 ### Masked channels
@@ -120,7 +120,13 @@ rabbit_fit test_tensor.hdf5 -o results/fitresult.hdf5 -t 0 --doImpacts --globalI
 ```
 
 ### Bin-by-bin statistical uncertainties
-Bin-by-bin statistical uncertainties on the templates are added by default and can be disabled at runtime using the `--noBinByBinStat` option. The Barlow-Beeston lite method is used to add implicit nuisance parameters for each template bin.  By default this is implemented using a gamma distribution for the probability density, but Gaussian uncertainties can also be used with `--binByBinStatType normal`.
+Bin-by-bin statistical uncertainties on the templates are added by default and can be disabled at runtime using the `--noBinByBinStat` option. 
+The Barlow-Beeston method is used to add implicit nuisance parameters for each template bin.
+By default, the lite variant is used where one parameter is introduced per template bin, for the sum of all processes. 
+The Barlow-Beeston-full method can be used by specifying `--binByBinStatMode full` which introduces implicit nuisance parameters for each process and each template bin.
+By default these nuisance parameters are multiplied to the expected events and follow a gamma distribution for the probability density.
+Gaussian uncertainties can also be used with `--binByBinStatType normal-additive` for an additive scaling or `--binByBinStatType normal-multiplicative` for a multiplicative scaling.
+In the case of `--binByBinStatMode full` and `--binByBinStatType gamma` no analytic solution is available and in each bin a 1D minimization is performed using Newton's method which can significantly increase the time required in the fit. 
 
 ### Mappings
 Perform mappings on the parameters and observables (the histogram bins in the (masked) channels). 
