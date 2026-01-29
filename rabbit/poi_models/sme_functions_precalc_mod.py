@@ -205,7 +205,8 @@ def d_sigma(Q2, p1, p2, quark_couplings, precomputed = False, precomputed_values
             sum_terms_R = summation_terms(Q2, e_f, g_fR)
             ### currently this only saves the last one
             computed_values.append([pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R])
-                
+         
+        ### this can't be pulled out further because this iterates by flavor
         contraction_p1p1_L = tn.einsum('mn,m,n->', CL, p1, p1)
         contraction_p1p2_L = tn.einsum('mn,m,n->', CL, p1, p2)
         contraction_p2p1_L = tn.einsum('mn,m,n->', CL, p2, p1)
@@ -237,42 +238,71 @@ def d_sigma(Q2, p1, p2, quark_couplings, precomputed = False, precomputed_values
 
 
 
-def sme(Q_min, Q_max, p1, p2, quark_couplings, num_steps_Q2 = 100, precomputed = False):
+def sme(Q_min, Q_max, p1, p2, quark_couplings, num_steps_Q2 = 100, precomputed = False, precomputed_values = []):
 
-    num_steps_Q2 = int(num_steps_Q2)
     if num_steps_Q2 % 2 == 0:
         num_steps_Q2 += 1
     Q2_values = np.linspace(Q_min**2, Q_max**2, num_steps_Q2)
-    filename = f"precomputed_sme/{Q_min}_to_{Q_max}_GeV_{num_steps_Q2}_steps.pkl"
     if precomputed:
-        try:
-            with open(filename, "rb") as f:
-                combined_array = pickle.load(f)
-            integrand_values = np.array([d_sigma(Q2_values[i], p1, p2, quark_couplings, True, combined_array[i]) for i in range(len(Q2_values))])
-        except: 
-            precomputed = False
+        integrand_values = np.array([d_sigma(Q2_values[i], p1, p2, quark_couplings, precomputed = True, precomputed_values = precomputed_values[i]) for i in range(len(Q2_values))])
     if not precomputed:
         integrand_values, combined_array = zip(*[d_sigma(Q2, p1, p2, quark_couplings) for Q2 in Q2_values])
         ## store left and right in the same file
-        with open(filename, "wb") as f:
-            pickle.dump(combined_array, f)
-            
-                
 
-    
     # Use Simpson's rule to integrate over the Q2_values array
     integral_liv = simpson(integrand_values, Q2_values)
     print(integral_liv)
-    return integral_liv
+    if precomputed:
+        return integral_liv
+    else:
+        return integral_liv, combined_array
 
 
 
 times, pm, pn = get_hour_array() ## i only want to compte this once when i do the 
 t = time.time()
-# sme(70, 80, pm[0], pn[0], wilson_couplings)
 
 mybins = [15, 25, 28, 30, 32, 34, 36, 38, 40, 42, 47, 55, 60, 65, 80]
+filename = f"{mybins[0]}_to_{mybins[-1]}_GeV_{len(mybins)}_bins.pkl"
+add_dir = "precomputed_sme/"
+precomputed = True
+all_precomputed_values = []
+
+def files_exist(files):
+    directory = '.'  # Current directory
+    dir_files = os.listdir(directory +f"/{add_dir}")
+    return_files = 0
+
+    for file in files:
+        if file in dir_files:
+        # if os.path.isfile(os.path.join(directory, file)):
+            return_files += 1
+    if return_files != len(files):
+        return 0
+    else:
+        return files
+    
+    
+    
+if precomputed:
+    if files_exist([filename]) != 0:
+        with open(add_dir + filename, "rb") as f:
+            precomp_dict = pickle.load(f)
+            if precomp_dict["bins"] != mybins:
+                precomputed = False
+    else:
+        precomputed = False
+            
+print(precomputed)
+# pdb.set_trace()                    
 for i in range(len(mybins) - 1):
-# for i in range(0, 1):
-    sme(mybins[i], mybins[i+1], pm[0], pn[0], wilson_couplings, precomputed = True)
+    if precomputed:
+        integral_liv = sme(mybins[i], mybins[i+1], pm[0], pn[0], wilson_couplings, precomputed = True, precomputed_values = precomp_dict["values"][i])
+    else:
+        integral_liv, precomputed_values = sme(mybins[i], mybins[i+1], pm[0], pn[0], wilson_couplings, precomputed = False)
+        all_precomputed_values.append(precomputed_values)
+if not precomputed:
+    with open(add_dir + filename, "wb") as f:
+        output = {"bins": mybins, "values": all_precomputed_values}
+        pickle.dump(output, f)
 print(time.time() - t)
