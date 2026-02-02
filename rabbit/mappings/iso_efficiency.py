@@ -175,7 +175,7 @@ class NormISO(ISO):
     def compute_flat(self, params, observables):
         h3 = self.h3.select(observables, normalize = True, inclusive=True)
         h2 = self.h2.select(observables, normalize = True, inclusive=True)
-        eps_iso = 2*h3/(h2 + 2*h3)
+        eps_iso = h3/(h2 + h3)
         eps_iso = tf.reshape(eps_iso, [-1])
 
         return eps_iso

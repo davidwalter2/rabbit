@@ -177,14 +177,15 @@ class HLT(Mapping):
     def compute_flat(self, params, observables):
         h3 = self.h3.select(observables, inclusive=True)
         h2 = self.h2.select(observables, inclusive=True)
-        h1_iso = self.h2.select(observables, inclusive=True)[:, :1, :]
+        h2_hlt = self.h2.select(observables, inclusive=True)[:, :1, :]
 
-        h2_iso = tf.concat([h1_iso, h2], axis = 1)
+        h2_iso = tf.concat([h2_hlt, h2], axis = 1)
         eps_iso = 2*h3/(h2_iso + 2*h3)
         
         h1_hlt = self.h1.select(observables, inclusive=True)[:, 1:, :]
 
-        eps_hlt = h2/(h2 + h1_hlt*(1-eps_iso[:, 1:, :]))
+        ones = h2/h2
+        eps_hlt = h2/(h2 + h1_hlt*(ones-eps_iso[:, 1:, :]))
         eps_hlt = tf.reshape(eps_hlt, [-1])
 
         return eps_hlt
@@ -204,13 +205,16 @@ class NormHLT(HLT):
         super().__init__(*args, **kwargs)
 
     def compute_flat(self, params, observables):
-        h3 = self.h3.select(observables, normalize = True, inclusive=True)
         h2_hlt = self.h2.select(observables,normalize = True,  inclusive=True)[:, 1:, :]
-        h2 = self.h2.select(observables, normalize = True, inclusive=True)
         h1 = self.h1.select(observables, normalize = True, inclusive=True)
 
-        eps_iso = 2*h3/(h2_hlt + 2*h3)
-        eps_hlt = h2/(h2 + h1*(1-eps_iso))
+        h3 = self.h3.select(observables, normalize = True, inclusive=True)
+        h2 = self.h2.select(observables, normalize = True, inclusive=True)
+        
+        eps_iso = h3/(h2 + h3)
+        eps_iso = tf.reshape(eps_iso, [-1])
+        
+        eps_hlt = h2_hlt/(h2_hlt + h1*(1-eps_iso[:, 1:, :]))
         eps_hlt = tf.reshape(eps_hlt, [-1])
 
         return eps_hlt
