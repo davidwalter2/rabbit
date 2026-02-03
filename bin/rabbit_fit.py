@@ -13,6 +13,7 @@ from rabbit import fitter, inputdata, parsing, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
 from rabbit.poi_models import helpers as ph
+from rabbit.regularization import helpers as rh
 from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
@@ -476,6 +477,13 @@ def main():
         mappings = [
             mp.CompositeMapping(mappings),
         ]
+
+    regularizers = []
+    for margs in args.regularization:
+        mapping = mh.load_mapping(margs[1], indata, *margs[2:])
+        regularizer = rh.load_regularizer(margs[0], mapping, dtype=indata.dtype)
+        regularizers.append(regularizer)
+    ifitter.regularizers = regularizers
 
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)

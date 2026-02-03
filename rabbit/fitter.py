@@ -292,6 +292,9 @@ class Fitter:
             name="cov",
         )
 
+        # regularization
+        self.regularizers = []
+
         # determine if problem is linear (ie likelihood is purely quadratic)
         self.is_linear = (
             (self.chisqFit or self.covarianceFit)
@@ -344,12 +347,14 @@ class Fitter:
         self.frozen_indices = np.where(new_mask_np)[0]
 
     def freeze_params(self, frozen_parmeter_expressions):
+        logger.debug(f"Freeze params with {frozen_parmeter_expressions}")
         self.frozen_params.extend(
             match_regexp_params(frozen_parmeter_expressions, self.parms)
         )
         self.update_frozen_params()
 
     def defreeze_params(self, unfrozen_parmeter_expressions):
+        logger.debug(f"Freeze params with {unfrozen_parmeter_expressions}")
         unfrozen_parmeter = match_regexp_params(
             unfrozen_parmeter_expressions, self.parms
         )
@@ -359,6 +364,7 @@ class Fitter:
         self.update_frozen_params()
 
     def init_blinding_values(self, unblind_parameter_expressions=[]):
+        logger.debug(f"Unblind parameters with {unblind_parameter_expressions}")
         unblind_parameters = match_regexp_params(
             unblind_parameter_expressions,
             [
@@ -452,6 +458,9 @@ class Fitter:
         else:
             return poi
 
+    def get_x(self):
+        return tf.concat([self.get_poi(), self.get_theta()], axis=0)
+
     def _default_beta0(self):
         if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
             return tf.ones(self.beta_shape, dtype=self.indata.dtype)
@@ -533,6 +542,11 @@ class Fitter:
         self.xdefaultassign()
         if self.do_blinding:
             self.set_blinding_offsets(False)
+
+        xinit = self.get_x()
+        nexp0 = self.expected_yield(full=True)
+        for reg in self.regularizers:
+            reg.set_expectations(xinit, nexp0)
 
     def bayesassign(self):
         # FIXME use theta0 as the mean and constraintweight to scale the width
@@ -1982,10 +1996,10 @@ class Fitter:
         nexpfullcentral, _, beta = self._compute_yields_with_beta(
             profile=profile,
             compute_norm=False,
-            full=False,
+            full=len(self.regularizers),
         )
 
-        nexp = nexpfullcentral
+        nexp = nexpfullcentral[: self.indata.nbins]
 
         if self.chisqFit:
             ln = 0.5 * tf.reduce_sum((nexp - self.nobs) ** 2 / self.varnobs, axis=-1)
@@ -2019,16 +2033,34 @@ class Fitter:
 
         lbeta = self._compute_lbeta(beta, full_nll)
 
-        return ln, lc, lbeta, beta
+        # logger.debug(f"L(nobs) = {ln}")
+        # logger.debug(f"L(const.) = {lc}")
+        # logger.debug(f"L(beta) = {lbeta}")
+
+        if len(self.regularizers):
+            x = self.get_x()
+            penalties = [
+                reg.compute_nll_penalty(x, nexpfullcentral) for reg in self.regularizers
+            ]
+            lpenalty = tf.add_n(penalties)
+        else:
+            lpenalty = None
+
+        # logger.debug(f"L(penalty) = {lpenalty}")
+
+        return ln, lc, lbeta, lpenalty, beta
 
     def _compute_nll(self, profile=True, full_nll=False):
-        ln, lc, lbeta, beta = self._compute_nll_components(
+        ln, lc, lbeta, lpenalty, beta = self._compute_nll_components(
             profile=profile, full_nll=full_nll
         )
         l = ln + lc
 
         if lbeta is not None:
             l = l + lbeta
+
+        if lpenalty is not None:
+            l = l + lpenalty
 
         return l
 
@@ -2138,16 +2170,22 @@ class Fitter:
 
             callback = None
         else:
+            logger.info("Perform iterative fit")
 
             def scipy_loss(xval):
                 self.x.assign(xval)
                 val, grad = self.loss_val_grad()
+                # logger.debug(f"xval = {xval}")
+                # logger.debug(f"val = {val}; grad = {grad}")
                 return val.__array__(), grad.__array__()
 
             def scipy_hessp(xval, pval):
                 self.x.assign(xval)
                 p = tf.convert_to_tensor(pval)
                 val, grad, hessp = self.loss_val_grad_hessp(p)
+                # logger.debug(f"xval = {xval}")
+                # logger.debug(f"p = {p}")
+                # logger.debug(f"val = {val}; grad = {grad}; hessp = {hessp}")
                 return hessp.__array__()
 
             def scipy_hess(xval):
@@ -2190,6 +2228,7 @@ class Fitter:
             except Exception as ex:
                 # minimizer could have called the loss or hessp functions with "random" values, so restore the
                 # state from the end of the last iteration before the exception
+                logger.debug("Fitter exception")
                 xval = callback.xval
                 logger.debug(ex)
             else:
