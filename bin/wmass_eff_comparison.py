@@ -29,20 +29,13 @@ from wums.boostHistHelpers import (
     scaleHist,
 )
 
-from scripts.plotting.uncertainty_tools import (
-    all_mc_corrections,
-)
+from scripts.plotting.uncertainty_tools import *
 
 
 import pdb
 
 import h5py
-from uncertainty_tools import (
-    get_era_vals,
-    get_mc_lumis,
-    make_mutually_exclusive,
-    remove_low_bins,
-)
+
 from utilities.io_tools import input_tools
 
 from wums.boostHistHelpers import (
@@ -440,13 +433,12 @@ def sum_in_quadrature(arr, start_ind, end_ind, axis = "pt"):
         else: 
             combined += arr[i]**2
         i += 1
-    return np.sqrt(combined)*1/(end_ind - start_ind)
+    return np.sqrt(combined)*1/(end_ind - start_ind + 1)
 
 
 
     
 def get_true_efficiencies():
-    
     file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
     file_in_name = file_in + "mz_dilepton_liv_scetlib_dyturboCorr.hdf5"  # _maxFiles_20
     h5file = h5py.File(file_in_name, "r")
@@ -456,7 +448,10 @@ def get_true_efficiencies():
     lumi_output = results["dataPostVFP"]["lumi_outout"]
 
     iso = MC_Zmumu["pos_iso"].get()
-    dtdt = MC_Zmumu["pos_trig"].get()
+    trig = MC_Zmumu["pos_trig"].get()
+    id_hist = MC_Zmumu["pos_ID"].get()
+    global_hist = MC_Zmumu["pos_global"].get()
+
     
     weightsum = results["ZmumuPostVFP"]["weight_sum"]
     cross_sec = results["ZmumuPostVFP"]["dataset"]["xsec"]
@@ -469,15 +464,27 @@ def get_true_efficiencies():
     iso_corr = all_mc_corrections(
         iso.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
     )
-    dtdt_corr = all_mc_corrections(
-        dtdt.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
+    trig_corr = all_mc_corrections(
+        trig.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
+    )
+    
+    id_corr = all_mc_corrections(
+        id_hist.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
+    )
+    global_corr = all_mc_corrections(
+        global_hist.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
     )
 
-    true_iso = divideHists(iso_corr, dtdt_corr) ## problematic because this isn't less than one
-    iso_vals = true_iso.values()
-    # iso_vals = np.concatenate((iso_vals[:, 0, :], iso_vals))
-    # true_iso_exp = hist.Hist(dtdt.axes, data = iso_vals)
-    return true_iso
+    true_iso = divideHists(iso_corr, trig_corr) ## problematic because this isn't less than one
+    true_trig = divideHists(trig_corr, id_corr) ## problematic because this isn't less than one
+    true_id = divideHists(id_corr, global_corr) ## problematic because this isn't less than one
+    
+    true_trig = remove_low_bins(true_trig)
+    # with open("efficiency_vals.pkl", "wb") as f:
+    #     pickle.dump(true_iso, f)
+    # with open("/home/submit/jbenke/WRemnants/scripts/plotting/efficiency_values.pkl", "rb") as f:
+    #     true_iso = pickle.load(f)
+    return true_trig, true_id, true_iso
 
     
 
@@ -532,8 +539,8 @@ def make_plot(
         true_eff, _, _= get_true_efficiencies()
     elif args.Mappings[0][0] == "ID":
         _, true_eff, _ = get_true_efficiencies()
-    elif args.Mappings[0][0] == "ISO":
-        true_eff = get_true_efficiencies()
+    if args.Mappings[0][0] == "ISO":
+        _, _, true_eff = get_true_efficiencies()
 
     #len(h_inclusive.axes)): ## the first axis should be time. should implement time into this but for now am only going to take the average
     h_data = h_data[{f"{args.fixed_param}": 1}]
@@ -617,7 +624,6 @@ def make_plot(
                     ),
                     automatic_scale=args.customFigureWidth is None,
                 )
-
             for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
             
                 edges = h_inclusive[{f"{axis_name}": 0}].axes[0].edges
@@ -634,10 +640,10 @@ def make_plot(
                 elif comp_type == "effDATA":
                     vals = h_data[{f"{axis_name}": j}].values()
                     unc = h_data[{f"{axis_name}": j}].variances()**0.5
-                if args.Mappings[0][0] == "HLT":
-                    true_eff_vals = true_eff[{f"{axis_name}": j-1}].values()
-                else:
-                    true_eff_vals = true_eff[{f"{axis_name}": j}].values()
+                # if args.Mappings[0][0] == "HLT" :
+                #     true_eff_vals = true_eff[{f"{axis_name}": j}].values()
+                # else: # and ID
+                true_eff_vals = true_eff[{f"{axis_name}": j}].values()
 
                 # print(f"CHI SQUARED/DOF: {chi_squared/(len(vals)-1)}, DOF: {len(vals)-1}")
                 #### SHOULD CODE IN A P VALUE CALCULATOR
@@ -685,24 +691,35 @@ def make_plot(
                         
                 
                 elif other_axis == "pt_probe": 
-                    if j > 0:
-                        ind_start = np.where(eta_ax == other_edges[j-1])[0][0]
-                        ind_end = np.where(eta_ax == other_edges[j])[0][0]
+                    ### this is the one that shows the pt axis
+                    if j < 6:
+                        ind_start = np.where(eta_ax == other_edges[j])[0][0]
+                        ind_end = np.where(eta_ax == other_edges[j+1])[0][0]-1
+                        # pdb.set_trace()
+
                         avg_root = np.average(np.concatenate((root_result[ind_start:ind_end, :], root_result[ind_start:ind_end, :][:, -1][:, None]), axis = 1), axis = 0)
                         
-                        avg_err = sum_in_quadrature(root_errors, ind_start, ind_end)
+                        avg_err = sum_in_quadrature(root_errors, ind_start, ind_end-1)
                         plt.clf()
-                        plt.step(pt_ax, avg_root, color = "gray", label = f"WMass, eta = {other_edges[j-1]} to {other_edges[j]}", where = "post")
+                            
+                        plt.step(pt_ax, avg_root, color = "k", label = f"WMass average", where = "post")
                         
                         
-                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis fitted efficiency, eta = {other_edges[j-1]} to {other_edges[j]}", where = "post")
+                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis fitted efficiency, eta = {other_edges[j]} to {other_edges[j+1]}", where = "post")
                         
-                        if j != 0  and comp_type == "effMC": 
+                        if comp_type == "effMC": 
                             plt.step(edges, np.concatenate((true_eff_vals, np.array([true_eff_vals[-1]]))), color = 'C2', label = f"this analysis, true efficiency", where = "post")
                         
                         
                         plt.legend()
-                        plt.errorbar(pt_ax_centers, avg_root[:-1], yerr = avg_err, color = "gray", fmt = ".")                       
+                        
+                        for k in range(ind_start, ind_end+1):
+                            # pdb.set_trace()
+                            this_result = np.concatenate((root_result[k,:], np.array([root_result[k, -1]])))
+                            plt.step(pt_ax, this_result, color = "gray", where = "post", alpha = 0.5)
+                            
+                            
+                        plt.errorbar(pt_ax_centers, avg_root[:-1], yerr = avg_err, color = "k", fmt = ".")                       
                         
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
                         plt.xlim([edges[0], edges[-1]])
