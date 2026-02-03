@@ -189,7 +189,7 @@ def sigma_sm(Qmin, Qmax, quark_couplings):
     int, _ = quad(inet, Qmin**2, Qmax**2)
     return int
 
-def get_sm_sigma(Q_vals): ### pass in a list of max bins
+def get_sm_sigma(Q_vals): ### pass in a list of maxx bins
     
     Q_min = [Q_vals[i] for i in range(len(Q_vals) -1)]
     Q_max = [Q_vals[i] for i in range(1, len(Q_vals))]
@@ -236,7 +236,8 @@ def sigma_hat_prime(x, tau, C, p1, p2, flavor, Q2):
     contraction_p2p2 = tn.einsum('mn,m,n->', C, p2, p2)
     
     term1 = f_s_val
-    term2 = 2* (1 + x / tau_x) * (contraction_p1p1 + contraction_p1p2 +  contraction_p2p1 + contraction_p2p2) * f_s_val
+        
+    term2 = 2* (1 + x / tau_x) * f_s_val * (contraction_p1p1 + contraction_p1p2 +  contraction_p2p1 + contraction_p2p2)
     term3 = 2 * (x * contraction_p1p1 +  tau_x * contraction_p1p2 + tau_x * contraction_p2p1 + x * contraction_p2p2) * f_prime_s_val
 
     return term1, term2 + term3
@@ -252,7 +253,6 @@ def integrate_sigma_hat_prime_sme(tau, C, p1, p2, flavor, Q2, precompute = False
         term2 = 2* (1 + x / tau_x) * (contraction_p1p1 + contraction_p1p2 +  contraction_p2p1 + contraction_p2p2) * fs
         term3 = 2 * (x * contraction_p1p1 +  tau_x * contraction_p1p2 + tau_x * contraction_p2p1 + x * contraction_p2p2) * fs_prime
         return (term2 + term3) * tau_x
-    # pdb.set_trace()
     
     eps = 1e-12
     integration_bounds = np.geomspace(tau / (1 - eps), 1 - eps, num_steps_pdf)
@@ -267,7 +267,6 @@ def integrate_sigma_hat_prime_sme(tau, C, p1, p2, flavor, Q2, precompute = False
         result2 = simpson(y, x = integration_bounds)
     
     else: 
-        y = [integrand2(x) for x in integration_bounds]
         result2, _ = quad(integrand2, tau, 1)
 
     return result2
@@ -302,7 +301,6 @@ def precompute_fs(Q_min, Q_max, num_steps_Q2, num_steps_PDF, return_vals = False
     file_name = f"{Q_min}_to_{Q_max}_GeV_{num_steps_Q2}_Q2_steps_{num_steps_PDF}_PDF_steps" # not labeling the quark coupling because i think we only intend on doing up, down, strange
     f_s_all = np.zeros((len(quark_couplings), num_steps_Q2, num_steps_PDF))
     f_prime_s_all = np.zeros((len(quark_couplings), num_steps_Q2, num_steps_PDF))   # quark, Q2, momentum fraction
-    print(len(quark_couplings))
     k = 0 # to keep track of which quark coupling we are looking at. 
     for flavor, _, _, _ in quark_couplings:
         for i in range(Q2_values.shape[0]):
@@ -371,5 +369,7 @@ def sme(Q_min, Q_max, CL, CR, p1, p2, quark_couplings, num_steps_Q2 =100, precom
 
 times, pm, pn = get_hour_array() ## i only want to compte this once when i do the 
 t = time.time()
-sme(70, 80, CL4, CR, pm[0], pn[0], quark_couplings, precompute = True)
+
+### I THINK THE CL ARE THE SUN-CENTERED FRAME ONES
+sme(15, 25, CL4*1e-5, CR, pm[0], pn[0], quark_couplings, precompute = False)
 print(t - time.time())

@@ -800,13 +800,13 @@ def make_plot(
                     
                     
                 
-            ### need a better way of doing this. maybe through standard deviation
-            # if args.title == "ID":
-            #     ax1.set_ylim(0.97, 1.02)
-            # elif args.title == "ISO":
-            #     ax1.set_ylim(0.99, 1.02)
-            # else:
-            #     ax1.set_ylim(0.9, 1.02)
+            ## need a better way of doing this. maybe through standard deviation
+            if args.title == "ID":
+                ax1.set_ylim(0.97, 1.02)
+            elif args.title == "ISO":
+                ax1.set_ylim(0.99, 1.02)
+            else:
+                ax1.set_ylim(0.9, 1.02)
 
             plot_tools.add_decor(
             ax1,

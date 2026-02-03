@@ -475,15 +475,12 @@ def get_true_efficiencies():
         global_hist.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
     )
 
-    true_iso = divideHists(iso_corr, trig_corr) ## problematic because this isn't less than one
-    true_trig = divideHists(trig_corr, id_corr) ## problematic because this isn't less than one
-    true_id = divideHists(id_corr, global_corr) ## problematic because this isn't less than one
+    true_iso = divideHists(iso_corr, trig_corr)
+    true_trig = divideHists(trig_corr, id_corr)
+    true_id = divideHists(id_corr, global_corr) 
     
     true_trig = remove_low_bins(true_trig)
-    # with open("efficiency_vals.pkl", "wb") as f:
-    #     pickle.dump(true_iso, f)
-    # with open("/home/submit/jbenke/WRemnants/scripts/plotting/efficiency_values.pkl", "rb") as f:
-    #     true_iso = pickle.load(f)
+
     return true_trig, true_id, true_iso
 
     

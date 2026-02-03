@@ -1,7 +1,8 @@
 import numpy as np
 import tensorflow as tf
 from sme_constants import *
-from sme_functions import *
+from sme_functions_precal_mod import *
+from rabbit.poi_models.poi_model import POIModel
 
 class WilsonCoeffLeft(POIModel):
     
@@ -17,8 +18,6 @@ class WilsonCoeffLeft(POIModel):
         g_fL,
         left_tensor, #CL
         right_tensor, #CR
-        num_steps_pdf = 200,
-        num_steps_mass_bin = 100
     ):
         self.npoi = npoi
         self.pois = poi_names
@@ -30,17 +29,18 @@ class WilsonCoeffLeft(POIModel):
 
         self.CL = left_tensor
         self.CR = right_tensor
-        self.num_steps_pdf = num_steps_pdf
+       
         
+        times, pm, pn = get_hour_array()
         self.Q_vals = indata.axes
-        
-        ### need to have the mass bins for this and the binning
-        self.fs_vals, self.fs_prime_vals = precompute_fs(Qmin, Qmax, num_steps_pdf, True)  ### this will return the values 
-        
-        self.sum_terms_L = summation_terms(Q2, e_f, g_fL)
-        self.sum_terms_R = summation_terms(Q2, e_f, g_fR)
-        
-        
+        num_steps_Q2 = 100
+        self.Q_min = indata.axes()["pt_probe"][0]
+        self.Q_max = indata.axes()["pt_probe"][1]
+        all_q = []
+        for i in range(len(indata.axes()["pt_probe"]) - 2):
+            all_q.append(list(np.linspace(indata.axes()["pt_probe"][i], indata.axes()["pt_probe"][i+1], num_steps_Q2)))
+            
+
         
 
     @classmethod
