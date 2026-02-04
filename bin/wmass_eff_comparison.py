@@ -439,15 +439,13 @@ def sum_in_quadrature(arr, start_ind, end_ind, axis = "pt", weights = []):
     return np.sqrt(combined)
 
 def reweight_wmass_eff():
-    file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
-    file_in_name = file_in + "mz_dilepton_scetlib_dyturbo_CT18Z_N3p0LL_N2LO_Corr.hdf5"  # _maxFiles_20
+    file_in_name = "/home/submit/jbenke/WRemnants/scripts/histmakers/mz_dilepton_scetlib_dyturbo_CT18Z_N3p0LL_N2LO_Corr.hdf5"  # _maxFiles_20
     h5file = h5py.File(file_in_name, "r")
     results = input_tools.load_results_h5py(h5file)
     MC_Zmumu = results["Zmumu_2016PostVFP"]["output"]
     # nominal_ptll_yll
     # nominal_etaPlus
     eta_dist = MC_Zmumu["nominal_etaPlus"].get().values()
-
     return eta_dist
 
     
@@ -633,6 +631,14 @@ def make_plot(
                     ),
                     automatic_scale=args.customFigureWidth is None,
                 )
+            plt.clf()
+            plt.step(eta_ax, np.concatenate((wmass_eta_dist, np.array([wmass_eta_dist[-1]]))), color = "gray", where = "post")
+            this_filename = outfile + f"_Wmass_eta_distribution"
+            plt.xlabel("eta")
+            plt.ylabel("events")
+            plot_tools.save_pdf_and_png(outdir , this_filename)
+                 
+            
             for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
             
                 edges = h_inclusive[{f"{axis_name}": 0}].axes[0].edges
@@ -649,9 +655,7 @@ def make_plot(
                 elif comp_type == "effDATA":
                     vals = h_data[{f"{axis_name}": j}].values()
                     unc = h_data[{f"{axis_name}": j}].variances()**0.5
-                # if args.Mappings[0][0] == "HLT" :
-                #     true_eff_vals = true_eff[{f"{axis_name}": j}].values()
-                # else: # and ID
+
                 true_eff_vals = true_eff[{f"{axis_name}": j}].values()
 
                 # print(f"CHI SQUARED/DOF: {chi_squared/(len(vals)-1)}, DOF: {len(vals)-1}")
