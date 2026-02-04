@@ -50,45 +50,46 @@ class WilsonCoeffLeft(POIModel):
         all_q = []
         edges = indata.axes["pt_probe"]
         
-        filename = f"{edges[0][0]}_to_{edges[-1][1]}_GeV_{len(edges)}_bins.pkl" 
+        sme_filename = f"SME_{edges[0][0]}_to_{edges[-1][1]}_GeV_{len(edges)}_bins.pkl" 
+        sm_filename = f"SM_{edges[0][0]}_to_{edges[-1][1]}_GeV_{len(edges)}_bins.pkl" 
+
         add_dir = "precomputed_sme/"
-        all_precomputed = []
-        
+        all_precomputed_sme = []
+        all_precomputed_sm = []
+
         for i in range(len(edges)):
             all_q.append(list(np.linspace(edges[i][0]**2, edges[i][1]**2, 101)))
-            with open(add_dir + filename, "rb") as f:
+            with open(add_dir + sme_filename, "rb") as f:
                 precomp_dict = pickle.load(f)
-                all_precomputed.append(precomp_dict["values"][i][0]) ## this should only look at the up quark
-        
+                all_precomputed_sme.append(precomp_dict["values"][i][0]) ## this should only look at the up quark
+            with open(add_dir + sm_filename, "rb") as f:
+                precomp_dict = pickle.load(f)
+                all_precomputed_sm.append(precomp_dict["values"][i][0]) ## this should only look at the up quark
+
         
         
         self.Q2_vals = all_q
         self.pm = pm
         self.pn = pn
         self.time = times
-        self.precomputed_values = all_precomputed
+        self.precomputed_values = all_precomputed_sme
         self.CR = right_tensor
         self.CL = left_tensor
-        # self.sm_sigma = 
+        self.sm_sigma = all_precomputed_sm
             
     @classmethod
     def compute(self, poi):
         
         ### poi[0] = left
         ## poi[1] = right
-        total_cross_section = self.sm_sigma*tf.ones(len(self.Q2_vals))
-        # modified_cross_section = np.array(len(self.Q2_vals))
+        total_cross_section = tf.ones(len(self.Q2_vals))
+        
         for i in range(len(self.Q2_vals)):
             integrand_values = [d_sigma_precomp(self.Q2_vals[i][j], self.pm, self.pn, poi[0]*self.CL, poi[1]*self.CR, precomputed_values = self.precomputed_values[i][j]) for j in range(len(self.Q2_vals[i]))]
-            ### I'm not allowed to do simpson technically
             integral_liv = tf_simpson(integrand_values, self.Q2_vals[i])
-            total_cross_section[i] += integral_liv 
-        return total_cross_section/self.sm_sigma
-            
-
-        
-        
-        
+            total_cross_section[i] = (integral_liv + self.sm_sigma[i])/self.sm_sigma[i]
+        return total_cross_section
+                           
 
 if __name__ == "__main__":
     
