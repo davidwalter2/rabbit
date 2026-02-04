@@ -1,68 +1,122 @@
 import numpy as np
 import tensorflow as tf
 from sme_constants import *
-from sme_functions_precal_mod import *
+from rabbit.rabbit.poi_models.sme_functions import *
+
+import h5py
+from utilities.io_tools import input_tools
+import pdb
+from scripts.plotting.uncertainty_tools import *
 from rabbit.poi_models.poi_model import POIModel
 
+def tf_simpson(y, dx, axis=-1):
+    y = tf.convert_to_tensor(y)
+
+    # Move integration axis to the end
+    y = tf.experimental.numpy.moveaxis(y, axis, -1)
+
+    y0 = y[..., 0:-2:2]
+    y1 = y[..., 1:-1:2]
+    y2 = y[..., 2::2]
+
+    return dx / 3.0 * tf.reduce_sum(y0 + 4.0 * y1 + y2, axis=-1)
+
+
 class WilsonCoeffLeft(POIModel):
-    
     def __init__(
         self, 
         indata,
         npoi, 
         poi_names,
         poi_defaults,
-        e_f, 
-        flavor, 
-        g_fR,
-        g_fL,
         left_tensor, #CL
         right_tensor, #CR
+        **kwargs
     ):
+        
+
         self.npoi = npoi
         self.pois = poi_names
         self.xpoidefault = poi_defaults
         self.is_linear = False
         self.allowNegativePOI = False
-            
         
-
-        self.CL = left_tensor
-        self.CR = right_tensor
-       
+        
         
         times, pm, pn = get_hour_array()
         self.Q_vals = indata.axes
-        num_steps_Q2 = 100
-        self.Q_min = indata.axes()["pt_probe"][0]
-        self.Q_max = indata.axes()["pt_probe"][1]
+        self.Q_min = indata.axes()["mll"][0]
+        self.Q_max = indata.axes()["mll"][1]
         all_q = []
-        for i in range(len(indata.axes()["pt_probe"]) - 2):
-            all_q.append(list(np.linspace(indata.axes()["pt_probe"][i], indata.axes()["pt_probe"][i+1], num_steps_Q2)))
-            
-
+        edges = indata.axes["mll"]
         
+        sme_filename = f"SME_{edges[0][0]}_to_{edges[-1][1]}_GeV_{len(edges)}_bins.pkl" 
+        sm_filename = f"SM_{edges[0][0]}_to_{edges[-1][1]}_GeV_{len(edges)}_bins.pkl" 
 
+        add_dir = "precomputed_sme/"
+        all_precomputed_sme = []
+        all_precomputed_sm = []
+
+        for i in range(len(edges)):
+            all_q.append(list(np.linspace(edges[i][0]**2, edges[i][1]**2, 101)))
+            with open(add_dir + sme_filename, "rb") as f:
+                precomp_dict = pickle.load(f)
+                all_precomputed_sme.append(precomp_dict["values"][i][0]) ## this should only look at the up quark
+            with open(add_dir + sm_filename, "rb") as f:
+                precomp_dict = pickle.load(f)
+                all_precomputed_sm.append(precomp_dict["values"][i][0]) ## this should only look at the up quark
+
+        self.Q2_vals = all_q
+        self.pm = pm
+        self.pn = pn
+        self.time = times
+        self.precomputed_values = all_precomputed_sme
+        self.CR = right_tensor * 0 ## setting this to 0 for now. 
+        self.CL = left_tensor
+        self.sm_sigma = all_precomputed_sm
+            
     @classmethod
     def compute(self, poi):
         
+        ### poi[0] = left
+        ## poi[1] = right
+        total_cross_section = tf.ones(len(self.Q2_vals))
         
-        integral1 = integrate_sigma_hat_prime_sme(tau, self.CL*poi, contrelep1, contrelep2, flavor, Q2, precompute = True, fs = self.fs_vals, fs_prime= self.f_s_prime_vals, num_steps_pdf = self.num_steps_pdf)
+        for i in range(len(self.Q2_vals)):
+            integrand_values = [d_sigma_precomp(self.Q2_vals[i][j], self.pm, self.pn, poi[0]*self.CL, self.CR, precomputed_values = self.precomputed_values[i][j]) for j in range(len(self.Q2_vals[i]))]
+            integral_liv = tf_simpson(integrand_values, self.Q2_vals[i])
+            total_cross_section[i] = (integral_liv + self.sm_sigma[i])/self.sm_sigma[i]
         
-        ### I will make a right handed version of this plot 
-        integral2 = integrate_sigma_hat_prime_sme(tau, self.CR*0, contrelep1, contrelep2, flavor, Q2, precompute = True, fs = fs[i, :], fs_prime= self.f_s_prime_vals, num_steps_pdf = self.num_steps_pdf)
-        
-        d_sigmaL =  self.sum_terms_L * integral1
-        d_sigmaR = self.sum_terms_R * integral2
+        return total_cross_section
+                           
 
-
-        return factor * 0.389379 * 1e9*(d_sigmaL + d_sigmaR)  # This is d\sigma / dQ^2
-        
+if __name__ == "__main__":
     
-    ### how do i access the mass
-    
-'''
-so when I call this it will be something like --sme dtdt, dtst blah blah blah
+    file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
+    file_in_name = file_in + "mz_dilepton_liv_scetlib_dyturboCorr.hdf5"  # _maxFiles_20
+    h5file = h5py.File(file_in_name, "r")
+    results = input_tools.load_results_h5py(h5file)
+    MC_Zmumu = results["ZmumuPostVFP"]["output"]
+    data_output = results["dataPostVFP"]["output"]
+    lumi_output = results["dataPostVFP"]["lumi_outout"]
 
-do i want to put all fo them in? 
-'''
+    iso = MC_Zmumu["pos_iso"].get()
+    trig = MC_Zmumu["pos_trig"].get()
+    id_hist = MC_Zmumu["pos_ID"].get()
+    global_hist = MC_Zmumu["pos_global"].get()
+
+
+    weightsum = results["ZmumuPostVFP"]["weight_sum"]
+    cross_sec = results["ZmumuPostVFP"]["dataset"]["xsec"]
+
+    lumi_scaling = lumi_output["lumi_nom"].get()
+    time_proj_low_all = data_output["time_proj"].get()
+
+    time_proj_low = time_proj_low_all[{"mll": 9, "pt_tag": 3, "eta_tag": 3}]
+
+    iso_corr = all_mc_corrections(
+        iso.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
+    )
+    pdb.set_trace()
+
+    g = WilsonCoeffLeft(iso_corr, 2, "cxxuL", "cxxuR", 1e-5, 1e-5, CL1, CR)

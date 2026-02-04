@@ -7,6 +7,7 @@ from sme_constants import *
 from scipy.integrate import simpson
 pdf = lhapdf.mkPDF("NNPDF31_nnlo_as_0118", 0)
 from math import pi
+import tensorflow as tf
 
 from datetime import datetime, timedelta
 import pdb
@@ -14,9 +15,22 @@ import time
 import pickle
 import os
 
+def files_exist(files):
+    directory = '.'  # Current directory
+    dir_files = os.listdir(directory +f"/{add_dir}")
+    return_files = 0
+
+    for file in files:
+        if file in dir_files:
+        # if os.path.isfile(os.path.join(directory, file)):
+            return_files += 1
+    if return_files != len(files):
+        return 0
+    else:
+        return files
 
 
-    
+
 ### i may want to do this as an array of times
 def get_hour_array():
     ### expects input of the form: specific_time = datetime(2017, 1, 1, 0, 0)
@@ -102,10 +116,7 @@ def get_hour_array():
         current_time += step_seconds
     hour_array = [(t - start_time) / 3600 for t in times]
     return hour_array, contrelep1, contrelep2   # Convert seconds to hours 
-        
-##################################################################################
-
-
+##############################################################################        
       
 def num_derivative(func, x, h=1e-8, *args):
     return (func(x + h, *args) - func(x - h, *args)) / (2 * h)
@@ -144,7 +155,6 @@ def f_prime_s(x, tau, flavor, Q2):
     return (1/x * pdf_flavor_x * f_fbar_tau_x_prime +
             1/x * f_f_tau_x_prime * pdf_anti_flavor_x)
     
-    
 ### THE THREE TERMS IN THE INTEGRAL
 def term_1(Q2, e_f):
     return e_f**2 / (2*Q2**2)
@@ -153,15 +163,14 @@ def term_2(Q2, e_f, g):
     return abs((((1 - (m_Z**2 / Q2)) / ((Q2 - m_Z**2)**2 + m_Z**2 * Gamma_Z**2)) *
             (1 - 4 * sin2th_w) / (4 * sin2th_w * (1- sin2th_w ))* e_f * g))
             
-def term_3(Q2, e_f, g):
+def term_3(Q2, g):
     return (1 / ((Q2 - m_Z**2)**2 + m_Z**2 * Gamma_Z**2) * 
             (1 + (1 - 4 * sin2th_w)**2) / (32 * sin2th_w**2 * (1-sin2th_w)**2)) * g**2
 
 def summation_terms(Q2, e_f, g):
-    return  (term_1(Q2, e_f) + term_2(Q2, e_f, g) + term_3(Q2, e_f, g))
+    return  (term_1(Q2, e_f) + term_2(Q2, e_f, g) + term_3(Q2, g))
 
-##########################################################
-# STANDARD MODEL CALCULATION #
+##########################################################################
 
 def integrate_sigma_hat_prime_sm(tau, flavor, Q2):
     def integrand1(x):
@@ -171,205 +180,170 @@ def integrate_sigma_hat_prime_sm(tau, flavor, Q2):
     result1, _ = quad(integrand1, tau, 1)
     return result1
 
-def d_sigma_sm(Q2, quark_couplings):
+def d_sigma_sm(Q2, quark_couplings, precomputed = False):
     tau = Q2 / s 
     d_sigma = 0
+    all_dsigma = np.ones(len(quark_couplings))
+    i = 0
     for flavor, e_f, g_fR, g_fL in quark_couplings:
         integral = integrate_sigma_hat_prime_sm(tau, flavor, Q2)
         termL = summation_terms(Q2, e_f, g_fL)
         termR = summation_terms(Q2, e_f, g_fR)
         d_sigma +=  (termL+ termR )* integral
-    
-    d_sigmasm =  factor * 0.389379 * 1e9* d_sigma    # Conversion from GeV^-2 to Pb
-    return d_sigmasm
+        all_dsigma[i] = (termL+ termR )* integral
+        i += 1
 
-def sigma_sm(Qmin, Qmax, quark_couplings):
+    d_sigmasm =  factor * 0.389379 * 1e9* d_sigma    # Conversion from GeV^-2 to Pb
+    if not precomputed:
+        return d_sigmasm
+    else:
+        return all_dsigma, d_sigmasm
+
+def sigma_sm(Qmin, Qmax, quark_couplings, precomputed = False):
     def inet(Q2):
         return d_sigma_sm(Q2, quark_couplings)
+    def inet_up(Q2):
+        flavor_separated_dsigma, d_sigmasm = d_sigma_sm(Q2, quark_couplings, precomputed)
+        return flavor_separated_dsigma[0]
+    def inet_down(Q2):
+        flavor_separated_dsigma, d_sigmasm = d_sigma_sm(Q2, quark_couplings, precomputed)
+        return flavor_separated_dsigma[1]
+    def inet_strange(Q2):
+        flavor_separated_dsigma, d_sigmasm = d_sigma_sm(Q2, quark_couplings, precomputed)
+        return flavor_separated_dsigma[1]
+    
+    # if precomputed:
     int, _ = quad(inet, Qmin**2, Qmax**2)
+    # if not precomputed:
     return int
 
-def get_sm_sigma(Q_vals): ### pass in a list of max bins
-    
-    Q_min = [Q_vals[i] for i in range(len(Q_vals) -1)]
-    Q_max = [Q_vals[i] for i in range(1, len(Q_vals))]
-    # create the keys those bins would correspond to 
-    sample_keys = [f"{Q_min[i]}_{Q_max[i]}" for i in range(len(Q_min))]
-    try: # if there is this file pickled, load it
-        with open("precomputed_sm_sigma.pkl", "rb") as f:
-            precomputed_sm_sigma = pickle.load(f)
-            print("LOADED PRECOMPUTED SIGMA_SM")
-    except: # if the file doesn't exist, create a blank dictionary (only needed the very first time)
-        precomputed_sm_sigma = {}
-    precomputed_sm_sigma_keys = precomputed_sm_sigma.keys()
-    # compare to see if all the necessary keys were already computed
-    precomputed = [sample_keys[i] in precomputed_sm_sigma_keys for i in range(len(sample_keys))]
-    
-    if False in precomputed: 
-        for i in range(len(precomputed)):
-            if i == False:
-                sigma_val = sigma_sm(Q_min[i], Q_max[i], quark_couplings)
-                for i in range(len(Q_min)):
-                    precomputed_sm_sigma[f"{Q_min[i]}_{Q_max[i]}"] = sigma_val
-            with open("precomputed_sm_sigma.pkl", "wb") as f:
-                pickle.dump(precomputed_sm_sigma, f)
-    return [precomputed_sm_sigma[this_key] for this_key in sample_keys]
+##########################################################################
 
-
-
-###############################################################################3
-### STANDARD MODEL EXTENSION
-
-
-def sigma_hat_prime(x, tau, C, p1, p2, flavor, Q2):
-    # try:
-    tau_x = tau/x
-    
-    f_s_val = f_s(x, tau, flavor, Q2)
-    f_prime_s_val = f_prime_s(x, tau, flavor, Q2)
-        
-        ### need to save this
-    # Efficiently handle the contraction with non-zero elements of C
-    contraction_p1p1 = tn.einsum('mn,m,n->', C, p1, p1)
-    contraction_p1p2 = tn.einsum('mn,m,n->', C, p1, p2)
-    contraction_p2p1 = tn.einsum('mn,m,n->', C, p2, p1)
-    contraction_p2p2 = tn.einsum('mn,m,n->', C, p2, p2)
-    
-    term1 = f_s_val
-    term2 = 2* (1 + x / tau_x) * (contraction_p1p1 + contraction_p1p2 +  contraction_p2p1 + contraction_p2p2) * f_s_val
-    term3 = 2 * (x * contraction_p1p1 +  tau_x * contraction_p1p2 + tau_x * contraction_p2p1 + x * contraction_p2p2) * f_prime_s_val
-
-    return term1, term2 + term3
-
-def integrate_sigma_hat_prime_sme(tau, C, p1, p2, flavor, Q2, precompute = False, fs = [], fs_prime = [], num_steps_pdf = 0):
+def integrate_sigma_hat_prime_sme(tau, flavor, Q2):
     def integrand2(x):
         tau_x = tau / x
-        _, term2_plus_term3 = sigma_hat_prime(x, tau, C, p1, p2, flavor, Q2)
-        return term2_plus_term3 * tau_x
-    
-    def integrand2_precomputed(x, fs, fs_prime, contraction_p1p1, contraction_p1p2, contraction_p2p1, contraction_p2p2):
+        term2 = 2*f_s(x, tau, flavor, Q2) + 2* (x**2/tau) * f_s(x, tau, flavor, Q2)
+        return term2 * tau_x
+    def integrand3(x):
         tau_x = tau / x
-        term2 = 2* (1 + x / tau_x) * (contraction_p1p1 + contraction_p1p2 +  contraction_p2p1 + contraction_p2p2) * fs
-        term3 = 2 * (x * contraction_p1p1 +  tau_x * contraction_p1p2 + tau_x * contraction_p2p1 + x * contraction_p2p2) * fs_prime
-        return (term2 + term3) * tau_x
-    # pdb.set_trace()
+        term3 = 2* x * f_prime_s(x, tau, flavor, Q2)
+        return term3 * tau_x
+    def integrand4(x):
+        tau_x = tau / x
+        term4 = 2* tau_x * f_prime_s(x, tau, flavor, Q2)
+        return term4 * tau_x
     
-    eps = 1e-12
-    integration_bounds = np.geomspace(tau / (1 - eps), 1 - eps, num_steps_pdf)
-    
-    if precompute:
-        contraction_p1p1 = tn.einsum('mn,m,n->', C, p1, p1)
-        contraction_p1p2 = tn.einsum('mn,m,n->', C, p1, p2)
-        contraction_p2p1 = tn.einsum('mn,m,n->', C, p2, p1)
-        contraction_p2p2 = tn.einsum('mn,m,n->', C, p2, p2)
-        # pdb.set_trace() ### PROBLEM HERE IS THAT TAU ALREADY HAS A SHAPE
-        y = [integrand2_precomputed(integration_bounds[i], fs[i], fs_prime[i], contraction_p1p1, contraction_p1p2, contraction_p2p1, contraction_p2p2) for i in range(integration_bounds.shape[0])]
-        result2 = simpson(y, x = integration_bounds)
-    
-    else: 
-        y = [integrand2(x) for x in integration_bounds]
-        result2, _ = quad(integrand2, tau, 1)
+        
+    result2, _ = quad(integrand2, tau, 1)
+    result3, _ = quad(integrand3, tau, 1)
+    result4, _ = quad(integrand4, tau, 1)
 
-    return result2
+    pipi = (result2 + result3)
+    pipj = (result4 + result2) 
+    
+    return pipi, pipj
+    
 
-def d_sigma(Q2, CL, CR, p1, p2, quark_couplings, precompute = False, fs = [], fs_prime = [], num_steps_pdf = 0):
+
+def d_sigma_calc(Q2, p1, p2, quark_couplings):
     tau = Q2 / s
     d_sigmaL = 0
     d_sigmaR = 0
     i = 0
-    for flavor, e_f, g_fR, g_fL in quark_couplings:
-        if precompute:
-            integral1 = integrate_sigma_hat_prime_sme(tau, CL, p1, p2, flavor, Q2, precompute = precompute, fs = fs[i, :], fs_prime= fs_prime[i, :], num_steps_pdf = num_steps_pdf)
-            integral2 = integrate_sigma_hat_prime_sme(tau, CR, p1, p2, flavor, Q2, precompute = precompute, fs = fs[i, :], fs_prime= fs_prime[i, :], num_steps_pdf = num_steps_pdf)
-        else:
-            integral1 = integrate_sigma_hat_prime_sme(tau, CL, p1, p2, flavor, Q2)
-            integral2 = integrate_sigma_hat_prime_sme(tau, CR, p1, p2, flavor, Q2)
+    
+    computed_values = []
+    for flavor, e_f, g_fR, g_fL, CL, CR in quark_couplings:
+
+        pipi_L, pipj_L = integrate_sigma_hat_prime_sme(tau, flavor, Q2)
+        pipi_R, pipj_R = integrate_sigma_hat_prime_sme(tau, flavor, Q2)
         
         sum_terms_L = summation_terms(Q2, e_f, g_fL)
         sum_terms_R = summation_terms(Q2, e_f, g_fR)
+        ### currently this only saves the last one
+        computed_values.append([pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R])
+         
+        ### this can't be pulled out further because this iterates by flavor
+        contraction_p1p1_L = tn.einsum('mn,m,n->', CL, p1, p1)
+        contraction_p1p2_L = tn.einsum('mn,m,n->', CL, p1, p2)
+        contraction_p2p1_L = tn.einsum('mn,m,n->', CL, p2, p1)
+        contraction_p2p2_L = tn.einsum('mn,m,n->', CL, p2, p2)
+        
+        contraction_pipi_L = (contraction_p1p1_L + contraction_p2p2_L)
+        contraction_pipj_L = (contraction_p1p2_L + contraction_p2p1_L)
+        
+        
+        contraction_p1p1_R = tn.einsum('mn,m,n->', CR, p1, p1)
+        contraction_p1p2_R = tn.einsum('mn,m,n->', CR, p1, p2)
+        contraction_p2p1_R = tn.einsum('mn,m,n->', CR, p2, p1)
+        contraction_p2p2_R = tn.einsum('mn,m,n->', CR, p2, p2)
 
+        contraction_pipi_R = (contraction_p1p1_R + contraction_p2p2_R)
+        contraction_pipj_R = (contraction_p1p2_R + contraction_p2p1_R)
+
+        integral1 = pipi_L * contraction_pipi_L + pipj_L* contraction_pipj_L
+        integral2 = pipi_R * contraction_pipi_R + pipj_R* contraction_pipj_R
+        
         d_sigmaL +=  sum_terms_L * integral1
         d_sigmaR += sum_terms_R * integral2
-        
-        i += 1
+    
+        i += 1 
+    return factor * 0.389379 * 1e9*(d_sigmaL + d_sigmaR), computed_values  # This is d\sigma / dQ^2
 
+def d_sigma_precomp(Q2, p1, p2, CL, CR, precomputed_values = []):
+    d_sigmaL = 0
+    d_sigmaR = 0
+    i = 0 #<-- this actu
+    
+    for i in range(len(precomputed_values/6)):
+        pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = precomputed_values[i]
+    
+         
+        ### this can't be pulled out further because this iterates by flavor
+        contraction_p1p1_L = tf.einsum('mn,m,n->', CL, p1, p1)
+        contraction_p1p2_L = tf.einsum('mn,m,n->', CL, p1, p2)
+        contraction_p2p1_L = tf.einsum('mn,m,n->', CL, p2, p1)
+        contraction_p2p2_L = tf.einsum('mn,m,n->', CL, p2, p2)
+        
+        contraction_pipi_L = (contraction_p1p1_L + contraction_p2p2_L)
+        contraction_pipj_L = (contraction_p1p2_L + contraction_p2p1_L)
+        
+        
+        contraction_p1p1_R = tf.einsum('mn,m,n->', CR, p1, p1)
+        contraction_p1p2_R = tf.einsum('mn,m,n->', CR, p1, p2)
+        contraction_p2p1_R = tf.einsum('mn,m,n->', CR, p2, p1)
+        contraction_p2p2_R = tf.einsum('mn,m,n->', CR, p2, p2)
+
+        contraction_pipi_R = (contraction_p1p1_R + contraction_p2p2_R)
+        contraction_pipj_R = (contraction_p1p2_R + contraction_p2p1_R)
+
+        integral1 = pipi_L * contraction_pipi_L + pipj_L* contraction_pipj_L
+        integral2 = pipi_R * contraction_pipi_R + pipj_R* contraction_pipj_R
+        
+        d_sigmaL +=  sum_terms_L * integral1
+        d_sigmaR += sum_terms_R * integral2
+        i += 1
     return factor * 0.389379 * 1e9*(d_sigmaL + d_sigmaR)  # This is d\sigma / dQ^2
 
 
-def precompute_fs(Q_min, Q_max, num_steps_Q2, num_steps_PDF, return_vals = False):
+def sme(Q_min, Q_max, p1, p2, quark_couplings, num_steps_Q2 = 100, precomputed = False, precomputed_values = []):
 
-    Q2_values = np.linspace(Q_min**2, Q_max**2, num_steps_Q2)
-    file_name = f"{Q_min}_to_{Q_max}_GeV_{num_steps_Q2}_Q2_steps_{num_steps_PDF}_PDF_steps" # not labeling the quark coupling because i think we only intend on doing up, down, strange
-    f_s_all = np.zeros((len(quark_couplings), num_steps_Q2, num_steps_PDF))
-    f_prime_s_all = np.zeros((len(quark_couplings), num_steps_Q2, num_steps_PDF))   # quark, Q2, momentum fraction
-    print(len(quark_couplings))
-    k = 0 # to keep track of which quark coupling we are looking at. 
-    for flavor, _, _, _ in quark_couplings:
-        for i in range(Q2_values.shape[0]):
-            Q2 = Q2_values[i]
-            tau = Q2 / s
-            eps = 1e-12
-            x = np.geomspace(tau / (1 - eps), 1 - eps, num_steps_PDF)
-            for j in range(x.shape[0]):  
-                f_s_all[k, i, j] = f_s(x[j], tau, flavor, Q2)
-                f_prime_s_all[k, i, j] = f_prime_s(x[j], tau, flavor, Q2)
-        k += 1
-
-    if return_vals:
-        return f_s_all, f_prime_s_all
-    else:
-        with open(f"fs_{file_name}.pkl", "wb") as f:
-            pickle.dump(f_s_all, f)
-        with open(f"f_prime_s_{file_name}.pkl", "wb") as f:
-            pickle.dump(f_prime_s_all, f)
-
-        return
-
-def files_exist(files):
-    directory = '.'  # Current directory
-    dir_files = os.listdir(directory)
-    return_files = 0
-    for file in files:
-        if file in dir_files:
-        # if os.path.isfile(os.path.join(directory, file)):
-            return_files += 1
-    if return_files != len(files):
-        return 0
-    else:
-        return files
-
-def sme(Q_min, Q_max, CL, CR, p1, p2, quark_couplings, num_steps_Q2 =100, precompute = False, num_steps_PDF = 200):
-    num_steps_Q2 = int(num_steps_Q2)
-    num_steps_PDF = int(num_steps_PDF)
-    # Ensure that num_steps is odd for Simpson's rule to work properly
     if num_steps_Q2 % 2 == 0:
         num_steps_Q2 += 1
-    if num_steps_PDF % 2 == 0:
-        num_steps_PDF += 1
     Q2_values = np.linspace(Q_min**2, Q_max**2, num_steps_Q2)
+    if precomputed:
+        integrand_values = np.array([d_sigma_precomp(Q2_values[i], p1, p2, quark_couplings, precomputed = True, precomputed_values = precomputed_values[i]) for i in range(len(Q2_values))])
     
-    # Loop over Q2 values and calculate d_sigma for each
-    if precompute:
-        file_name = f"{Q_min}_to_{Q_max}_GeV_{num_steps_Q2}_Q2_steps_{num_steps_PDF}_PDF_steps"
-        files = files_exist([f"fs_{file_name}.pkl", f"f_prime_s_{file_name}.pkl"])
-        if type(files) == int:
-            print("FS OR FS' HAS NOT BEEN PREVIOUSLY COMPUTED. COMPUTING NOW")
-            precompute_fs(Q_min, Q_max, num_steps_Q2 = num_steps_Q2, num_steps_PDF = num_steps_PDF)
-            
-        with open(f"fs_{file_name}.pkl", "rb") as f:
-            fs = pickle.load(f)
-        with open(f"f_prime_s_{file_name}.pkl", "rb") as f:
-            fs_prime = pickle.load(f)
-        integrand_values = np.array([d_sigma(Q2_values[i], CL, CR, p1, p2, quark_couplings, precompute = precompute, fs = fs[:, i, :], fs_prime = fs_prime[:, i, :], num_steps_pdf=num_steps_PDF) for i in range(Q2_values.shape[0])])
-    else:
-        integrand_values = np.array([d_sigma(Q2, CL, CR, p1, p2, quark_couplings) for Q2 in Q2_values])
-    
+    if not precomputed:
+        integrand_values, combined_array = zip(*[d_sigma_calc(Q2, p1, p2, quark_couplings) for Q2 in Q2_values])
+        ## store left and right in the same file
+
     # Use Simpson's rule to integrate over the Q2_values array
     integral_liv = simpson(integrand_values, Q2_values)
     print(integral_liv)
-    return integral_liv
+    if precomputed:
+        return integral_liv
+    else:
+        return integral_liv, combined_array
 
-times, pm, pn = get_hour_array() ## i only want to compte this once when i do the 
-t = time.time()
-sme(70, 80, CL4, CR, pm[0], pn[0], quark_couplings, precompute = True)
-print(t - time.time())
+
+
