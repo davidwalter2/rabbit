@@ -424,18 +424,31 @@ def parseArgs():
     return args
 
 
-def sum_in_quadrature(arr, start_ind, end_ind, axis = "pt"):
+def sum_in_quadrature(arr, start_ind, end_ind, axis = "pt", weights = []):
     i = start_ind
     combined = 0
-    while i >= start_ind and i <= end_ind:
+
+    if len(weights) == 0:
+        weights = 1/(end_ind - start_ind + 1)* np.ones([end_ind - start_ind + 1])
+    while i >= start_ind and i < end_ind:
         if axis == "pt":
-            combined += arr[i, :]**2
+            combined += (arr[i, :]*weights[i-start_ind])**2
         else: 
-            combined += arr[i]**2
+            combined += (arr[i]*weights[i-start_ind])**2
         i += 1
-    return np.sqrt(combined)*1/(end_ind - start_ind + 1)
+    return np.sqrt(combined)
 
+def reweight_wmass_eff():
+    file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
+    file_in_name = file_in + "mz_dilepton_scetlib_dyturbo_CT18Z_N3p0LL_N2LO_Corr.hdf5"  # _maxFiles_20
+    h5file = h5py.File(file_in_name, "r")
+    results = input_tools.load_results_h5py(h5file)
+    MC_Zmumu = results["Zmumu_2016PostVFP"]["output"]
+    # nominal_ptll_yll
+    # nominal_etaPlus
+    eta_dist = MC_Zmumu["nominal_etaPlus"].get().values()
 
+    return eta_dist
 
     
 def get_true_efficiencies():
@@ -605,9 +618,8 @@ def make_plot(
                 err = fdata.Get(f"Graph_{comp_type}_eta_pt_{int(pt_ax[j])}p0To{int(pt_ax[j+1])}p0")
                 for i in range(0, nx):
                     root_errors[i-1, j-1] = err.GetEY()[i]
-            
             fdata.Close()
-
+            wmass_eta_dist = reweight_wmass_eff()
             fig, ax1 = plot_tools.figure(
                     root_result, ### just to make the right dimensions
                     xlabel,
@@ -655,17 +667,29 @@ def make_plot(
                         ## this is to show the average wmass
                         avg_root = np.zeros(edges_centers.shape)
                         avg_err = np.zeros(edges_centers.shape)
+
+                        weighted_avg_root = np.zeros(edges_centers.shape)
+                        weighted_avg_err = np.zeros(edges_centers.shape)
+                        
+                        
                         for k in range(1, len(edges)):
+
                             ind_start = np.where(eta_ax == edges[k-1])[0][0]
                             ind_end = np.where(eta_ax == edges[k])[0][0] - 1
-                            avg_root[k-1] = np.average(np.concatenate((root_result[ind_start:ind_end, j], np.array([root_result[ind_start:ind_end, j][-1]])))) 
+                            weightings = wmass_eta_dist[ind_start:ind_end]/np.sum(wmass_eta_dist[ind_start:ind_end])
+
+                            avg_root[k-1] = np.average(root_result[ind_start:ind_end, j]) 
                             avg_err[k-1] = sum_in_quadrature(root_errors[:, j], ind_start, ind_end, "eta")
+                            weighted_avg_root[k-1] = np.average(root_result[ind_start:ind_end, j],weights = weightings)
+                            weighted_avg_err[k-1] = sum_in_quadrature(root_errors[:, j], ind_start, ind_end, "eta", weights = weightings)
+
                         
                         
                         plt.clf()
                         #w mass
                         plt.step(eta_ax, np.concatenate((root_result[:, j], np.array([root_result[:, j][-1]]))), color = "gray", label = f"WMass, pt = {pt_ax[j]}", where = "post")
-                        plt.step(edges, np.concatenate((avg_root, np.array([avg_root[-1]]))), color = "C1", label = f"WMass average", where = "post")
+                        plt.step(edges, np.concatenate((avg_root, np.array([avg_root[-1]]))), color = "k", label = f"WMass unweighted average", where = "post")
+                        plt.step(edges, np.concatenate((weighted_avg_root, np.array([weighted_avg_root[-1]]))), color = "C1", label = f"WMass weighted average", where = "post")
                         # this analysis
                         plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis fitted efficiency, pt = {other_edges[ind]}", where = "post")
                         
@@ -676,7 +700,9 @@ def make_plot(
                         plt.legend()
                         #w mass
                         plt.errorbar(eta_ax_centers, root_result[:, j], yerr = root_errors[:, j], color = "gray", fmt = ".")
-                        plt.errorbar(edges_centers, avg_root, yerr = avg_err, color = 'C1', fmt = ".")           
+                        plt.errorbar(edges_centers, avg_root, yerr = avg_err, color = 'k', fmt = ".")           
+                        plt.errorbar(edges_centers, weighted_avg_root, yerr = weighted_avg_err, color = 'C1', fmt = ".")           
+
                         # this analysis            
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
                         plt.xlim([eta_ax[0], eta_ax[-1]])
@@ -692,16 +718,21 @@ def make_plot(
                     if j < 6:
                         ind_start = np.where(eta_ax == other_edges[j])[0][0]
                         ind_end = np.where(eta_ax == other_edges[j+1])[0][0]-1
-                        # pdb.set_trace()
+                        weightings = wmass_eta_dist[ind_start:ind_end]/np.sum(wmass_eta_dist[ind_start:ind_end])
 
-                        avg_root = np.average(np.concatenate((root_result[ind_start:ind_end, :], root_result[ind_start:ind_end, :][:, -1][:, None]), axis = 1), axis = 0)
+                        avg_root = np.average(np.concatenate((root_result[ind_start:ind_end, :], root_result[ind_start:ind_end, :][:, -1][:, None]), axis = 1), axis = 0, weights = weightings)
                         
-                        avg_err = sum_in_quadrature(root_errors, ind_start, ind_end-1)
+                        avg_err = sum_in_quadrature(root_errors, ind_start, ind_end-1, weights = weightings) ## this looks 
+                        unweighted_avg_err = sum_in_quadrature(root_errors, ind_start, ind_end-1) ## this looks 
+
                         plt.clf()
                             
-                        plt.step(pt_ax, avg_root, color = "k", label = f"WMass average", where = "post")
+                        plt.step(pt_ax, avg_root, color = "k", label = f"WMass weighted average", where = "post")
                         
-                        
+                        unweighted_avg_root = np.average(np.concatenate((root_result[ind_start:ind_end, :], root_result[ind_start:ind_end, :][:, -1][:, None]), axis = 1), axis = 0)
+                        plt.step(pt_ax, unweighted_avg_root, color = "C1", label = f"WMass unweighted average", where = "post")
+
+
                         plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis fitted efficiency, eta = {other_edges[j]} to {other_edges[j+1]}", where = "post")
                         
                         if comp_type == "effMC": 
@@ -710,14 +741,13 @@ def make_plot(
                         
                         plt.legend()
                         
-                        for k in range(ind_start, ind_end+1):
-                            # pdb.set_trace()
-                            this_result = np.concatenate((root_result[k,:], np.array([root_result[k, -1]])))
-                            plt.step(pt_ax, this_result, color = "gray", where = "post", alpha = 0.5)
+                        # for k in range(ind_start, ind_end+1):
+                        #     this_result = np.concatenate((root_result[k,:], np.array([root_result[k, -1]])))
+                        #     plt.step(pt_ax, this_result, color = "gray", where = "post", alpha = 0.5)
                             
                             
                         plt.errorbar(pt_ax_centers, avg_root[:-1], yerr = avg_err, color = "k", fmt = ".")                       
-                        
+                        plt.errorbar(pt_ax_centers, unweighted_avg_root[:-1], yerr = unweighted_avg_err, color = "C1", fmt = ".")                       
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
                         plt.xlim([edges[0], edges[-1]])
                         plt.xlabel("pt")
