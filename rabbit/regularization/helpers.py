@@ -103,19 +103,6 @@ def compute_curvature(fitter, tau):
     return _compute_curvature(fitter, tau)
 
 
-@tf.function
-def neg_curvature_val_grad_hess(fitter, tau):
-    with tf.GradientTape() as t2:
-        t2.watch(tau)
-        with tf.GradientTape() as t1:
-            t1.watch(tau)
-            val = -1 * _compute_curvature(fitter, tau)
-        grad = t1.gradient(val, tau)
-    hess = t2.gradient(grad, tau)
-
-    return val, grad, hess
-
-
 def l_curve_scan_tau(fitter, min=-5, max=5.1, step=0.1):
     tau = SVD.tau
     tau0 = tau.numpy()
@@ -139,30 +126,116 @@ def l_curve_scan_tau(fitter, min=-5, max=5.1, step=0.1):
     return tau_steps, np.array(curvatures)
 
 
+@tf.function
+def neg_curvature_val_grad_hess(fitter, tau):
+    with tf.GradientTape() as t2:
+        t2.watch(tau)
+        with tf.GradientTape() as t1:
+            t1.watch(tau)
+            val = -1 * _compute_curvature(fitter, tau)
+        grad = t1.gradient(val, tau)
+    hess = t2.gradient(grad, tau)
+
+    return val, grad, hess
+
+
+@tf.function
+def neg_curvature_val_grad(fitter, tau):
+    with tf.GradientTape() as t1:
+        t1.watch(tau)
+        val = -1 * _compute_curvature(fitter, tau)
+    grad = t1.gradient(val, tau)
+
+    return val, grad
+
+
+@tf.function
+def neg_curvature_val_grad_hessp(fitter, tau, p):
+    p = tf.stop_gradient(p)
+    with tf.GradientTape() as t2:
+        t2.watch(tau)
+        with tf.GradientTape() as t1:
+            t1.watch(tau)
+            val = -1 * _compute_curvature(fitter, tau)
+        grad = t1.gradient(val, tau)
+    hessp = t2.gradient(grad, tau, output_gradients=p)
+    return val, grad, hessp
+
+
 def l_curve_optimize_tau(fitter):
+    # FIXME: this does not work yet
     # find the tau where the curvature is maximum, minimize curvature w.r.t. tau
+    logger.info(f"Run l curve optimization")
 
     tau = SVD.tau
 
+    # def scipy_loss(xval):
+    #     logger.info(f"=======")
+    #     logger.info(f"x = {xval}")
+    #     tau.assign(xval[0])
+    #     cb = fitter.minimize()
+    #     val, grad = neg_curvature_val_grad(fitter, tau)
+    #     logger.info(f"Curvature (value) = {-val}")
+    #     logger.info(f"Curvature (gradient) = {grad}")
+    #     return val.__array__(), grad.__array__()
+
+    # def scipy_hessp(xval, pval):
+    #     tau.assign(xval[0])
+    #     p = tf.convert_to_tensor(pval)
+    #     val, grad, hessp = neg_curvature_val_grad_hessp(fitter, tau, p)
+    #     return hessp.__array__()
+
+    # def scipy_hess(xval):
+    #     tau.assign(xval[0])
+    #     val, grad, hess = neg_curvature_val_grad_hess(fitter, tau)
+    #     return hess.__array__()
+    #     # logger.debug(f"xval = {xval}")
+    #     # logger.debug(f"p = {p}")
+    #     # logger.debug(f"val = {val}; grad = {grad}; hessp = {hessp}")
+
+    # res = scipy.optimize.minimize(
+    #     scipy_loss,
+    #     [0],
+    #     method="trust-exact",
+    #     jac=True,
+    #     # hessp=scipy_hessp,
+    #     hess=scipy_hess,
+    #     options=dict(
+    #         disp = True
+    #     ),
+    # )
+
+    # tau.assign(res["x"][0])
+    # val = res["fun"]
+
+    # logger.info(f"Optimization terminated")
+
+    # logger.info(f"  maximum curvature: {-val}")
+    # logger.info(f"  tau: {tau.numpy()}")
+
+    # return tau.numpy(), val.numpy()
+
     edm = 1
     i = 0
-    while i < 50 and edm > 1e-16:
-        cb = fitter.minimize()
+    while i < 50 and (edm < 0 or edm > 1e-16):
         logger.info(f"Iteration {i}")
 
+        cb = fitter.minimize()
         val, grad, hess = neg_curvature_val_grad_hess(fitter, tau)
 
         logger.info(f"Curvature (value) = {-val}")
         logger.info(f"Curvature (gradient) = {grad}")
         logger.info(f"Curvature (hessian) = {hess}")
 
-        # eps = 1e-8
-        # safe_hess = tf.where(hess != 0, hess, tf.ones_like(hess))
-        # step = grad / (tf.abs(safe_hess) + eps)
-        step = grad / hess
+        eps = 1e-8
+        hess_sign = tf.where(hess != 0, tf.sign(hess), tf.ones_like(hess))
+        safe_hess = hess_sign * tf.maximum(tf.abs(hess), eps)
+        step = grad / safe_hess
+
         logger.info(f"Curvature (step) = {-step}")
         tau.assign_sub(step)
-        edm = tf.reduce_max(0.5 * tf.square(grad) * tf.abs(hess))
+
+        edm = 0.5 * grad * step
         i = i + 1
 
         logger.debug(f"Curvature edm = {edm}")
