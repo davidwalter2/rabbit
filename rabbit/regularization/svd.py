@@ -8,17 +8,23 @@ class SVD(Regularizer):
     Singular Value Decomposition (SVD) see: https://arxiv.org/abs/hep-ph/9509307
     """
 
-    def __init__(self, mapping, dtype):
-        self.strength = 1.0
+    # one common regularization strength parameter
+    tau = tf.Variable(1.0, trainable=True, name="tau", dtype=tf.float64)
 
+    def __init__(self, mapping, dtype):
         if len(mapping.channel_info) > 1:
             raise NotImplementedError(
                 "Regularization currently only works for 1 channel at a time; use multiple regularizers if you want to penalize multiple channels."
             )
 
         self.mapping = mapping
+
+        # there is an embiguity about what to do with the flow bins.
+        #   they are not part of the fit, thus, the flow bins are not taken except for masked channels
         self.input_shape = [
-            len(a) for v in mapping.channel_info.values() for a in v["axes"]
+            a.extent if v["flow"] else a.size
+            for v in mapping.channel_info.values()
+            for a in v["axes"]
         ]
 
         self.ndims = len(self.input_shape)
@@ -54,7 +60,7 @@ class SVD(Regularizer):
         nexp0 = self.mapping.compute_flat(initial_params, initial_observables)
         self.nexp0 = tf.reshape(nexp0, self.input_shape)
 
-    def compute_nll_penalty(self, params, observables):
+    def compute_nll_penalty_unweighted(self, params, observables):
         mask = self.nexp0 != 0
         nexp0_safe = tf.where(mask, self.nexp0, tf.cast(1.0, self.nexp0.dtype))
 
@@ -84,6 +90,12 @@ class SVD(Regularizer):
                 padded_input, self.kernel, strides=[1, 1, 1, 1, 1], padding="VALID"
             )
 
-        penalty = self.strength * tf.reduce_mean(tf.square(curvature_map))
+        penalty = tf.reduce_sum(tf.square(curvature_map))
 
         return penalty
+
+    def compute_nll_penalty(self, params, observables):
+
+        penalty = self.compute_nll_penalty_unweighted(params, observables)
+
+        return penalty * tf.exp(2 * self.tau)

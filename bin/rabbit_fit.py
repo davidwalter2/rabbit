@@ -151,6 +151,12 @@ def make_parser():
         help="Specify result from external postfit file",
     )
     parser.add_argument(
+        "--noFit",
+        default=False,
+        action="store_true",
+        help="Do not not perform the minimization.",
+    )
+    parser.add_argument(
         "--noPostfitProfileBB",
         default=False,
         action="store_true",
@@ -282,7 +288,13 @@ def fit(args, fitter, ws, dofit=True):
     edmval = None
 
     if args.externalPostfit is not None:
-        fitter.load_fitresult(args.externalPostfit, args.externalPostfitResult)
+        fitter.load_fitresult(
+            args.externalPostfit,
+            args.externalPostfitResult,
+            profile=not args.noPostfitProfileBB,
+        )
+
+    rh.optimize_tau(fitter)
 
     if dofit:
         cb = fitter.minimize()
@@ -568,7 +580,7 @@ def main():
 
                 if not args.prefitOnly:
                     ifitter.set_blinding_offsets(blind=blinded_fits[i])
-                    fit(args, ifitter, ws, dofit=ifit >= 0)
+                    fit(args, ifitter, ws, dofit=ifit >= 0 and not args.noFit)
                     fit_time.append(time.time())
 
                     if args.saveHists:

@@ -304,7 +304,7 @@ class Fitter:
             and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
         )
 
-    def load_fitresult(self, fitresult_file, fitresult_key):
+    def load_fitresult(self, fitresult_file, fitresult_key, profile=True):
         # load results from external fit and set postfit value and covariance elements for common parameters
         cov_ext = None
         with h5py.File(fitresult_file, "r") as fext:
@@ -339,6 +339,9 @@ class Fitter:
             covval = self.cov.numpy()
             covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
             self.cov.assign(tf.constant(covval))
+
+        if profile:
+            self._profile_beta()
 
     def update_frozen_params(self):
         new_mask_np = np.isin(self.parms, self.frozen_params)
@@ -1992,15 +1995,7 @@ class Fitter:
 
         return None
 
-    def _compute_nll_components(self, profile=True, full_nll=False):
-        nexpfullcentral, _, beta = self._compute_yields_with_beta(
-            profile=profile,
-            compute_norm=False,
-            full=len(self.regularizers),
-        )
-
-        nexp = nexpfullcentral[: self.indata.nbins]
-
+    def _compute_ln(self, nexp, full_nll=False):
         if self.chisqFit:
             ln = 0.5 * tf.reduce_sum((nexp - self.nobs) ** 2 / self.varnobs, axis=-1)
         elif self.covarianceFit:
@@ -2028,6 +2023,18 @@ class Fitter:
                 ln = tf.reduce_sum(
                     -self.nobs * (lognexp - self.lognobs) + nexp - self.nobs, axis=-1
                 )
+        return ln
+
+    def _compute_nll_components(self, profile=True, full_nll=False):
+        nexpfullcentral, _, beta = self._compute_yields_with_beta(
+            profile=profile,
+            compute_norm=False,
+            full=len(self.regularizers),
+        )
+
+        nexp = nexpfullcentral[: self.indata.nbins]
+
+        ln = self._compute_ln(nexp, full_nll)
 
         lc = self._compute_lc(full_nll)
 
