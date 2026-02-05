@@ -1,3 +1,4 @@
+import numpy as np
 import tensorflow as tf
 from wums import logging
 
@@ -19,7 +20,7 @@ def load_regularizer(class_name, *args, **kwargs):
     return regularization(*args, **kwargs)
 
 
-def compute_curvature(fitter, tau):
+def _compute_curvature(fitter, tau):
     """
     Following Eq.(4.3) from https://iopscience.iop.org/article/10.1088/1748-0221/7/10/T10003/pdf
     """
@@ -35,7 +36,6 @@ def compute_curvature(fitter, tau):
         with tf.GradientTape(persistent=True) as t2:
             t2.watch(tau)
             with tf.GradientTape() as t1:
-                t1.watch(tau)
                 nll = fitter._compute_nll()
 
             pdLpdx = t1.gradient(nll, fitter.x)
@@ -45,11 +45,10 @@ def compute_curvature(fitter, tau):
 
         chol = tf.linalg.cholesky(pd2Lpdx2)
         dxdtau = -tf.linalg.cholesky_solve(chol, pd2Lpdxpdtau[:, None])
-        dxdtau = tf.reshape(dxdtau, -1)
+        dxdtau = tf.reshape(dxdtau, [-1])
 
         # 2) compute pdLx/pdx, pdLy/pdx and pd^2Lx/pdx^2, pd^2Ly/pdx^2
         with tf.GradientTape(persistent=True) as t_inner:
-            t_inner.watch(tau)
             nexpfullcentral, _, beta = fitter._compute_yields_with_beta(
                 profile=False,
                 compute_norm=False,
@@ -99,38 +98,79 @@ def compute_curvature(fitter, tau):
     return curvature
 
 
-def optimize_tau(fitter):
+@tf.function
+def compute_curvature(fitter, tau):
+    return _compute_curvature(fitter, tau)
+
+
+@tf.function
+def neg_curvature_val_grad_hess(fitter, tau):
+    with tf.GradientTape() as t2:
+        t2.watch(tau)
+        with tf.GradientTape() as t1:
+            t1.watch(tau)
+            val = -1 * _compute_curvature(fitter, tau)
+        grad = t1.gradient(val, tau)
+    hess = t2.gradient(grad, tau)
+
+    return val, grad, hess
+
+
+def l_curve_scan_tau(fitter, min=-5, max=5.1, step=0.1):
+    tau = SVD.tau
+    tau0 = tau.numpy()
+
+    curvatures = []
+    tau_steps = np.arange(min, max, step)
+
+    for i, v in enumerate(tau_steps):
+        logger.info(f"Iteration {i} with tau = {v}")
+
+        tau.assign(v)
+        cb = fitter.minimize()
+        val = compute_curvature(fitter, tau).numpy()
+        curvatures.append(val)
+
+        logger.info(f"Curvature (value) = {val}")
+
+    # set tau back to the original value
+    tau.assign(tau0)
+
+    return tau_steps, np.array(curvatures)
+
+
+def l_curve_optimize_tau(fitter):
     # find the tau where the curvature is maximum, minimize curvature w.r.t. tau
 
     tau = SVD.tau
 
-    fitter.minimize()
-    curvature = -compute_curvature(fitter, tau)
-
     edm = 1
     i = 0
-    while i < 50 and edm > 1e-10:
-        fitter.minimize()
+    while i < 50 and edm > 1e-16:
+        cb = fitter.minimize()
         logger.info(f"Iteration {i}")
 
-        with tf.GradientTape() as t2:
-            t2.watch(tau)
-            with tf.GradientTape() as t1:
-                t1.watch(tau)
-                curvature = -compute_curvature(fitter, tau)
-                logger.info(f"Curvature (value) = {curvature}")
-            grad = t1.gradient(curvature, tau)
-            logger.info(f"Curvature (gradient) = {grad}")
-        hess = t2.gradient(grad, tau)
+        val, grad, hess = neg_curvature_val_grad_hess(fitter, tau)
+
+        logger.info(f"Curvature (value) = {-val}")
+        logger.info(f"Curvature (gradient) = {grad}")
         logger.info(f"Curvature (hessian) = {hess}")
 
         # eps = 1e-8
-        # safe_hess = tf.where(hess > 0, hess, tf.ones_like(hess))
-        step = grad / hess  # (safe_hess + eps)
+        # safe_hess = tf.where(hess != 0, hess, tf.ones_like(hess))
+        # step = grad / (tf.abs(safe_hess) + eps)
+        step = grad / hess
         logger.info(f"Curvature (step) = {-step}")
         tau.assign_sub(step)
-        edm = tf.reduce_max(0.5 * grad * step)
+        edm = tf.reduce_max(0.5 * tf.square(grad) * tf.abs(hess))
         i = i + 1
 
         logger.debug(f"Curvature edm = {edm}")
         logger.debug(f"Curvature tau = {tau}")
+
+    logger.info(f"Optimization terminated")
+    logger.info(f"  edm: {edm}")
+    logger.info(f"  maximum curvature: {-val}")
+    logger.info(f"  tau: {tau.numpy()}")
+
+    return tau.numpy(), val.numpy()

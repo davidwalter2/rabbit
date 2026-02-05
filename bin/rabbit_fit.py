@@ -189,6 +189,18 @@ def make_parser():
         action="store_true",
         help="compute impacts of frozen (non-profiled) systematics",
     )
+    parser.add_argument(
+        "--lCurveScan",
+        default=False,
+        action="store_true",
+        help="For use with regularization, scan the L curve versus values for tau",
+    )
+    parser.add_argument(
+        "--lCurveOptimize",
+        default=False,
+        action="store_true",
+        help="For use with regularization, find the value of tau that maximizes the curvature",
+    )
 
     return parser.parse_args()
 
@@ -294,7 +306,15 @@ def fit(args, fitter, ws, dofit=True):
             profile=not args.noPostfitProfileBB,
         )
 
-    rh.optimize_tau(fitter)
+    if args.lCurveScan:
+        tau_values, l_curve_values = rh.l_curve_scan_tau(fitter)
+        ws.add_1D_integer_hist(tau_values, "step", "tau")
+        ws.add_1D_integer_hist(l_curve_values, "step", "lcurve")
+
+    if args.lCurveOptimize:
+        best_tau, max_curvature = rh.l_curve_optimize_tau(fitter)
+        ws.add_1D_integer_hist([best_tau], "best", "tau")
+        ws.add_1D_integer_hist([max_curvature], "best", "lcurve")
 
     if dofit:
         cb = fitter.minimize()
@@ -306,7 +326,8 @@ def fit(args, fitter, ws, dofit=True):
             fitter._profile_beta()
 
         if cb is not None:
-            ws.add_loss_time_hist(cb.loss_history, cb.time_history)
+            ws.add_1D_integer_hist(cb.loss_history, "epoch", "loss")
+            ws.add_1D_integer_hist(cb.time_history, "epoch", "time")
 
     if not args.noHessian:
         # compute the covariance matrix and estimated distance to minimum
