@@ -56,7 +56,7 @@ class FitterCallback:
         if (
             self.early_stopping > 0
             and len(self.loss_history) > self.early_stopping
-            and self.loss_history[self.early_stopping] <= loss
+            and self.loss_history[-self.early_stopping] <= loss
         ):
             raise ValueError(
                 f"No reduction in loss after {self.early_stopping} iterations, early stopping."
