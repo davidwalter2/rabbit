@@ -42,13 +42,13 @@ if SME:
                     precomputed = False
         else:
             precomputed = False
-            
-    for i in range(len(mybins) - 1):
-        if precomputed:
-            integral_liv = sme(mybins[i], mybins[i+1], pm[0], pn[0], wilson_couplings, precomputed = True, precomputed_values = precomp_dict_sme["values"][i])
-        else:
-            integral_liv, precomputed_values = sme(mybins[i], mybins[i+1], pm[0], pn[0], wilson_couplings, precomputed = False)
-            all_precomputed_values.append(precomputed_values)
+    for j in range(len(pm)):     
+        for i in range(len(mybins) - 1):
+            if precomputed:
+                integral_liv = sme(mybins[i], mybins[i+1], pm[j], pn[j], wilson_couplings, precomputed = True, precomputed_values = precomp_dict_sme["values"][i])
+            else:
+                integral_liv, precomputed_values = sme(mybins[i], mybins[i+1], pm[j], pn[j], wilson_couplings, precomputed = False)
+                all_precomputed_values.append(precomputed_values)
     if not precomputed:
         with open(add_dir + sme_filename, "wb") as f:
             output = {"bins": mybins, "values": all_precomputed_values}

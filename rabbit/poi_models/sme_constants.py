@@ -70,8 +70,6 @@ CL4 = tn.tensor([
 ], dtype=tn.float32)
 
 
-
-
 quark_couplings = []
 for flavor, e_f, name, I3 in quarks:
     g_fR = -e_f * sin2th_w

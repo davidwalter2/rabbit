@@ -5,6 +5,7 @@ baseline_models = {
     "Ones": "poi_model",
     "Mu": "poi_model",
     "Mixture": "poi_model",
+    "LIV": "sme_model",
 }
 
 
