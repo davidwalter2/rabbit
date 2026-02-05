@@ -81,77 +81,80 @@ class LIV(POIModel):
         
         self.precomputed_values = np.array(precomp_dict["values"])
 
-        #sm_sigma[mll]
-        with open(add_dir + sm_filename, "rb") as f:
-            precomp_dict = pickle.load(f)
-        self.sm_sigma = np.array(precomp_dict["values"])
-
+        
         self.Q2_vals = np.array([all_q])
         self.pm = pm ## will need to change this once I have multiple pm for
         self.pn = pn
         self.time = times
         self.CR = CR * 0 ## setting this to 0 for now. 
         self.CL = CL1 ## hard coding this for now
-        self.nQbins = len(self.Q2_vals)
+        self.nQbins = self.Q2_vals.shape[1]
         self.nTimebins = 1
         self.xsec_mult = tf.Variable(tf.ones([self.nTimebins, self.nQbins], dtype = tf.float64))
 
-            
-    def compute(self, poi):
+        GeV_to_pb = factor*0.389379*1e9
         
-        ### poi[0] = left
-        ## poi[1] = right
-
-        
-        # pdb.set_trace()
+        precomputed_Right = np.zeros([self.nTimebins, self.nQbins])
+        precomputed_Left = np.zeros([self.nTimebins, self.nQbins])
+       
         #precomputed_values[mll][quark]
         #pm[time]
         #pn[time]
         #Q2_vals[time][mll][integration step]
         
-        
         for k in range(self.nTimebins): #range(24)
             for i in range(self.nQbins):
+                pipi_L_int = GeV_to_pb*self.precomputed_values[i][:, 0, 0] * self.precomputed_values[i][:, 0, 2]
+                pipj_L_int = GeV_to_pb*self.precomputed_values[i][:,0, 1] * self.precomputed_values[i][:,0, 2]
                 
-                integrand_values = [d_sigma_precomp(self.pm[k], self.pn[k], poi[0]*self.CL, self.CR, precomputed_values = self.precomputed_values[i][j][0]) for j in range(len(self.Q2_vals[k][i]))]
+                pipi_R_int = GeV_to_pb*self.precomputed_values[i][:,0, 3] * self.precomputed_values[i][:,0, 5]
+                pipj_R_int = GeV_to_pb*self.precomputed_values[i][:,0, 4] * self.precomputed_values[i][:,0, 5]
                 
-                integral_liv = tf_simpson(integrand_values, self.Q2_vals[k][i])
-                # pdb.set_trace()
+                integral_pipi_L = simpson(pipi_L_int, self.Q2_vals[k][i])
+                integral_pipj_L = simpson(pipj_L_int, self.Q2_vals[k][i])
+                integral_pipi_R = simpson(pipi_R_int, self.Q2_vals[k][i])
+                integral_pipj_R = simpson(pipj_R_int, self.Q2_vals[k][i])
+            
 
-                self.xsec_mult[k][i] = (integral_liv + self.sm_sigma[i])/self.sm_sigma[i]
-        ## need to reshape the total_cross_section to be flat
-        flattened_xsec = tf.reshape(self.xsec_mult, [self.nQbins * self.nTimebins])
-        return flattened_xsec
+                contraction_p1p1_L = tf.einsum('mn,m,n->', self.CL, self.pm[k], self.pm[k])
+                contraction_p1p2_L = tf.einsum('mn,m,n->', self.CL, self.pm[k], self.pn[k])
+                contraction_p2p1_L = tf.einsum('mn,m,n->', self.CL, self.pn[k], self.pm[k])
+                contraction_p2p2_L = tf.einsum('mn,m,n->', self.CL, self.pn[k], self.pn[k])
+                
+                contraction_pipi_L = (contraction_p1p1_L + contraction_p2p2_L)
+                contraction_pipj_L = (contraction_p1p2_L + contraction_p2p1_L)
+                        
+                contraction_p1p1_R = tf.einsum('mn,m,n->', 0*self.CR, self.pm[k], self.pm[k])
+                contraction_p1p2_R = tf.einsum('mn,m,n->', 0*self.CR, self.pm[k], self.pn[k])
+                contraction_p2p1_R = tf.einsum('mn,m,n->', 0*self.CR, self.pn[k], self.pm[k])
+                contraction_p2p2_R = tf.einsum('mn,m,n->', 0*self.CR, self.pn[k], self.pn[k])
 
-                           
+                contraction_pipi_R = (contraction_p1p1_R + contraction_p2p2_R)
+                contraction_pipj_R = (contraction_p1p2_R + contraction_p2p1_R)
+        
+        
+        
+                precomputed_Left[k][i] = integral_pipi_L * contraction_pipi_L + contraction_pipj_L * integral_pipj_L
+                precomputed_Right[k][i] = integral_pipi_R * contraction_pipi_R + integral_pipj_R * contraction_pipj_R
 
-# if __name__ == "__main__":
+        
+        #sm_sigma[mll]
+        with open(add_dir + sm_filename, "rb") as f:
+            precomp_dict = pickle.load(f)
+        self.sm_sigma = tf.cast(precomp_dict["values"]*self.nTimebins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
+
+
+        self.sme_left = tf.cast(precomputed_Left.flatten(), dtype = tf.float64)
+        self.sme_right = tf.cast(precomputed_Right.flatten(), dtype = tf.float64)
+        
+            
+    def compute(self, poi):
+        
+        flattened_xsec = (self.sm_sigma + self.sme_left*poi[0] + self.sme_right * 0)/self.sm_sigma
+        
+        rnorm = tf.ones(self.indata.nproc, dtype=self.indata.dtype)
+        rnorm = tf.reshape(rnorm, [1, -1])
+        
+        return flattened_xsec*rnorm
+
     
-#     file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
-#     file_in_name = file_in + "mz_dilepton_liv_scetlib_dyturboCorr.hdf5"  # _maxFiles_20
-#     h5file = h5py.File(file_in_name, "r")
-#     results = input_tools.load_results_h5py(h5file)
-#     MC_Zmumu = results["ZmumuPostVFP"]["output"]
-#     data_output = results["dataPostVFP"]["output"]
-#     lumi_output = results["dataPostVFP"]["lumi_outout"]
-
-#     iso = MC_Zmumu["pos_iso"].get()
-#     trig = MC_Zmumu["pos_trig"].get()
-#     id_hist = MC_Zmumu["pos_ID"].get()
-#     global_hist = MC_Zmumu["pos_global"].get()
-
-
-#     weightsum = results["ZmumuPostVFP"]["weight_sum"]
-#     cross_sec = results["ZmumuPostVFP"]["dataset"]["xsec"]
-
-#     lumi_scaling = lumi_output["lumi_nom"].get()
-#     time_proj_low_all = data_output["time_proj"].get()
-
-#     time_proj_low = time_proj_low_all[{"mll": 9, "pt_tag": 3, "eta_tag": 3}]
-
-#     iso_corr = all_mc_corrections(
-#         iso.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
-#     )
-#     pdb.set_trace()
-
-#     g = WilsonCoeffLeft(iso_corr, 2, "cxxuL", "cxxuR", 1e-5, 1e-5, CL1, CR)

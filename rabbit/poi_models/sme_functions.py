@@ -289,6 +289,32 @@ def d_sigma_calc(Q2, p1, p2, quark_couplings):
         i += 1 
     return factor * 0.389379 * 1e9*(d_sigmaL + d_sigmaR), computed_values  # This is d\sigma / dQ^2
 
+
+# def dsigma_no_contr(p1, p2, CL, CR, precomputed_values = []):
+#     d_sigmaL = 0
+#     d_sigmaR = 0
+#     i = 0 #<-- this actu
+
+#     for i in range(int(len(precomputed_values)/6)):
+#         # pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = precomputed_values[i] ## for when i pass all the flavors in
+#         # pipi_L = precomputed_values[:, 0]
+#         # pipj_L = precomputed_values[:, 1]
+#         # sum_terms_L = precomputed_values[:, 2]
+#         # pipi_R = precomputed_values[:, 3]
+#         # pipj_R = precomputed_values[:, 4]
+#         # sum_terms_R = precomputed_values[:, 5]
+#         pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = precomputed_values
+
+#         ### this can't be pulled out further because this iterates by flavor
+    
+#         integral1 = pipi_L * contraction_pipi_L + pipj_L* contraction_pipj_L
+#         integral2 = pipi_R * contraction_pipi_R + pipj_R* contraction_pipj_R
+        
+#         d_sigmaL +=  sum_terms_L * integral1
+#         d_sigmaR += sum_terms_R * integral2
+#         i += 1
+#     return factor * 0.389379 * 1e9*(tf.cast(d_sigmaL, dtype = tf.float64) + tf.cast(d_sigmaR, dtype = tf.float64))  # This is d\sigma / dQ^2
+    
 def d_sigma_precomp(p1, p2, CL, CR, precomputed_values = []):
     d_sigmaL = 0
     d_sigmaR = 0
