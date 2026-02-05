@@ -1464,12 +1464,17 @@ class Fitter:
                                 hess = t2.gradient(grad, self.nbeta)
 
                                 eps = 1e-8
-                                safe_hess = tf.where(hess > 0, hess, tf.ones_like(hess))
-                                step = grad / (safe_hess + eps)
+                                hess_sign = tf.where(
+                                    hess != 0, tf.sign(hess), tf.ones_like(hess)
+                                )
+                                safe_hess = hess_sign * tf.maximum(tf.abs(hess), eps)
+                                step = grad / safe_hess
 
                                 self.nbeta.assign_sub(step)
 
-                                return i + 1, tf.reduce_max(0.5 * grad * step)
+                                return i + 1, tf.reduce_max(
+                                    tf.reduce_max(0.5 * grad * step)
+                                )
 
                             def cond(i, edm):
                                 return tf.logical_and(i < 50, edm > 1e-10)
@@ -1680,10 +1685,17 @@ class Fitter:
                                 hess = t2.gradient(grad, self.nbeta)
 
                                 eps = 1e-8
-                                safe_hess = tf.where(hess > 0, hess, tf.ones_like(hess))
-                                step = grad / (safe_hess + eps)
+                                hess_sign = tf.where(
+                                    hess != 0, tf.sign(hess), tf.ones_like(hess)
+                                )
+                                safe_hess = hess_sign * tf.maximum(tf.abs(hess), eps)
+                                step = grad / safe_hess
+
                                 self.nbeta.assign_sub(step)
-                                return i + 1, tf.reduce_max(0.5 * grad * step)
+
+                                return i + 1, tf.reduce_max(
+                                    tf.reduce_max(0.5 * grad * step)
+                                )
 
                             def cond(i, edm):
                                 return tf.logical_and(i < 50, edm > 1e-10)
