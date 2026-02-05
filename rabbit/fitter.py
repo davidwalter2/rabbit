@@ -33,7 +33,7 @@ def match_regexp_params(regular_expressions, parameter_names):
 
 
 class FitterCallback:
-    def __init__(self, xv):
+    def __init__(self, xv, early_stopping=-1):
         self.iiter = 0
         self.xval = xv
 
@@ -41,6 +41,8 @@ class FitterCallback:
         self.time_history = []
 
         self.t0 = time.time()
+
+        self.early_stopping = early_stopping
 
     def __call__(self, intermediate_result):
         loss = intermediate_result.fun
@@ -50,6 +52,15 @@ class FitterCallback:
         )  # ; status {intermediate_result.status}")
         if np.isnan(loss):
             raise ValueError(f"Loss value is NaN at iteration {self.iiter}")
+
+        if (
+            self.early_stopping > 0
+            and len(self.loss_history) > self.early_stopping
+            and self.loss_history[self.early_stopping] <= loss
+        ):
+            raise ValueError(
+                f"No reduction in loss after {self.early_stopping} iterations, early stopping."
+            )
 
         self.loss_history.append(loss)
         self.time_history.append(time.time() - self.t0)
@@ -67,6 +78,7 @@ class Fitter:
     ):
         self.indata = indata
 
+        self.earlyStopping = options.earlyStopping
         self.globalImpactsFromJVP = globalImpactsFromJVP
         self.binByBinStat = not options.noBinByBinStat
         self.binByBinStatMode = options.binByBinStatMode
@@ -2111,7 +2123,7 @@ class Fitter:
 
         return val, grad, hess
 
-    def minimize(self):
+    def minimize(self, eraly_stopping=10):
         if self.is_linear:
             logger.info(
                 "Likelihood is purely quadratic, solving by Cholesky decomposition instead of iterative fit"
@@ -2162,7 +2174,7 @@ class Fitter:
 
             xval = self.x.numpy()
 
-            callback = FitterCallback(xval)
+            callback = FitterCallback(xval, self.earlyStopping)
 
             if self.minimizer_method in [
                 "trust-krylov",
