@@ -38,10 +38,8 @@ class LIV(POIModel):
         # right_tensor, #CR
         **kwargs
     ):
+        
         self.indata = indata
-        # self.npoi = npoi
-        # self.pois = poi_names
-        # self.xpoidefault = poi_defaults
         self.is_linear = False
         self.allowNegativePOI = False
         self.npoi = 1
@@ -56,98 +54,30 @@ class LIV(POIModel):
         
         self.Q_min = 15
         self.Q_max = 120
-        Q_vals_temp = [15, 30, 40, 45, 50, 55, 60, 65, 70, 76, 106, 110, 115, 120] ## need to not hardcode these
-        
-        self.Q_vals = [(Q_vals_temp[i], Q_vals_temp[i+1]) for i in range(len(Q_vals_temp) - 1)]
-        times, pm, pn = get_hour_array()
-        
-        all_q = []
-        
-        # sme_filename = f"SME_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)}_bins.pkl" 
-        sm_filename = f"SM_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)}_bins.pkl" 
-        sme_filename = "SME_15_to_120_GeV_13_bins_time0.pkl"
-        # sm_filename = "SM_15_to_120_GeV_13_bins.pkl"
+        self.nTimeBins = 24
+        self.Q_vals =  [15, 30, 40, 45, 50, 55, 60, 65, 70, 76, 106, 110, 115, 120]
 
+        self.coeff = "cxx"
+        self.quark = "u"
+        
         add_dir = "/home/submit/jbenke/WRemnants/rabbit/rabbit/poi_models/precomputed_sigma/"
-
-
-        for i in range(len(self.Q_vals)):
-            all_q.append(list(np.linspace(self.Q_vals[i][0]**2, self.Q_vals[i][1]**2, 101)))
-            
-        #precomputed_values[mll][nbins][quark]
-        with open(add_dir + sme_filename, "rb") as f:
+        sme_L_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)-1}_bins_{self.coeff}_{self.quark}_L.pkl"
+        sme_R_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)-1}_bins_{self.coeff}_{self.quark}_R.pkl"
+        sm_filename = f"SM_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)-1}_bins.pkl" 
+        
+        #sme_left[time][mll]
+        with open(add_dir + sme_L_filename, "rb") as f:
             precomp_dict = pickle.load(f)
-            # all_precomputed_sme.append(precomp_dict["values"][i]) ## this should only look at the up quark
-        
-        self.precomputed_values = np.array(precomp_dict["values"])
-
-        
-        self.Q2_vals = np.array([all_q])
-        self.pm = pm ## will need to change this once I have multiple pm for
-        self.pn = pn
-        self.time = times
-        self.CR = CR * 0 ## setting this to 0 for now. 
-        self.CL = CL1 ## hard coding this for now
-        self.nQbins = self.Q2_vals.shape[1]
-        self.nTimebins = 1
-        self.xsec_mult = tf.Variable(tf.ones([self.nTimebins, self.nQbins], dtype = tf.float64))
-
-        
-        
-        precomputed_Right = np.zeros([self.nTimebins, self.nQbins])
-        precomputed_Left = np.zeros([self.nTimebins, self.nQbins])
-       
-        #precomputed_values[mll][quark]
-        #pm[time]
-        #pn[time]
-        #Q2_vals[time][mll][integration step]
-        
-        for k in range(self.nTimebins): #range(24)
-            for i in range(self.nQbins):
-                pipi_L_int = GeV_to_pb*self.precomputed_values[i][:, 0, 0] * self.precomputed_values[i][:, 0, 2]
-                pipj_L_int = GeV_to_pb*self.precomputed_values[i][:,0, 1] * self.precomputed_values[i][:,0, 2]
-                
-                pipi_R_int = GeV_to_pb*self.precomputed_values[i][:,0, 3] * self.precomputed_values[i][:,0, 5]
-                pipj_R_int = GeV_to_pb*self.precomputed_values[i][:,0, 4] * self.precomputed_values[i][:,0, 5]
-                
-                integral_pipi_L = simpson(pipi_L_int, self.Q2_vals[k][i])
-                integral_pipj_L = simpson(pipj_L_int, self.Q2_vals[k][i])
-                integral_pipi_R = simpson(pipi_R_int, self.Q2_vals[k][i])
-                integral_pipj_R = simpson(pipj_R_int, self.Q2_vals[k][i])
-            
-
-                contraction_p1p1_L = tf.einsum('mn,m,n->', self.CL, self.pm[k], self.pm[k])
-                contraction_p1p2_L = tf.einsum('mn,m,n->', self.CL, self.pm[k], self.pn[k])
-                contraction_p2p1_L = tf.einsum('mn,m,n->', self.CL, self.pn[k], self.pm[k])
-                contraction_p2p2_L = tf.einsum('mn,m,n->', self.CL, self.pn[k], self.pn[k])
-                
-                contraction_pipi_L = (contraction_p1p1_L + contraction_p2p2_L)
-                contraction_pipj_L = (contraction_p1p2_L + contraction_p2p1_L)
-                        
-                contraction_p1p1_R = tf.einsum('mn,m,n->', 0*self.CR, self.pm[k], self.pm[k])
-                contraction_p1p2_R = tf.einsum('mn,m,n->', 0*self.CR, self.pm[k], self.pn[k])
-                contraction_p2p1_R = tf.einsum('mn,m,n->', 0*self.CR, self.pn[k], self.pm[k])
-                contraction_p2p2_R = tf.einsum('mn,m,n->', 0*self.CR, self.pn[k], self.pn[k])
-
-                contraction_pipi_R = (contraction_p1p1_R + contraction_p2p2_R)
-                contraction_pipj_R = (contraction_p1p2_R + contraction_p2p1_R)
-        
-        
-        
-                precomputed_Left[k][i] = integral_pipi_L * contraction_pipi_L + contraction_pipj_L * integral_pipj_L
-                precomputed_Right[k][i] = integral_pipi_R * contraction_pipi_R + integral_pipj_R * contraction_pipj_R
-
-        
+        self.sme_left = tf.cast(np.array(precomp_dict["values"])[:, 9].flatten(), dtype = tf.float64)
+        #sme_right[time][mll]
+        with open(add_dir + sme_R_filename, "rb") as f:
+            precomp_dict = pickle.load(f)
+        self.sme_right = tf.cast(np.array(precomp_dict["values"])[:, 9].flatten(), dtype = tf.float64)
         #sm_sigma[mll]
         with open(add_dir + sm_filename, "rb") as f:
             precomp_dict = pickle.load(f)
-        self.sm_sigma = tf.cast(precomp_dict["values"]*self.nTimebins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
-
-
-        self.sme_left = tf.cast(precomputed_Left.flatten(), dtype = tf.float64)
-        self.sme_right = tf.cast(precomputed_Right.flatten(), dtype = tf.float64)
-        
-            
+        self.sm_sigma = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
+       
     def compute(self, poi):
         
         flattened_xsec = (self.sm_sigma + self.sme_left*poi[0] + self.sme_right * 0)/self.sm_sigma

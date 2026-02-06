@@ -75,7 +75,6 @@ if summation:
 
     precomputed_values = np.array(precomp_dict["values"])
 
-            
     all_q = []
 
     for i in range(n_mass_bins-1):
@@ -85,6 +84,11 @@ if summation:
     Q2_vals = np.array([all_q])
     quark = ["u", "d", "s"]
     coeff_names = ["cxx", "cxy", "cxz", "cyz"]
+    #precomputed_values[mll][quark]
+    #pm[time]
+    #pn[time]
+    #Q2_vals[time][mll][integration step]
+    #precomputed_values[mll][nbins][quark]
 
     tensors = [CL1, CL2, CL3, CL4]
     ## what changes from quark to quark? 
@@ -99,11 +103,11 @@ if summation:
             precomputed_Right = np.zeros([n_time_bins, n_mass_bins])
             precomputed_Left = np.zeros([n_time_bins, n_mass_bins])
             for k in range(n_time_bins-1): #range(24)
-                print(f"time: {k}")
                 for i in range(n_mass_bins-1):
                 # for i in range(1):
-                    this_bin = (k*n_mass_bins) + i
+                    this_bin = (k*(n_mass_bins-1)) + i
                     ## time (mass)
+
                     pipi_L_int = GeV_to_pb * precomputed_values[this_bin][:, j, 0] * precomputed_values[this_bin][:, j, 2]
                     pipj_L_int = GeV_to_pb * precomputed_values[this_bin][:,j, 1] * precomputed_values[this_bin][:,j, 2]
                     
@@ -138,8 +142,8 @@ if summation:
                                         
 
 
-            filename_L = f"summation_{min(mass_bins)}_to_{max(mass_bins)}_GeV_{n_mass_bins}_bins_{coeff_names[l]}_{quark[j]}_L.pkl"
-            filename_R = f"summation_{min(mass_bins)}_to_{max(mass_bins)}_GeV_{n_mass_bins}_bins_{coeff_names[l]}_{quark[j]}_R.pkl"
+            filename_L = f"summation_{min(mass_bins)}_to_{max(mass_bins)}_GeV_{n_mass_bins-1}_bins_{coeff_names[l]}_{quark[j]}_L.pkl"
+            filename_R = f"summation_{min(mass_bins)}_to_{max(mass_bins)}_GeV_{n_mass_bins-1}_bins_{coeff_names[l]}_{quark[j]}_R.pkl"
             
             
             with open(add_dir + filename_L, "wb") as f:
