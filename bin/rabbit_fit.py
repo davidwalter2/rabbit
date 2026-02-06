@@ -201,7 +201,12 @@ def make_parser():
         action="store_true",
         help="For use with regularization, find the value of tau that maximizes the curvature",
     )
-
+    parser.add_argument(
+        "--regularizationStrength",
+        default=0.0,
+        type=float,
+        help="For use with regularization, set the regularization strength (tau)",
+    )
     return parser.parse_args()
 
 
@@ -511,6 +516,7 @@ def main():
             mp.CompositeMapping(mappings),
         ]
 
+    ifitter.tau.assign(args.regularizationStrength)
     regularizers = []
     for margs in args.regularization:
         mapping = mh.load_mapping(margs[1], indata, *margs[2:])

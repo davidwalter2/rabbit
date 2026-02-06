@@ -306,6 +306,8 @@ class Fitter:
 
         # regularization
         self.regularizers = []
+        # one common regularization strength parameter
+        self.tau = tf.Variable(1.0, trainable=True, name="tau", dtype=tf.float64)
 
         # determine if problem is linear (ie likelihood is purely quadratic)
         self.is_linear = (
@@ -2059,7 +2061,8 @@ class Fitter:
         if len(self.regularizers):
             x = self.get_x()
             penalties = [
-                reg.compute_nll_penalty(x, nexpfullcentral) for reg in self.regularizers
+                reg.compute_nll_penalty(x, nexpfullcentral) * tf.exp(2 * self.tau)
+                for reg in self.regularizers
             ]
             lpenalty = tf.add_n(penalties)
         else:

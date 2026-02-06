@@ -57,6 +57,12 @@ parser.add_argument(
     choices=["loss", "lcurve"],
     help="Make 1D plot as function of epoch/step/...",
 )
+parser.add_argument(
+    "--ylim",
+    type=float,
+    nargs=2,
+    help="Min and max values for y axis (if not specified, range set automatically)",
+)
 args = parser.parse_args()
 
 outdir = output_tools.make_plot_dir(args.outpath)
@@ -119,14 +125,17 @@ def plot(x, y, xlabel, ylabel, stop, suffix, points=[]):
 
     x = [ix[start:stop] for ix in x]
 
-    if args.logy:
-        ylim = [
-            min([min(iy[iy > 0]) for iy in y]) * 0.5,
-            max([max(iy) for iy in y]) * 2,
-        ]
+    if args.ylim:
+        ylim = args.ylim
     else:
-        ymin = min([min(iy) for iy in y])
-        ylim = [ymin * 1.1 if ymin < 0 else 0, max([max(iy) for iy in y]) * 1.1]
+        if args.logy:
+            ylim = [
+                min([min(iy[iy > 0]) for iy in y]) * 0.5,
+                max([max(iy) for iy in y]) * 2,
+            ]
+        else:
+            ymin = min([min(iy) for iy in y])
+            ylim = [ymin * 1.1 if ymin < 0 else 0, max([max(iy) for iy in y]) * 1.1]
 
     fig, ax1 = plot_tools.figure(
         None,
@@ -139,7 +148,7 @@ def plot(x, y, xlabel, ylabel, stop, suffix, points=[]):
         logy=args.logy,
     )
 
-    ax1.plot([0.8, 0.8], ylim, color="grey", linestyle="--")
+    ax1.plot([1.85, 1.85], ylim, color="grey", linestyle="--")
 
     for ix, iy, l, s in zip(x, y, labels, linestyles):
         ax1.plot(ix, iy, label=l, linestyle=s)

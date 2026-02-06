@@ -8,9 +8,6 @@ class SVD(Regularizer):
     Singular Value Decomposition (SVD) see: https://arxiv.org/abs/hep-ph/9509307
     """
 
-    # one common regularization strength parameter
-    tau = tf.Variable(1.0, trainable=True, name="tau", dtype=tf.float64)
-
     def __init__(self, mapping, dtype):
         if len(mapping.channel_info) > 1:
             raise NotImplementedError(
@@ -60,7 +57,7 @@ class SVD(Regularizer):
         nexp0 = self.mapping.compute_flat(initial_params, initial_observables)
         self.nexp0 = tf.reshape(nexp0, self.input_shape)
 
-    def compute_nll_penalty_unweighted(self, params, observables):
+    def compute_nll_penalty(self, params, observables):
         mask = self.nexp0 != 0
         nexp0_safe = tf.where(mask, self.nexp0, tf.cast(1.0, self.nexp0.dtype))
 
@@ -93,9 +90,3 @@ class SVD(Regularizer):
         penalty = tf.reduce_sum(tf.square(curvature_map))
 
         return penalty
-
-    def compute_nll_penalty(self, params, observables):
-
-        penalty = self.compute_nll_penalty_unweighted(params, observables)
-
-        return penalty * tf.exp(2 * self.tau)
