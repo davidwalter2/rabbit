@@ -11,8 +11,8 @@ e = 0.3028 # Elementry charge in natural units
 
 quarks = [
     (2, 2/3*e, 'u', 1/2),
-    (1, -1/3*e, 'd', -1/2),
-    (3, -1/3*e, 's', -1/2),
+    # (1, -1/3*e, 'd', -1/2),
+    # (3, -1/3*e, 's', -1/2),
     #  (4, 2/3*e, 'c', 1/2),
     #   (5, -1/3*e, 'b', -1/2),
     #  (6, 2/3*e, 't', 1/2),
@@ -47,13 +47,12 @@ CL1 = tn.tensor([
     [0,0, 0, 0]
 ], dtype=tn.float32)
 
-CL4 = tn.tensor([
+CL2 = tn.tensor([
     [0, 0, 0, 0],
-    [0, 0, 0, 0],
-    [0, 0, 0, -1],
-    [0,0,-1, 0]
+    [0, 0, -1, 0],
+    [0, -1, 0, 0],
+    [0, 0, 0, 0]
 ], dtype=tn.float32)
-
 
 CL3 = tn.tensor([
     [0, 0, 0, 0],
@@ -103,7 +102,7 @@ for flavor, e_f, name, I3 in quarks:
 
     i += 1
     ### i'll need to switch this to also iterate through the different c matricies
-    wilson_couplings.append((flavor, e_f, g_fR, g_fL, c_fL*CL4, c_fR*CR))
+    wilson_couplings.append((flavor, e_f, g_fR, g_fL, CL1, CR))
 
 
 

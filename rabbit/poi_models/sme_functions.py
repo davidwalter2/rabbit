@@ -15,6 +15,9 @@ import time
 import pickle
 import os
 
+tn.set_printoptions(precision=16)
+
+
 def files_exist(files):
     add_dir = "precomputed_sigma/"
     directory = '.'  # Current directory
@@ -74,7 +77,7 @@ def get_hour_array():
 
 
 
-    specific_time = datetime(2017, 1, 1, 0, 0)
+    specific_time = datetime(2016, 1, 1, 0, 0)
 
     start_time = int(specific_time.timestamp())
 
@@ -202,16 +205,6 @@ def d_sigma_sm(Q2, quark_couplings, precomputed = False):
 def sigma_sm(Qmin, Qmax, quark_couplings, precomputed = False):
     def inet(Q2):
         return d_sigma_sm(Q2, quark_couplings)
-    def inet_up(Q2):
-        flavor_separated_dsigma, d_sigmasm = d_sigma_sm(Q2, quark_couplings, precomputed)
-        return flavor_separated_dsigma[0]
-    def inet_down(Q2):
-        flavor_separated_dsigma, d_sigmasm = d_sigma_sm(Q2, quark_couplings, precomputed)
-        return flavor_separated_dsigma[1]
-    def inet_strange(Q2):
-        flavor_separated_dsigma, d_sigmasm = d_sigma_sm(Q2, quark_couplings, precomputed)
-        return flavor_separated_dsigma[1]
-    
     # if precomputed:
     int, _ = quad(inet, Qmin**2, Qmax**2)
     # if not precomputed:
@@ -247,73 +240,19 @@ def integrate_sigma_hat_prime_sme(tau, flavor, Q2):
 
 def d_sigma_calc(Q2, p1, p2, quark_couplings):
     tau = Q2 / s
-    d_sigmaL = 0
-    d_sigmaR = 0
-    i = 0
-    
     computed_values = []
     for flavor, e_f, g_fR, g_fL, CL, CR in quark_couplings:
 
         pipi_L, pipj_L = integrate_sigma_hat_prime_sme(tau, flavor, Q2)
         pipi_R, pipj_R = integrate_sigma_hat_prime_sme(tau, flavor, Q2)
-        
         sum_terms_L = summation_terms(Q2, e_f, g_fL)
         sum_terms_R = summation_terms(Q2, e_f, g_fR)
         ### currently this only saves the last one
         computed_values.append([pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R])
-         
-        ### this can't be pulled out further because this iterates by flavor
-        contraction_p1p1_L = tn.einsum('mn,m,n->', CL, p1, p1)
-        contraction_p1p2_L = tn.einsum('mn,m,n->', CL, p1, p2)
-        contraction_p2p1_L = tn.einsum('mn,m,n->', CL, p2, p1)
-        contraction_p2p2_L = tn.einsum('mn,m,n->', CL, p2, p2)
         
-        contraction_pipi_L = (contraction_p1p1_L + contraction_p2p2_L)
-        contraction_pipj_L = (contraction_p1p2_L + contraction_p2p1_L)
-        
-        
-        contraction_p1p1_R = tn.einsum('mn,m,n->', CR, p1, p1)
-        contraction_p1p2_R = tn.einsum('mn,m,n->', CR, p1, p2)
-        contraction_p2p1_R = tn.einsum('mn,m,n->', CR, p2, p1)
-        contraction_p2p2_R = tn.einsum('mn,m,n->', CR, p2, p2)
-
-        contraction_pipi_R = (contraction_p1p1_R + contraction_p2p2_R)
-        contraction_pipj_R = (contraction_p1p2_R + contraction_p2p1_R)
-
-        integral1 = pipi_L * contraction_pipi_L + pipj_L* contraction_pipj_L
-        integral2 = pipi_R * contraction_pipi_R + pipj_R* contraction_pipj_R
-        
-        d_sigmaL +=  sum_terms_L * integral1
-        d_sigmaR += sum_terms_R * integral2
-    
-        i += 1 
-    return factor * 0.389379 * 1e9*(d_sigmaL + d_sigmaR), computed_values  # This is d\sigma / dQ^2
+    return computed_values  # This is d\sigma / dQ^2
 
 
-# def dsigma_no_contr(p1, p2, CL, CR, precomputed_values = []):
-#     d_sigmaL = 0
-#     d_sigmaR = 0
-#     i = 0 #<-- this actu
-
-#     for i in range(int(len(precomputed_values)/6)):
-#         # pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = precomputed_values[i] ## for when i pass all the flavors in
-#         # pipi_L = precomputed_values[:, 0]
-#         # pipj_L = precomputed_values[:, 1]
-#         # sum_terms_L = precomputed_values[:, 2]
-#         # pipi_R = precomputed_values[:, 3]
-#         # pipj_R = precomputed_values[:, 4]
-#         # sum_terms_R = precomputed_values[:, 5]
-#         pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = precomputed_values
-
-#         ### this can't be pulled out further because this iterates by flavor
-    
-#         integral1 = pipi_L * contraction_pipi_L + pipj_L* contraction_pipj_L
-#         integral2 = pipi_R * contraction_pipi_R + pipj_R* contraction_pipj_R
-        
-#         d_sigmaL +=  sum_terms_L * integral1
-#         d_sigmaR += sum_terms_R * integral2
-#         i += 1
-#     return factor * 0.389379 * 1e9*(tf.cast(d_sigmaL, dtype = tf.float64) + tf.cast(d_sigmaR, dtype = tf.float64))  # This is d\sigma / dQ^2
     
 def d_sigma_precomp(p1, p2, CL, CR, precomputed_values = []):
     d_sigmaL = 0
@@ -321,13 +260,7 @@ def d_sigma_precomp(p1, p2, CL, CR, precomputed_values = []):
     i = 0 #<-- this actu
 
     for i in range(int(len(precomputed_values)/6)):
-        # pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = precomputed_values[i] ## for when i pass all the flavors in
-        # pipi_L = precomputed_values[:, 0]
-        # pipj_L = precomputed_values[:, 1]
-        # sum_terms_L = precomputed_values[:, 2]
-        # pipi_R = precomputed_values[:, 3]
-        # pipj_R = precomputed_values[:, 4]
-        # sum_terms_R = precomputed_values[:, 5]
+
         pipi_L, pipj_L, sum_terms_L, pipi_R, pipj_R, sum_terms_R = precomputed_values
 
         ### this can't be pulled out further because this iterates by flavor
@@ -365,7 +298,7 @@ def sme(Q_min, Q_max, p1, p2, quark_couplings, num_steps_Q2 = 100, precomputed =
         integrand_values = np.array([d_sigma_precomp(Q2_values[i], p1, p2, quark_couplings, precomputed = True, precomputed_values = precomputed_values[i]) for i in range(len(Q2_values))])
     
     if not precomputed:
-        integrand_values, combined_array = zip(*[d_sigma_calc(Q2, p1, p2, quark_couplings) for Q2 in Q2_values])
+        combined_array = zip(*[d_sigma_calc(Q2, p1, p2, quark_couplings) for Q2 in Q2_values])
         ## store left and right in the same file
 
     # Use Simpson's rule to integrate over the Q2_values array
@@ -374,7 +307,7 @@ def sme(Q_min, Q_max, p1, p2, quark_couplings, num_steps_Q2 = 100, precomputed =
     if precomputed:
         return integral_liv
     else:
-        return integral_liv, combined_array
+        return combined_array
 
 
 

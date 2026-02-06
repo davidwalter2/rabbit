@@ -92,7 +92,7 @@ class LIV(POIModel):
         self.nTimebins = 1
         self.xsec_mult = tf.Variable(tf.ones([self.nTimebins, self.nQbins], dtype = tf.float64))
 
-        GeV_to_pb = factor*0.389379*1e9
+        
         
         precomputed_Right = np.zeros([self.nTimebins, self.nQbins])
         precomputed_Left = np.zeros([self.nTimebins, self.nQbins])
