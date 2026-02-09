@@ -45,7 +45,7 @@ class LIV(POIModel):
         self.npoi = 1
         self.pois = np.array([s for s in self.indata.signals]) 
          
-        self.xpoidefault = np.array([1e-5]) ### will need to eventually make this callable
+        self.xpoidefault = np.array([1e-4]) ### will need to eventually make this callable
         
         # for channel, info in self.indata.channel_info.items():
         #     self.Q_vals = info["axes"][0]

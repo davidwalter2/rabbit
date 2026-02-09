@@ -19,12 +19,13 @@ all_precomputed_values = []
 all_sm_values = []
 
 precomputed = False
-SME = True
-summation = True       
+SME = False
+summation = False       
 if not SME and not summation:
-            
     for i in range(len(mass_bins) - 1):
-    # for i in range(1):
+    # for i in range(9,10):
+        print(mass_bins[i])
+        print(mass_bins[i+1])
         sm = sigma_sm(mass_bins[i], mass_bins[i+1], quark_couplings)
         print(sm)
         all_sm_values.append(sm)
