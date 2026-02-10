@@ -2123,7 +2123,7 @@ class Fitter:
 
         return val, grad, hess
 
-    def minimize(self, eraly_stopping=10):
+    def minimize(self):
         if self.is_linear:
             logger.info(
                 "Likelihood is purely quadratic, solving by Cholesky decomposition instead of iterative fit"
