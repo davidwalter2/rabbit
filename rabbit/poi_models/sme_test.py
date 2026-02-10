@@ -13,7 +13,10 @@ import tensorflow as tf
 import tensorflow as tf
 
 
-cxx_val = 9.5e-4
+# cxx_val = 1e-4*0.906
+cxx_val = 2.4e-6
+cxx_val = 1e-4
+
 
 # for channel, info in indata.channel_info.items():
 #     Q_vals = info["axes"][0]
@@ -46,7 +49,6 @@ with open(add_dir + sm_filename, "rb") as f:
     precomp_dict = pickle.load(f)
 sm_sigma = tf.cast([precomp_dict["values"][9]]*nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
 
-
         
 flattened_xsec = (sm_sigma + sme_left*cxx_val + sme_right * 0)/sm_sigma
-print(np.max(flattened_xsec))
+print(flattened_xsec)

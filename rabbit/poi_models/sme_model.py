@@ -41,11 +41,11 @@ class LIV(POIModel):
         
         self.indata = indata
         self.is_linear = False
-        self.allowNegativePOI = False
+        self.allowNegativePOI = True
         self.npoi = 1
-        self.pois = np.array([s for s in self.indata.signals]) 
-         
-        self.xpoidefault = np.array([1e-4]) ### will need to eventually make this callable
+        self.pois = np.array(["cxx"])
+        self.xpoidefault = np.array([1e-4])
+
         
         # for channel, info in self.indata.channel_info.items():
         #     self.Q_vals = info["axes"][0]
@@ -65,6 +65,7 @@ class LIV(POIModel):
         sme_R_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)-1}_bins_{self.coeff}_{self.quark}_R.pkl"
         sm_filename = f"SM_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)-1}_bins.pkl" 
         
+        ## for now select the largest mass bin
         #sme_left[time][mll]
         with open(add_dir + sme_L_filename, "rb") as f:
             precomp_dict = pickle.load(f)
@@ -77,14 +78,13 @@ class LIV(POIModel):
         with open(add_dir + sm_filename, "rb") as f:
             precomp_dict = pickle.load(f)
         self.sm_sigma = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
-       
+        
     def compute(self, poi):
         
         flattened_xsec = (self.sm_sigma + self.sme_left*poi[0] + self.sme_right * 0)/self.sm_sigma
         
         rnorm = tf.ones(self.indata.nproc, dtype=self.indata.dtype)
         rnorm = tf.reshape(rnorm, [1, -1])
-        
         return flattened_xsec*rnorm
 
     

@@ -20,7 +20,7 @@ all_sm_values = []
 
 precomputed = False
 SME = False
-summation = False       
+summation = True    
 if not SME and not summation:
     for i in range(len(mass_bins) - 1):
     # for i in range(9,10):
@@ -101,9 +101,9 @@ if summation:
         for j in range(len(quark_couplings)):
             print(f"quark: {quark[j]}")
         # for j in range(1):
-            precomputed_Right = np.zeros([n_time_bins, n_mass_bins])
-            precomputed_Left = np.zeros([n_time_bins, n_mass_bins])
-            for k in range(n_time_bins-1): #range(24)
+            precomputed_Right = np.zeros([n_time_bins, n_mass_bins-1])
+            precomputed_Left = np.zeros([n_time_bins, n_mass_bins-1])
+            for k in range(n_time_bins): #range(24)
                 for i in range(n_mass_bins-1):
                 # for i in range(1):
                     this_bin = (k*(n_mass_bins-1)) + i
