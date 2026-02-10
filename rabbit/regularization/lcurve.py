@@ -118,7 +118,7 @@ def neg_curvature_val_grad_hess(fitter):
             t1.watch(fitter.tau)
             val = -1 * _compute_curvature(fitter)
         grad = t1.gradient(val, fitter.tau)
-    hess = t2.gradient(fitter.tau)
+    hess = t2.gradient(grad, fitter.tau)
 
     return val, grad, hess
 

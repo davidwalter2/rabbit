@@ -14,6 +14,7 @@ from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
 from rabbit.poi_models import helpers as ph
 from rabbit.regularization import helpers as rh
+from rabbit.regularization.lcurve import l_curve_optimize_tau, l_curve_scan_tau
 from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
@@ -312,12 +313,12 @@ def fit(args, fitter, ws, dofit=True):
         )
 
     if args.lCurveScan:
-        tau_values, l_curve_values = rh.l_curve_scan_tau(fitter)
+        tau_values, l_curve_values = l_curve_scan_tau(fitter)
         ws.add_1D_integer_hist(tau_values, "step", "tau")
         ws.add_1D_integer_hist(l_curve_values, "step", "lcurve")
 
     if args.lCurveOptimize:
-        best_tau, max_curvature = rh.l_curve_optimize_tau(fitter)
+        best_tau, max_curvature = l_curve_optimize_tau(fitter)
         ws.add_1D_integer_hist([best_tau], "best", "tau")
         ws.add_1D_integer_hist([max_curvature], "best", "lcurve")
 
