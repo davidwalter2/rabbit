@@ -229,8 +229,7 @@ def integrate_sigma_hat_prime_sme(tau, flavor, Q2):
         tau_x = tau / x
         term4 = 2* tau_x * f_prime_s(x, tau, flavor, Q2)
         return term4 * tau_x
-    
-        
+            
     result2, _ = quad(integrand2, tau, 1)
     result3, _ = quad(integrand3, tau, 1)
     result4, _ = quad(integrand4, tau, 1)

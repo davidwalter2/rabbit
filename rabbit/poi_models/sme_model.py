@@ -10,7 +10,6 @@ from scripts.plotting.uncertainty_tools import *
 from rabbit.poi_models.poi_model import POIModel
 import tensorflow as tf
 
-import tensorflow as tf
 
 def tf_simpson(y_list, x):
 
@@ -81,10 +80,12 @@ class LIV(POIModel):
         
     def compute(self, poi):
         
-        flattened_xsec = (self.sm_sigma + self.sme_left*poi[0] + self.sme_right * 0)/self.sm_sigma
-        
+        flattened_xsec = (self.sm_sigma + self.sme_left*poi)/self.sm_sigma
+        # + self.sme_right * 0
         rnorm = tf.ones(self.indata.nproc, dtype=self.indata.dtype)
         rnorm = tf.reshape(rnorm, [1, -1])
+        # print(poi)
+        print(flattened_xsec)
         return flattened_xsec*rnorm
 
     
