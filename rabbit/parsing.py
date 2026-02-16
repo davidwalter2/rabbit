@@ -45,7 +45,7 @@ def common_parser():
     )
     parser.add_argument(
         "--earlyStopping",
-        default=10,
+        default=-1,
         type=int,
         help="Number of iterations with no improvement after which training will be stopped. Specify -1 to disable.",
     )
