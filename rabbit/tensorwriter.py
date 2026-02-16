@@ -186,13 +186,11 @@ class TensorWriter:
             channel_axes = self.channels[channel]["axes"]
 
             if not all(np.allclose(a, axes[i]) for i, a in enumerate(channel_axes)):
-                raise RuntimeError(
-                    f"""
+                raise RuntimeError(f"""
                     Histogram axes different have different edges from channel axes of channel {channel}
                     \nHistogram axes: {[a.edges for a in axes]}
                     \nChannel axes: {[a.edges for a in channel_axes]}
-                    """
-                )
+                    """)
         else:
             shape_in = h.shape
             shape_this = tuple([len(a) for a in self.channels[channel]["axes"]])
@@ -436,7 +434,8 @@ class TensorWriter:
                     f"Axis {a.name} not found in histogram h with {h.axes.name}"
                 )
 
-        variation = h.project(*dest_axes_names, *source_axes_names).values()
+        flow = self.channels[dest_channel]["flow"]
+        variation = h.project(*dest_axes_names, *source_axes_names).values(flow=flow)
         variation = variation.reshape((*norm.shape, -1))
 
         if source_channel not in self.dict_beta_variations[dest_channel].keys():
