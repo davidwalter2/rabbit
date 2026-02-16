@@ -135,11 +135,12 @@ def pdf_safe(flavor, x, Q2):
 
 def f_s(x, tau, flavor, Q2):
     tau_x = tau / x
-
+    ## use pdf_safe to avoid issues with boundary conditions of x
     pdf_flavor_x = pdf_safe(flavor, x, Q2)
     pdf_anti_flavor_x = pdf_safe(-flavor, x, Q2)
     pdf_flavor_tau_x = pdf_safe(flavor, tau_x, Q2)
     pdf_anti_flavor_tau_x = pdf_safe(-flavor, tau_x, Q2)
+    ### pdf.xfxQ2 produces x*PDF(x) so we need to remove that
     term1 = (1 / x) * pdf_flavor_x * (1/tau_x) * pdf_anti_flavor_tau_x
     term2 = (1/tau_x) * pdf_flavor_tau_x * (1 / x) * pdf_anti_flavor_x
     
@@ -149,6 +150,7 @@ def f_prime_s(x, tau, flavor, Q2):
     tau_x = tau / x
 
     # wrap the lambda to clip inside num_derivative
+    # 1/t is really a 1/tau_x mulitplication before the derivative is taken so we get the derivative of the PDF
     f_f_tau_x_prime = num_derivative(lambda t: 1/t * pdf_safe(flavor, t, Q2), tau_x)
     f_fbar_tau_x_prime = num_derivative(lambda t: 1/t * pdf_safe(-flavor, t, Q2), tau_x)
 
@@ -213,6 +215,8 @@ def sigma_sm(Qmin, Qmax, quark_couplings, precomputed = False):
 ##########################################################################
 
 def integrate_sigma_hat_prime_sme(tau, flavor, Q2):
+    ### a couple differences from the equations
+    ## 1/s is already accounted for becuase technically the p tensors should be multiplied by a factor of E_p but they aren't and s=4E_p^2. The p tensors are already multiplied by 1/2 so those also provide the 1/4 that is missing here
     def integrand2(x):
         tau_x = tau / x
         term2 = 2*f_s(x, tau, flavor, Q2) + 2* (x**2/tau) * f_s(x, tau, flavor, Q2)
