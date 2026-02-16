@@ -14,7 +14,7 @@ import tensorflow as tf
 
 
 # cxx_val = 1e-4*0.906
-cxx_val = 3.6e-4
+cxx_val = 1e-5
 
 
 # for channel, info in indata.channel_info.items():

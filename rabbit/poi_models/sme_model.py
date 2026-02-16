@@ -41,10 +41,16 @@ class LIV(POIModel):
         self.indata = indata
         self.is_linear = False
         self.allowNegativePOI = True
-        self.npoi = 1
-        self.pois = np.array(["cxx"])
-        self.xpoidefault = np.array([1e-4])
+        self.npoi = 2
+        self.pois = np.array(["cxx_u,L", "cxx_u,R"])
+        self.xpoidefault = np.array([1e-5, 1e-5])
 
+
+        # self.npoi = 1
+        # self.pois = np.array(["cxx_u,L"])
+        # self.xpoidefault = np.array([1e-5])
+                                     
+                                     
         
         # for channel, info in self.indata.channel_info.items():
         #     self.Q_vals = info["axes"][0]
@@ -58,7 +64,6 @@ class LIV(POIModel):
 
         self.coeff = "cxx"
         self.quark = "u"
-        
         add_dir = "/home/submit/jbenke/WRemnants/rabbit/rabbit/poi_models/precomputed_sigma/"
         sme_L_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)-1}_bins_{self.coeff}_{self.quark}_L.pkl"
         sme_R_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{len(self.Q_vals)-1}_bins_{self.coeff}_{self.quark}_R.pkl"
@@ -79,13 +84,7 @@ class LIV(POIModel):
         self.sm_sigma = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
         
     def compute(self, poi):
-        
-        flattened_xsec = (self.sm_sigma + self.sme_left*poi)/self.sm_sigma
-        # + self.sme_right * 0
-        rnorm = tf.ones(self.indata.nproc, dtype=self.indata.dtype)
-        rnorm = tf.reshape(rnorm, [1, -1])
-        # print(poi)
-        print(flattened_xsec)
-        return flattened_xsec*rnorm
+        flattened_xsec = (self.sm_sigma + self.sme_left*poi[0] + self.sme_right * poi[1])/self.sm_sigma
+        output = tf.reshape(flattened_xsec, [-1, 1])
+        return output
 
-    

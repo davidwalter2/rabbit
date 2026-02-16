@@ -402,7 +402,7 @@ class Fitter:
         # add offset to pois
         self._blinding_values_poi = np.ones(self.poi_model.npoi, dtype=np.float64)
         for i in range(self.poi_model.npoi):
-            param = self.indata.signals[i]
+            param = self.poi_model.pois[i]
             if param in unblind_parameters:
                 continue
             logger.debug(f"Blind signal strength modifier for {param}")
