@@ -40,10 +40,11 @@ class LIV(POIModel):
         
         self.indata = indata
         self.is_linear = False
+        print(self.is_linear)
         self.allowNegativePOI = True
         # self.npoi = 2
         # self.pois = np.array(["cxx_u,L", "cxx_u,R"])
-        # self.xpoidefault = np.array([1e-5, 1e-5])
+        # self.xpoidefault = np.array([1, 1])
 
 
         self.npoi = 1
@@ -76,20 +77,37 @@ class LIV(POIModel):
         with open(add_dir + sme_L_filename, "rb") as f:
             precomp_dict = pickle.load(f)
         
-        self.sme_left = tf.cast(np.array(precomp_dict["values"])[:, 9].flatten(), dtype = tf.float64)
+        # self.sme_left = tf.cast(np.array(precomp_dict["values"][:, 9]).flatten(), dtype = tf.float64)
+        # #sme_right[time][mll]
+        # with open(add_dir + sme_R_filename, "rb") as f:
+        #     precomp_dict = pickle.load(f)
+            
+        # self.sme_right = tf.cast(np.array(precomp_dict["values"][:, 9]).flatten(), dtype = tf.float64)
+        # #sm_sigma[mll]
+        # with open(add_dir + sm_filename, "rb") as f:
+        #     precomp_dict = pickle.load(f)
+            
+        # self.sm_sigma = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
+        
+
+        
+        self.sme_left = tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64)
         #sme_right[time][mll]
         with open(add_dir + sme_R_filename, "rb") as f:
             precomp_dict = pickle.load(f)
             
-        self.sme_right = tf.cast(np.array(precomp_dict["values"])[:, 9].flatten(), dtype = tf.float64)
+        self.sme_right = tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64)
         #sm_sigma[mll]
         with open(add_dir + sm_filename, "rb") as f:
             precomp_dict = pickle.load(f)
             
-        self.sm_sigma = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
+        sm_sigma = tf.cast([precomp_dict["values"]]*self.nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
+        
+        
+        self.sm_sigma = tf.reshape(sm_sigma, [-1, 1])[:, 0]
         
     def compute(self, poi):
-        flattened_xsec = (self.sm_sigma + self.sme_left*poi[0]*1e-6)/self.sm_sigma #  + self.sme_right * poi[1]
+        flattened_xsec = (self.sm_sigma + self.sme_left * poi[0]*1e-6)/self.sm_sigma #   + self.sme_right*poi[1]*1e-6
         output = tf.reshape(flattened_xsec, [-1, 1])
         return output
 
