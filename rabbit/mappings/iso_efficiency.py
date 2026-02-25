@@ -129,7 +129,7 @@ class ISO(Mapping):
         axis_selection_h2, axes_rebin_h2, axes_sum_h2 = helpers.parse_axis_selection(
             sel_args[1]
         )
-
+        # pdb.set_trace()
         key = " ".join([cls.__name__, *args])
 
 
@@ -151,9 +151,10 @@ class ISO(Mapping):
     def compute_flat(self, params, observables):
         h3 = self.h3.select(observables, inclusive=True)
         h2 = self.h2.select(observables, inclusive=True)
-        h1_iso = self.h2.select(observables, inclusive=True)[:, :1, :]
-        h2_iso = tf.concat([h1_iso, h2], axis = 1)
+        h1_iso = self.h2.select(observables, inclusive=True)[:, :, :1, :]
+        h2_iso = tf.concat([h1_iso, h2], axis = 2)
         eps_iso = 2*h3/(h2_iso + 2*h3)
+        # pdb.set_trace()
         eps_iso = tf.reshape(eps_iso, [-1])
 
         return eps_iso

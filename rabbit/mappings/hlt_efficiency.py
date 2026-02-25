@@ -177,15 +177,15 @@ class HLT(Mapping):
     def compute_flat(self, params, observables):
         h3 = self.h3.select(observables, inclusive=True)
         h2 = self.h2.select(observables, inclusive=True)
-        h2_hlt = self.h2.select(observables, inclusive=True)[:, :1, :]
+        h2_hlt = self.h2.select(observables, inclusive=True)[:, :, :1, :]
 
-        h2_iso = tf.concat([h2_hlt, h2], axis = 1)
+        h2_iso = tf.concat([h2_hlt, h2], axis = 2)
         eps_iso = 2*h3/(h2_iso + 2*h3)
         
-        h1_hlt = self.h1.select(observables, inclusive=True)[:, 1:, :]
+        h1_hlt = self.h1.select(observables, inclusive=True)[:, :, 1:, :]
 
         ones = h2/h2
-        eps_hlt = h2/(h2 + h1_hlt*(ones-eps_iso[:, 1:, :]))
+        eps_hlt = h2/(h2 + h1_hlt*(ones-eps_iso[:, :, 1:, :]))
         eps_hlt = tf.reshape(eps_hlt, [-1])
 
         return eps_hlt
