@@ -10,22 +10,6 @@ from scripts.plotting.uncertainty_tools import *
 from rabbit.poi_models.poi_model import POIModel
 import tensorflow as tf
 
-
-def tf_simpson(y_list, x):
-
-    y = tf.stack(y_list)  # shape: (N,)
-    x = tf.convert_to_tensor(x, dtype=tf.float64)
-       
-    # Simpson's rule segments (assumes x can be non-uniform)
-    h = x[2:] - x[:-2]  # distance between y[i] and y[i+2]
-    simpson_sum = y[:-2] + 4*y[1:-1] + y[2:]
-    integral = tf.reduce_sum(h / 6.0 * simpson_sum)
-    
-    # If even number of intervals, add trapezoid for last interval
-
-    return integral
-
-
 class LIV(POIModel):
     def __init__(
         self, 
@@ -40,16 +24,16 @@ class LIV(POIModel):
         
         self.indata = indata
         self.is_linear = False
-        print(self.is_linear)
+
         self.allowNegativePOI = True
-        # self.npoi = 2
-        # self.pois = np.array(["cxx_u,L", "cxx_u,R"])
-        # self.xpoidefault = np.array([1, 1])
+        self.npoi = 2
+        self.pois = np.array(["cxx_u,L", "cxx_u,R"])
+        self.xpoidefault = np.array([1, 1])
 
 
-        self.npoi = 1
-        self.pois = np.array(["cxx_u,L"])
-        self.xpoidefault = np.array([1])
+        # self.npoi = 1
+        # self.pois = np.array(["cxx_u,L"])
+        # self.xpoidefault = np.array([1])
                                      
         file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
         file_in_name = (
@@ -107,7 +91,7 @@ class LIV(POIModel):
         self.sm_sigma = tf.reshape(sm_sigma, [-1, 1])[:, 0]
         
     def compute(self, poi):
-        flattened_xsec = (self.sm_sigma + self.sme_left * poi[0]*1e-6)/self.sm_sigma #   + self.sme_right*poi[1]*1e-6
+        flattened_xsec = (self.sm_sigma + self.sme_left * poi[0]*1e-6+ self.sme_right*poi[1]*1e-6)/self.sm_sigma #   
         output = tf.reshape(flattened_xsec, [-1, 1])
         return output
 

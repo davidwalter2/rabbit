@@ -11,7 +11,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 
 # cxx_val = 1e-4*0.906
-cxx_val = 66e-6
+cxx_val = 1.04e-4
 
 
 # for channel, info in indata.channel_info.items():
@@ -50,8 +50,8 @@ flattened_xsec = (sm_sigma + sme_left*cxx_val + sme_right * 0)/sm_sigma
 print(flattened_xsec)
 times = np.linspace(0, 24, 24)
 plt.step(times, flattened_xsec, where = "post")
-outdir = "/home/submit/jbenke/public_html/wilson_coeff_fits/"
-date = "2026-02-17/"
+outdir = "/home/submit/jbenke/public_html/theory_predictions/"
+date = "2026-02-18/"
 plt.ylim([0.99, 1.01])
 plt.title(f"WC = {cxx_val}")
 filename = f"sigma_sme_sigma_sm_{cxx_val}"
