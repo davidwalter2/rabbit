@@ -10,36 +10,70 @@ from scripts.plotting.uncertainty_tools import *
 from rabbit.poi_models.poi_model import POIModel
 import tensorflow as tf
 
+
 class LIV(POIModel):
+   
+    
+    @classmethod
+    def parse_args(cls, indata, *args, **kwargs):
+        """
+        parsing the input arguments into the constructor, is has to be called as
+        --poiModel Mixture coeff
+        """
+        ## coeff is of the form "xxuL"
+        
+        ### should write custom cases
+        complete_args = []
+        if "all" not in args:
+            for coeff in args:
+                if len(coeff) != 4:
+                    if len(coeff) == 2: ##xx, for example
+                        ### u and d should be the same
+                        complete_args.append(f"{coeff}uL")   
+                        complete_args.append(f"{coeff}uR")  
+                        complete_args.append(f"{coeff}dR") 
+                        complete_args.append(f"{coeff}sL")   
+                        complete_args.append(f"{coeff}sR") 
+                    elif len(coeff) == 3: #xxu, for example
+                        complete_args.append(f"{coeff}L")   
+                        complete_args.append(f"{coeff}R")  
+                else:
+                    complete_args.append(coeff)
+        
+        else:
+            all_coeffs = ["xx", "xy", "xz", "yz"]
+            for coeff in all_coeffs:
+                complete_args.append(f"{coeff}uL")   
+                complete_args.append(f"{coeff}uR")  
+                complete_args.append(f"{coeff}dR") 
+                complete_args.append(f"{coeff}sL")   
+                complete_args.append(f"{coeff}sR") 
+            
+        return cls(indata, complete_args, **kwargs)
+    
     def __init__(
         self, 
         indata,
-        # npoi, 
-        # poi_names,
-        # poi_defaults,
-        # left_tensor, #CL
-        # right_tensor, #CR
+        coeff,
         **kwargs
     ):
         
+        print(len(coeff))
         self.indata = indata
         self.is_linear = False
 
         self.allowNegativePOI = True
-        self.npoi = 2
-        self.pois = np.array(["cxx_u,L", "cxx_u,R"])
-        self.xpoidefault = np.array([1, 1])
+        self.npoi = len(coeff)
+        self.pois = np.array([f"c_{coeff[i]}" for i in range(self.npoi)])
+        self.xpoidefault = np.array([1]*self.npoi)
 
-
-        # self.npoi = 1
-        # self.pois = np.array(["cxx_u,L"])
-        # self.xpoidefault = np.array([1])
-                                     
-        file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
-        file_in_name = (
-            file_in + "mz_dilepton_liv_scetlib_dyturbo_CT18Z_N3p0LL_N2LO_Corr.hdf5"
-        )  # _maxFiles_20
-        h5file = h5py.File(file_in_name, "r")
+                   
+        ref_file = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
+        ref_file_name = (
+            ref_file + "mz_dilepton_liv_scetlib_dyturbo_all_bins.hdf5"
+            # file_in + "mz_dilepton_liv_scetlib_dyturbo_CT18Z_N3p0LL_N2LO_Corr.hdf5"
+        ) 
+        h5file = h5py.File(ref_file_name, "r")
         results = input_tools.load_results_h5py(h5file)
         data_output = results["SingleMuon_2016PostVFP"]["output"]
         ex_histogram = data_output["time_proj"].get()
@@ -48,50 +82,36 @@ class LIV(POIModel):
         self.Q_max = int(ex_histogram.axes["mll"][-1][1])
         self.nTimeBins = len(ex_histogram.axes["time"])
         self.nMassBins = len(ex_histogram.axes["mll"])
-
-        self.coeff = "cxx"
-        self.quark = "u"
+        
         add_dir = "/home/submit/jbenke/WRemnants/rabbit/rabbit/poi_models/precomputed_sigma/"
-        sme_L_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins_{self.coeff}_{self.quark}_L.pkl"
-        sme_R_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins_{self.coeff}_{self.quark}_R.pkl"
+            
         sm_filename = f"SM_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins.pkl" 
         
-        ## for now select the largest mass bin
-        #sme_left[time][mll]
-        with open(add_dir + sme_L_filename, "rb") as f:
-            precomp_dict = pickle.load(f)
-        
-        # self.sme_left = tf.cast(np.array(precomp_dict["values"][:, 9]).flatten(), dtype = tf.float64)
-        # #sme_right[time][mll]
-        # with open(add_dir + sme_R_filename, "rb") as f:
-        #     precomp_dict = pickle.load(f)
-            
-        # self.sme_right = tf.cast(np.array(precomp_dict["values"][:, 9]).flatten(), dtype = tf.float64)
-        # #sm_sigma[mll]
-        # with open(add_dir + sm_filename, "rb") as f:
-        #     precomp_dict = pickle.load(f)
-            
-        # self.sm_sigma = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
-        
-
-        
-        self.sme_left = tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64)
-        #sme_right[time][mll]
-        with open(add_dir + sme_R_filename, "rb") as f:
-            precomp_dict = pickle.load(f)
-            
-        self.sme_right = tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64)
-        #sm_sigma[mll]
         with open(add_dir + sm_filename, "rb") as f:
             precomp_dict = pickle.load(f)
             
-        sm_sigma = tf.cast([precomp_dict["values"]]*self.nTimeBins, dtype = tf.float64) ## will need to expand this to duplicate along time axis
+        sm_sigma = tf.cast([precomp_dict["values"]]*self.nTimeBins, dtype = tf.float64)          
+        self.sm_sigma = tf.reshape(sm_sigma, [-1, 1])[:, 0] ## flattens it
         
         
-        self.sm_sigma = tf.reshape(sm_sigma, [-1, 1])[:, 0]
+        sme_all = []
+        for c in coeff:
+            tensor = c[:2]
+            quark = c[2]
+            hand = c[3]
+            sme_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins_c{tensor}_{quark}_{hand}.pkl"
+
+            #sme[time][mll]
+            with open(add_dir + sme_filename, "rb") as f:
+                precomp_dict = pickle.load(f)
+            sme_all.append(tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64))
+        self.sme = np.array(sme_all)
+        
         
     def compute(self, poi):
-        flattened_xsec = (self.sm_sigma + self.sme_left * poi[0]*1e-6+ self.sme_right*poi[1]*1e-6)/self.sm_sigma #   
+        flattened_xsec = self.sm_sigma/self.sm_sigma
+        for i in range(len(poi)):
+            flattened_xsec += (self.sme[i] * poi[i]*1e-6)/self.sm_sigma
         output = tf.reshape(flattened_xsec, [-1, 1])
         return output
 
