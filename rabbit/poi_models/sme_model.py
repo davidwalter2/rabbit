@@ -27,28 +27,50 @@ class LIV(POIModel):
         if "all" not in args:
             for coeff in args:
                 if len(coeff) != 4:
-                    if len(coeff) == 2: ##xx, for example
-                        ### u and d should be the same
-                        complete_args.append(f"{coeff}uL")   
-                        complete_args.append(f"{coeff}uR")  
-                        complete_args.append(f"{coeff}dR") 
-                        complete_args.append(f"{coeff}sL")   
-                        complete_args.append(f"{coeff}sR") 
-                    elif len(coeff) == 3: #xxu, for example
-                        complete_args.append(f"{coeff}L")   
-                        complete_args.append(f"{coeff}R")  
+                    if coeff[0] != "d" and  coeff[0] != "c":
+                        if len(coeff) == 1: ##u, for example
+                            complete_args.append(f"cxx{coeff}")   
+                            complete_args.append(f"dxx{coeff}")  
+                            complete_args.append(f"cxy{coeff}")   
+                            complete_args.append(f"dxy{coeff}")  
+                            complete_args.append(f"cxz{coeff}")   
+                            complete_args.append(f"dxz{coeff}")  
+                            complete_args.append(f"cyz{coeff}")   
+                            complete_args.append(f"dyz{coeff}")
+                        elif len(coeff) == 2: #xx
+                            complete_args.append(f"c{coeff}u")   
+                            complete_args.append(f"d{coeff}u")
+                            complete_args.append(f"c{coeff}d")   
+                            complete_args.append(f"c{coeff}s")   
+                            complete_args.append(f"d{coeff}s")
+                        elif len(coeff) == 3: #xxu, for example
+                            complete_args.append(f"c{coeff}")   
+                            complete_args.append(f"d{coeff}")  
+                    else:
+                        if len(coeff) == 3:  #cxx
+                            complete_args.append(f"{coeff}u")   
+                            complete_args.append(f"{coeff}d")
+                            complete_args.append(f"{coeff}s")  
+
                 else:
                     complete_args.append(coeff)
         
         else:
             all_coeffs = ["xx", "xy", "xz", "yz"]
             for coeff in all_coeffs:
-                complete_args.append(f"{coeff}uL")   
-                complete_args.append(f"{coeff}uR")  
-                complete_args.append(f"{coeff}dR") 
-                complete_args.append(f"{coeff}sL")   
-                complete_args.append(f"{coeff}sR") 
+                complete_args.append(f"c{coeff}u")   
+                complete_args.append(f"c{coeff}d")  
+                complete_args.append(f"d{coeff}u") 
+                complete_args.append(f"d{coeff}d")   
+                complete_args.append(f"c{coeff}s") 
+                complete_args.append(f"d{coeff}s") 
             
+        
+        # i want to split this by generation so maybe do cxx1U so it goes type-generation-coefficient or dxx1U
+        ## cxxu, cxxd, dxxu, dxxd
+        
+        
+        ### expect coefficients of the form cu1 which is type-quark
         return cls(indata, complete_args, **kwargs)
     
     def __init__(
@@ -64,7 +86,7 @@ class LIV(POIModel):
 
         self.allowNegativePOI = True
         self.npoi = len(coeff)
-        self.pois = np.array([f"c_{coeff[i]}" for i in range(self.npoi)])
+        self.pois = np.array([f"{coeff[i]}" for i in range(self.npoi)])
         self.xpoidefault = np.array([1]*self.npoi)
 
                    
@@ -95,16 +117,26 @@ class LIV(POIModel):
         
         
         sme_all = []
+        print(coeff)
         for c in coeff:
-            tensor = c[:2]
-            quark = c[2]
-            hand = c[3]
-            sme_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins_c{tensor}_{quark}_{hand}.pkl"
-
+            tensor = c[1:3]
+            quark = c[-1]
+            sme_L_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins_c{tensor}_{quark}_L.pkl"
             #sme[time][mll]
-            with open(add_dir + sme_filename, "rb") as f:
+            with open(add_dir + sme_L_filename, "rb") as f:
                 precomp_dict = pickle.load(f)
-            sme_all.append(tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64))
+            sme_left = tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64)
+            sme_R_filename = sme_L_filename[:-5] + "R" + sme_L_filename[-4:]
+            #sme[time][mll]
+            with open(add_dir + sme_R_filename, "rb") as f:
+                precomp_dict = pickle.load(f)
+            sme_right = tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64)
+            
+            if c[0] == 'd':
+                sme_all.append(1/2*(sme_left - sme_right))
+            elif c[0] == 'c':
+                sme_all.append(1/2*(sme_left + sme_right))
+
         self.sme = np.array(sme_all)
         
         
