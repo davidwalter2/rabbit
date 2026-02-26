@@ -244,27 +244,28 @@ class NormID(ID):
         super().__init__(*args, **kwargs)
 
     def compute_flat(self, params, observables):
-        original_shape = [24, 10, 6] 
-        ## so these are unfolded as time, mass, pt, eta
-        h2 = self.h2.select(observables, normalize = True, inclusive=True)
-        # h1_hlt = self.h1.select(observables,normalize = True,  inclusive=True)[:, 1:, :]
+        h3 = self.h3.select(observables, normalize = True, inclusive=True)
+        h2 = self.h2.select(observables, normalize = True,inclusive=True)
         h1 = self.h1.select(observables, normalize = True, inclusive=True)
         h0 = self.h0.select(observables, normalize = True, inclusive=True)
-
-        h2 = tf.reshape(h2, original_shape)
+        original_shape = [24, 2, 10, 6] 
+        hlt_shape = [24, 2, 9, 6]
+       
+        h3 = tf.reshape(h3, original_shape)
+        h2 = tf.reshape(h2, hlt_shape) ## need to make sure this reshaping is in the correct order
         h1 = tf.reshape(h1, original_shape)
-        h1_hlt = h2[:, 1, :]
         h0 = tf.reshape(h0, original_shape)
+        h2_iso = h2[:, :, :1, :]
+        h1_hlt = tf.reshape(h1, original_shape)[:, :, 1:, :]
         
+        h2_iso = tf.concat([h2_iso, h2], axis = 2)
         
-        eps_hlt = h2/(h1_hlt + h2)
+        eps_iso = 2*h3/(h2_iso + 2*h3)
         
-        eps_hlt_expanded = tf.zeros(shape=[2, 1, 3], dtype = tf.float64)  # or tf.ones, or any values you want
-        eps_hlt_expanded = tf.concat([eps_hlt_expanded, eps_hlt], axis = 1)
+        eps_hlt = h2/(h2 + h1_hlt*(1-eps_iso[:,:, 1:, :]))
+        eps_hlt_expanded = tf.zeros(shape=[24, 2, 1, 6], dtype = tf.float64)  # or tf.ones, or any values you want
+        eps_hlt_expanded = tf.concat([eps_hlt_expanded, eps_hlt], axis = 2)
        
         eps_id = h1/(h1 + h0*(1-eps_hlt_expanded))
-        # pdb.set_trace()
-        
         eps_id = tf.reshape(eps_id, [-1])
-
         return eps_id
