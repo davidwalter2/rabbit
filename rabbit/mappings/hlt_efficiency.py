@@ -1,3 +1,4 @@
+
 import hist
 import tensorflow as tf
 
@@ -177,13 +178,22 @@ class HLT(Mapping):
     def compute_flat(self, params, observables):
         h3 = self.h3.select(observables, inclusive=True)
         h2 = self.h2.select(observables, inclusive=True)
-        h2_hlt = self.h2.select(observables, inclusive=True)[:, :, :1, :]
+        h1 = self.h1.select(observables, inclusive=True)
+        original_shape = [24, 2, 10, 6] 
+        hlt_shape = [24, 2, 9, 6]
+        
+        h3 = tf.reshape(h3, original_shape)
+        h2 = tf.reshape(h2, hlt_shape) ## need to make sure this reshaping is in the correct order
+        h2_hlt = h2[:, :, :1, :]
+        h1_hlt = tf.reshape(h1, original_shape)[:, :, 1:, :]
+        
+        # h2_hlt = self.h2.select(observables, inclusive=True)[:, :, :1, :]
 
         h2_iso = tf.concat([h2_hlt, h2], axis = 2)
         eps_iso = 2*h3/(h2_iso + 2*h3)
         
-        h1_hlt = self.h1.select(observables, inclusive=True)[:, :, 1:, :]
-
+        # h1_hlt = self.h1.select(observables, inclusive=True)[:, :, 1:, :]
+        
         ones = h2/h2
         eps_hlt = h2/(h2 + h1_hlt*(ones-eps_iso[:, :, 1:, :]))
         eps_hlt = tf.reshape(eps_hlt, [-1])
@@ -205,16 +215,22 @@ class NormHLT(HLT):
         super().__init__(*args, **kwargs)
 
     def compute_flat(self, params, observables):
-        h2_hlt = self.h2.select(observables,normalize = True,  inclusive=True)[:, 1:, :]
-        h1 = self.h1.select(observables, normalize = True, inclusive=True)
-
         h3 = self.h3.select(observables, normalize = True, inclusive=True)
         h2 = self.h2.select(observables, normalize = True, inclusive=True)
+        h1 = self.h1.select(observables, normalize = True, inclusive=True)
+        original_shape = [24, 2, 10, 6] 
+        hlt_shape = [24, 2, 9, 6]
         
-        eps_iso = h3/(h2 + h3)
-        eps_iso = tf.reshape(eps_iso, [-1])
+        h3 = tf.reshape(h3, original_shape)
+        h2 = tf.reshape(h2, hlt_shape) ## need to make sure this reshaping is in the correct order
+        h2_hlt = h2[:, :, :1, :]
+        h1_hlt = tf.reshape(h1, original_shape)[:, :, 1:, :]
         
-        eps_hlt = h2_hlt/(h2_hlt + h1*(1-eps_iso[:, 1:, :]))
+        h2_iso = tf.concat([h2_hlt, h2], axis = 2)
+        eps_iso = 2*h3/(h2_iso + 2*h3)
+                
+        ones = h2/h2
+        eps_hlt = h2/(h2 + h1_hlt*(ones-eps_iso[:, :, 1:, :]))
         eps_hlt = tf.reshape(eps_hlt, [-1])
 
         return eps_hlt

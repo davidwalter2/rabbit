@@ -149,12 +149,19 @@ class ISO(Mapping):
         )
 
     def compute_flat(self, params, observables):
+        
+        original_shape = [24, 2, 10, 6] 
+        hlt_shape = [24, 2, 9, 6]
+
         h3 = self.h3.select(observables, inclusive=True)
         h2 = self.h2.select(observables, inclusive=True)
-        h1_iso = self.h2.select(observables, inclusive=True)[:, :, :1, :]
-        h2_iso = tf.concat([h1_iso, h2], axis = 2)
+        
+        h3 = tf.reshape(h3, original_shape)
+        h2 = tf.reshape(h2, hlt_shape) ## need to make sure this reshaping is in the correct order
+        h2_iso = h2[:, :, :1, :]
+      
+        h2_iso = tf.concat([h2_iso, h2], axis = 2)
         eps_iso = 2*h3/(h2_iso + 2*h3)
-        # pdb.set_trace()
         eps_iso = tf.reshape(eps_iso, [-1])
 
         return eps_iso
@@ -174,9 +181,18 @@ class NormISO(ISO):
         super().__init__(*args, **kwargs)
 
     def compute_flat(self, params, observables):
+        original_shape = [24, 2, 10, 6] 
+        hlt_shape = [24, 2, 9, 6]
+
         h3 = self.h3.select(observables, normalize = True, inclusive=True)
         h2 = self.h2.select(observables, normalize = True, inclusive=True)
-        eps_iso = h3/(h2 + h3)
+        
+        h3 = tf.reshape(h3, original_shape)
+        h2 = tf.reshape(h2, hlt_shape) ## need to make sure this reshaping is in the correct order
+        h2_iso = h2[:, :, :1, :]
+      
+        h2_iso = tf.concat([h2_iso, h2], axis = 2)
+        eps_iso = 2*h3/(h2_iso + 2*h3)
         eps_iso = tf.reshape(eps_iso, [-1])
 
         return eps_iso
