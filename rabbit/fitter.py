@@ -22,17 +22,19 @@ def solve_quad_eq(a, b, c):
 def match_regexp_params(regular_expressions, parameter_names):
     if isinstance(regular_expressions, str):
         regular_expressions = [regular_expressions]
-    
+
     # Check for exact matches first
-    exact_matches = [s for expr in regular_expressions 
-                     for s in parameter_names if s.decode() == expr]
+    exact_matches = [
+        s for expr in regular_expressions for s in parameter_names if s.decode() == expr
+    ]
     if exact_matches:
         return exact_matches
-    
+
     # Fall back to regex matching
     compiled_expressions = [re.compile(expr) for expr in regular_expressions]
     return [
-        s for s in parameter_names
+        s
+        for s in parameter_names
         if any(regex.match(s.decode()) for regex in compiled_expressions)
     ]
 

@@ -197,7 +197,7 @@ rabbit_print_impacts results/fitresult.hdf5
 
 We use pre-commit hooks and linters in the CI. Activate git pre-commit hooks (only need to do this once when checking out)
 ```
-git config --local include.path ../.gitconfig
+git config --local include.path ../.gitconfig 
 ```
 In case rabbit is included as a submodule, use instead:
 ```
