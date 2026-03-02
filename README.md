@@ -56,7 +56,7 @@ python -m venv env
 Then activate it and install the necessary packages
 ```bash
 source env/bin/activate
-pip install wums[pickling,plotting] tensorflow tensorflow-probability numpy h5py hist scipy matplotlib mplhep seaborn pandas plotly kaleido
+pip install wums[pickling,plotting] tensorflow tensorflow-probability tf_keras numpy h5py hist scipy matplotlib mplhep seaborn pandas plotly kaleido
 ```
 The packages `matplotlib`, `mplhep`, `seaborn`, `pandas`, `plotly`, and `kaleido` are only needed for the plotting scripts. 
 For the `text2hdf5.py` conversion also the `uproot` package is needed.
