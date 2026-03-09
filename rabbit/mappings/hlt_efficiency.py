@@ -109,6 +109,27 @@ class HLT(Mapping):
                 "flow": flow,
             }
         }
+        
+        pt_ax_found = False
+        i = 0
+        while pt_ax_found == False:
+            if self.h3.channel_axes[i].name == "pt_probe":
+                self.pt_ax = i
+                pt_ax_found = True
+            else:
+                i += 1
+
+        high_slices = [slice(None)] * len(self.h3.channel_axes)
+        high_slices[self.pt_ax] = slice(1, None)
+        self.high_slice = high_slices
+        
+        low_slices = [slice(None)] * len(self.h3.channel_axes)
+        low_slices[self.pt_ax] = slice(None, 1)
+        self.low_slice = low_slices
+
+        
+        
+        
 
     @classmethod
     def parse_args(cls, indata, *args):
@@ -184,15 +205,20 @@ class HLT(Mapping):
         
         # h3 = tf.reshape(h3, original_shape)
         # h2 = tf.reshape(h2, hlt_shape) ## need to make sure this reshaping is in the correct order
-        h2_iso = h2[:, :1, :]
-        h1_hlt = h1[:, 1:, :]
+        
+        h2_iso = h2[tuple(self.low_slice)]
+        # h2_iso = h2[:, :1, :]
+        h1_hlt = h1[tuple(self.high_slice)]
+
+        # h1_hlt = h1[:, 1:, :]
         # tf.reshape(h1, original_shape)
         
-        h2_iso = tf.concat([h2_iso, h2], axis = 1)
+        h2_iso = tf.concat([h2_iso, h2], axis = self.pt_ax)
         eps_iso = 2*h3/(h2_iso + 2*h3)
                 
         ones = h2/h2
-        eps_hlt = h2/(h2 + h1_hlt*(ones-eps_iso[:, 1:, :]))
+        eps_iso = eps_iso[tuple(self.high_slice)]
+        eps_hlt = h2/(h2 + h1_hlt*(ones-eps_iso))
         eps_hlt = tf.reshape(eps_hlt, [-1])
 
         return eps_hlt

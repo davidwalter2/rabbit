@@ -94,6 +94,19 @@ class ISO(Mapping):
                 "flow": flow,
             }
         }
+        
+        pt_ax_found = False
+        i = 0
+        while pt_ax_found == False:
+            if self.h3.channel_axes[i].name == "pt_probe":
+                self.pt_ax = i
+                pt_ax_found = True
+            else:
+                i += 1
+
+        slices = [slice(None)] * len(self.h3.channel_axes)
+        slices[self.pt_ax] = slice(None, 1)
+        self.low_slice = slices
 
     @classmethod
     def parse_args(cls, indata, *args):
@@ -150,17 +163,15 @@ class ISO(Mapping):
 
     def compute_flat(self, params, observables):
         
-        # original_shape = [24, 2, 10, 6] 
-        # hlt_shape = [24, 2, 9, 6]
-
         h3 = self.h3.select(observables, inclusive=True)
         h2 = self.h2.select(observables, inclusive=True)
-        
+    
         # h3 = tf.reshape(h3, original_shape)
         # h2 = tf.reshape(h2, hlt_shape) ## need to make sure this reshaping is in the correct order
-        h2_iso = h2[:, :1, :]
-      
-        h2_iso = tf.concat([h2_iso, h2], axis = 1)
+        # h2_iso = h2[:, :1, :]
+    
+        h2_iso = h2[tuple(self.low_slice)]
+        h2_iso = tf.concat([h2_iso, h2], axis = self.pt_ax)
         eps_iso = 2*h3/(h2_iso + 2*h3)
         eps_iso = tf.reshape(eps_iso, [-1])
 
