@@ -506,18 +506,18 @@ def make_plot(
                 this_color = eta_colormap[j]
             
 
-            hep.histplot(
-                h_inclusive[{f"{axis_name}": j}],
-                histtype = histtype_mc,
-                xerr=False,
-                yerr=False,
-                color=this_color,
-                label = f"{axis_name} bin {j}",
-                binwnorm=binwnorm,
-                ax=ax1,
-                zorder = 1,
-                flow="none",
-            )
+            # hep.histplot(
+            #     h_inclusive[{f"{axis_name}": j}],
+            #     histtype = histtype_mc,
+            #     xerr=False,
+            #     yerr=False,
+            #     color=this_color,
+            #     label = f"{axis_name} bin {j}",
+            #     binwnorm=binwnorm,
+            #     ax=ax1,
+            #     zorder = 1,
+            #     flow="none",
+            # )
             data_color = this_color
             if args.fixed_param != "time":
                 data_color = this_color
@@ -628,7 +628,7 @@ def make_plot(
         outfile = f"{other_axis}_{axis_name}_{args.title}"
 
         if other_axis == "time":
-            ax1.set_xlabel("sidereal time")
+            ax1.set_xlabel("Sidereal time (hr)")
             
         if args.prefit:
             outfile += "_prefit"
@@ -722,6 +722,7 @@ def make_plot(
                 )
 
         for j in range(len(h_inclusive[{f"{other_axis}": 0}].values())):
+        # for j in range(0, 3):
             cutoff = 0.01
             this_color = colormaps["tab20"](j)
             if other_axis == "pt":
@@ -804,9 +805,9 @@ def make_plot(
             if args.title == "ID":
                 ax1.set_ylim(0.97, 1.02)
             elif args.title == "ISO":
-                ax1.set_ylim(0.99, 1.02)
+                ax1.set_ylim(0.98, 1.04)
             else:
-                ax1.set_ylim(0.9, 1.02)
+                ax1.set_ylim(0.92, 1.04)
 
             plot_tools.add_decor(
             ax1,
@@ -819,7 +820,7 @@ def make_plot(
             )
 
             ax1.legend(loc='upper right', ncols = 2, fontsize = 14)
-            ax1.set_ylabel("scale factor")
+            ax1.set_ylabel("SF")
             if root_comp:
                 outfile += f"_scale_{j}"
                 plot_tools.save_pdf_and_png(outdir, outfile)

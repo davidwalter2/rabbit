@@ -451,12 +451,12 @@ def reweight_wmass_eff():
     
 def get_true_efficiencies():
     file_in = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
-    file_in_name = file_in + "mz_dilepton_liv_scetlib_dyturboCorr.hdf5"  # _maxFiles_20
+    file_in_name = file_in + "mz_dilepton_liv_scetlib_dyturbo_all_bins.hdf5"  # _maxFiles_20
     h5file = h5py.File(file_in_name, "r")
     results = input_tools.load_results_h5py(h5file)
-    MC_Zmumu = results["ZmumuPostVFP"]["output"]
-    data_output = results["dataPostVFP"]["output"]
-    lumi_output = results["dataPostVFP"]["lumi_outout"]
+    MC_Zmumu = results["Zmumu_2016PostVFP"]["output"]
+    data_output = results["SingleMuon_2016PostVFP"]["output"]
+    lumi_output = results["SingleMuon_2016PostVFP"]["lumi_outout"]
 
     iso = MC_Zmumu["pos_iso"].get()
     trig = MC_Zmumu["pos_trig"].get()
@@ -464,25 +464,25 @@ def get_true_efficiencies():
     global_hist = MC_Zmumu["pos_global"].get()
 
     
-    weightsum = results["ZmumuPostVFP"]["weight_sum"]
-    cross_sec = results["ZmumuPostVFP"]["dataset"]["xsec"]
+    weightsum = results["Zmumu_2016PostVFP"]["weight_sum"]
+    cross_sec = results["Zmumu_2016PostVFP"]["dataset"]["xsec"]
     
     lumi_scaling = lumi_output["lumi_nom"].get()
     time_proj_low_all = data_output["time_proj"].get()
 
     time_proj_low = time_proj_low_all[{"mll": 9, "pt_tag": 3, "eta_tag": 3}]
 
-    iso_corr = all_mc_corrections(
+    iso_corr = mc_scaling(
         iso.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
     )
-    trig_corr = all_mc_corrections(
+    trig_corr = mc_scaling(
         trig.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
     )
     
-    id_corr = all_mc_corrections(
+    id_corr = mc_scaling(
         id_hist.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
     )
-    global_corr = all_mc_corrections(
+    global_corr = mc_scaling(
         global_hist.copy(), time_proj_low, lumi_scaling, weightsum, cross_sec
     )
 
@@ -525,8 +525,6 @@ def make_plot(
     counts=True,
 ):
     
-    ratio = not args.noLowerPanel and h_data is not None ##TRUE
-    diff = not args.noLowerPanel and args.diff and h_data is not None ### FALSE
     data = not args.noData and h_data is not None ## TRUE
 
     
@@ -574,7 +572,7 @@ def make_plot(
         outfile = f"{other_axis}_{axis_name}_{args.title}"
 
         if other_axis == "time":
-            ax1.set_xlabel("sidereal time")
+            ax1.set_xlabel("Sidereal time (hrs)")
             
         if args.prefit:
             outfile += "_prefit"
@@ -634,7 +632,7 @@ def make_plot(
             plt.clf()
             plt.step(eta_ax, np.concatenate((wmass_eta_dist, np.array([wmass_eta_dist[-1]]))), color = "gray", where = "post")
             this_filename = outfile + f"_Wmass_eta_distribution"
-            plt.xlabel("eta")
+            plt.xlabel('$\eta$')
             plt.ylabel("events")
             plot_tools.save_pdf_and_png(outdir , this_filename)
                  
@@ -691,26 +689,31 @@ def make_plot(
                         
                         plt.clf()
                         #w mass
-                        plt.step(eta_ax, np.concatenate((root_result[:, j], np.array([root_result[:, j][-1]]))), color = "gray", label = f"WMass, pt = {pt_ax[j]}", where = "post")
-                        plt.step(edges, np.concatenate((avg_root, np.array([avg_root[-1]]))), color = "k", label = f"WMass unweighted average", where = "post")
-                        plt.step(edges, np.concatenate((weighted_avg_root, np.array([weighted_avg_root[-1]]))), color = "C1", label = f"WMass weighted average", where = "post")
+                        plt.step(eta_ax, np.concatenate((root_result[:, j], np.array([root_result[:, j][-1]]))), color = "gray", label = f"$m_W$", where = "post")
+                        # plt.step(edges, np.concatenate((avg_root, np.array([avg_root[-1]]))), color = "k", label = f"WMass unweighted average", where = "post")
+                        plt.step(edges, np.concatenate((weighted_avg_root, np.array([weighted_avg_root[-1]]))), color = "C1", label = f"$m_W$, weighted average", where = "post")
                         # this analysis
-                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis fitted efficiency, pt = {other_edges[ind]}", where = "post")
+                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"This analysis, fitted $\epsilon$", where = "post")
                         
                         
                         if j != 0 and comp_type == "effMC": 
-                            plt.step(edges, np.concatenate((true_eff_vals, np.array([true_eff_vals[-1]]))), color = 'C2', label = f"this analysis true efficiency", where = "post")
+                            plt.step(edges, np.concatenate((true_eff_vals, np.array([true_eff_vals[-1]]))), color = 'C2', label = f"This analysis, true $\epsilon$", where = "post")
                         
                         plt.legend()
+                        plt.title(f"$p_t$ = {other_edges[ind]} to {other_edges[ind+1]} GeV")
                         #w mass
                         plt.errorbar(eta_ax_centers, root_result[:, j], yerr = root_errors[:, j], color = "gray", fmt = ".")
-                        plt.errorbar(edges_centers, avg_root, yerr = avg_err, color = 'k', fmt = ".")           
+                        # plt.errorbar(edges_centers, avg_root, yerr = avg_err, color = 'k', fmt = ".")           
                         plt.errorbar(edges_centers, weighted_avg_root, yerr = weighted_avg_err, color = 'C1', fmt = ".")           
 
                         # this analysis            
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
                         plt.xlim([eta_ax[0], eta_ax[-1]])
-                        plt.xlabel("eta")
+                        plt.xlabel('$\eta$')
+                        if comp_type != "SF":
+                            plt.ylabel(f"$\epsilon_{{{args.Mappings[0][0]}}}$")
+                        if comp_type == "SF":
+                            plt.ylabel(f"$SF_{{{args.Mappings[0][0]}}}$")        
                         min_val = np.min([np.min(root_result[:, j]), np.min(vals)])
                         max_val = np.max([np.max(root_result[:, j]), np.max(vals)])
                         plt.ylim(min_val * 0.98, max_val*1.02)
@@ -731,16 +734,15 @@ def make_plot(
 
                         plt.clf()
                             
-                        plt.step(pt_ax, avg_root, color = "k", label = f"WMass weighted average", where = "post")
+                        plt.step(pt_ax, avg_root, color = "k", label = f"$m_W$ weighted average", where = "post")
                         
                         unweighted_avg_root = np.average(np.concatenate((root_result[ind_start:ind_end, :], root_result[ind_start:ind_end, :][:, -1][:, None]), axis = 1), axis = 0)
-                        plt.step(pt_ax, unweighted_avg_root, color = "C1", label = f"WMass unweighted average", where = "post")
+                        # plt.step(pt_ax, unweighted_avg_root, color = "C1", label = f"WMass unweighted average", where = "post")
 
 
-                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"this analysis fitted efficiency, eta = {other_edges[j]} to {other_edges[j+1]}", where = "post")
-                        
+                        plt.step(edges, np.concatenate((vals, np.array([vals[-1]]))), color = 'C0', label = f"This analysis, fitted $\epsilon$", where = "post")
                         if comp_type == "effMC": 
-                            plt.step(edges, np.concatenate((true_eff_vals, np.array([true_eff_vals[-1]]))), color = 'C2', label = f"this analysis, true efficiency", where = "post")
+                            plt.step(edges, np.concatenate((true_eff_vals, np.array([true_eff_vals[-1]]))), color = 'C2', label = f"This analysis, true $\epsilon$", where = "post")
                         
                         
                         plt.legend()
@@ -751,10 +753,15 @@ def make_plot(
                             
                             
                         plt.errorbar(pt_ax_centers, avg_root[:-1], yerr = avg_err, color = "k", fmt = ".")                       
-                        plt.errorbar(pt_ax_centers, unweighted_avg_root[:-1], yerr = unweighted_avg_err, color = "C1", fmt = ".")                       
+                        # plt.errorbar(pt_ax_centers, unweighted_avg_root[:-1], yerr = unweighted_avg_err, color = "C1", fmt = ".")                       
                         plt.errorbar(edges_centers, vals, yerr = unc, color = 'C0', fmt = ".")
                         plt.xlim([edges[0], edges[-1]])
-                        plt.xlabel("pt")
+                        plt.xlabel(r"$p_t$ (GeV)")
+                        plt.title(f"$\eta$ = {other_edges[j]} to {other_edges[j+1]}")
+                        if comp_type != "SF":
+                            plt.ylabel(f"$\epsilon_{{{args.Mappings[0][0]}}}$")
+                        if comp_type == "SF":
+                            plt.ylabel(f"$SF_{{{args.Mappings[0][0]}}}$")                        
                         min_val = np.min([np.min(avg_root), np.min(vals)])
                         max_val = np.max([np.max(avg_root), np.max(vals)])
                         plt.ylim(min_val * 0.98, max_val*1.02)
@@ -1039,7 +1046,7 @@ def get_chi2(result, no_chi2=True, fittype="postfit"):
         return None, None, False
 
 
-def main():
+def main(): ### realize im not sure if this is plotting the right thing now that the channels are mutually exclusive. i don't really know what it was plotting in the first place tbh
     args = parseArgs()
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
@@ -1140,7 +1147,6 @@ def main():
                 logger.info(f"Make plot for {instance_key} in channel {channel}")
 
                 info = channel_info.get(channel, {})
-
                 suffix = f"{channel}_{instance_key}"
                 for sign, rpl in [
                     (" ", "_"),
