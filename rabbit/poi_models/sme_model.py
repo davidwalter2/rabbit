@@ -131,11 +131,17 @@ class LIV(POIModel):
         
         ## everything is consistently shaped as 7920
 
-        sm_sigma = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64)    
-        self.sm_sigma =  efficiency_flattening(sm_sigma) ## flattens it
+        sm_sigma_eff = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64) 
         
-
-            
+        sm_sigma_mll = tf.cast([precomp_dict["values"]]*self.nTimeBins, dtype = tf.float64) 
+        sm_sigma_mll = tf.reshape(sm_sigma_mll, [-1, 1])[:, 0] 
+        ## this goes mll, time not time, mll
+        sm_sigma_mll_full = tf.concat([sm_sigma_mll, sm_sigma_mll, sm_sigma_mll, sm_sigma_mll], axis = 0)  
+        
+        self.sm_sigma = tf.concat([efficiency_flattening(sm_sigma_eff), sm_sigma_mll_full], axis = 0) ## flattens it
+        
+        # self.sm_sigma = efficiency_flattening(sm_sigma_eff)
+        
         sme_all = []
         print(coeff)
         for c in coeff:
@@ -145,28 +151,41 @@ class LIV(POIModel):
             #sme[time][mll]
             with open(add_dir + sme_L_filename, "rb") as f:
                 precomp_dict = pickle.load(f)
-            sme_left = tf.cast([precomp_dict["values"][:, 9]], dtype = tf.float64)
-            sme_left = tf.reshape(sme_left, [-1, 1])[:, 0] ## flattens it
-            sme_left_full = efficiency_flattening(sme_left)
+            sme_left_eff = tf.cast([precomp_dict["values"][:, 9]], dtype = tf.float64)
+            sme_left_eff = tf.reshape(sme_left_eff, [-1, 1])[:, 0] ## flattens it
+            sme_left_eff_full = efficiency_flattening(sme_left_eff)
+            
+            sme_left_mll = tf.cast([precomp_dict["values"]], dtype = tf.float64)
+            sme_left_mll = tf.reshape(sme_left_mll, [-1, 1])[:, 0] ## flattens it
+
+            sme_left_mll_full = tf.concat([sme_left_mll, sme_left_mll, sme_left_mll, sme_left_mll], axis = 0)
+            sme_left_full = tf.concat([sme_left_eff_full, sme_left_mll_full], axis = 0)
+
+            # sme_left_full =sme_left_eff_full
+
+
+
+
 
             sme_R_filename = sme_L_filename[:-5] + "R" + sme_L_filename[-4:]
             #sme[time][mll]
             with open(add_dir + sme_R_filename, "rb") as f:
                 precomp_dict = pickle.load(f)
-            sme_right = tf.cast([precomp_dict["values"][:, 9]], dtype = tf.float64)
-            sme_right = tf.reshape(sme_right, [-1, 1])[:, 0] ## flattens it
+            sme_right_eff = tf.cast([precomp_dict["values"][:, 9]], dtype = tf.float64)
+            sme_right_eff = tf.reshape(sme_right_eff, [-1, 1])[:, 0] ## flattens it
+            sme_right_eff_full = efficiency_flattening(sme_right_eff)
+            
+            sme_right_mll = tf.cast([precomp_dict["values"]], dtype = tf.float64)
+            sme_right_mll = tf.reshape(sme_right_mll, [-1, 1])[:, 0] ## flattens it
 
-            sme_right_full = efficiency_flattening(sme_right)
+            sme_right_mll_full = tf.concat([sme_right_mll, sme_right_mll, sme_right_mll, sme_right_mll], axis = 0)
+            sme_right_full = tf.concat([sme_right_eff_full, sme_right_mll_full], axis = 0)
+            # sme_right_full =sme_right_eff_full
             
             if c[0] == 'd':
                 sme_all.append(1/2*(sme_left_full - sme_right_full))
             elif c[0] == 'c':
                 sme_all.append(1/2*(sme_left_full + sme_right_full))
-        
-        
-        # input_shape = ex_histogram 
-        # input_h2_shape = remove_low_bins(ex_histogram)
-        
         
         self.sme = np.array(sme_all)
 
