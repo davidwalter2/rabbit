@@ -9,7 +9,8 @@ from sme_functions import *
 times, pm, pn = get_hour_array() ## i only want to compte this once when i do the 
 t = time.time()
 
-mass_bins = [15, 30, 40, 45, 50, 55, 60, 65, 70, 76, 106, 110, 115, 120]
+# mass_bins = [15, 30, 40, 45, 50, 55, 60, 65, 70, 76, 106, 110, 115, 120]
+mass_bins = [50, 91, 120]
 sme_filename = f"SME_{mass_bins[0]}_to_{mass_bins[-1]}_GeV_{len(mass_bins)-1}_bins.pkl"
 sm_filename = f"SM_{mass_bins[0]}_to_{mass_bins[-1]}_GeV_{len(mass_bins)-1}_bins.pkl"
 
@@ -25,8 +26,8 @@ all_precomputed_values = []
 all_sm_values = []
 
 precomputed = False
-SME = False
-summation = True    
+SME = True
+summation = True  
 if not SME and not summation:
     for m in range(n_mass_bins):
     # for i in range(9,10):
@@ -50,7 +51,6 @@ if SME and not summation:
             precomputed = False
     for t in range(n_time_bins): #time
         for m in range(n_mass_bins):
-        # for i in range(1):
             if precomputed:
                 integral_liv = sme(mass_bins[m], mass_bins[m+1], pm[t], pn[t], wilson_couplings, precomputed = True, precomputed_values = precomp_dict_sme["values"][m])
             else:
@@ -106,18 +106,15 @@ if summation:
         # for j in range(1):
             precomputed_Right = np.zeros([n_time_bins, n_mass_bins])
             precomputed_Left = np.zeros([n_time_bins, n_mass_bins])
-            for t in range(n_time_bins): #range(24)
+            for t in range(n_time_bins): 
                 for m in range(n_mass_bins):
-                # for m mn range(1):
                     this_bin = (t*(n_mass_bins)) + m
-                    ## tmme (mass)
+                    pipi_L_int = GeV_to_pb * precomputed_values[this_bin][q, :, 0] * precomputed_values[this_bin][q, :, 2]
+                    pipj_L_int = GeV_to_pb * precomputed_values[this_bin][q, :, 1] * precomputed_values[this_bin][q, :, 2]
+                    
+                    pipi_R_int = GeV_to_pb *precomputed_values[this_bin][q, :, 3] * precomputed_values[this_bin][q, :, 5]
+                    pipj_R_int = GeV_to_pb * precomputed_values[this_bin][q, :, 4] * precomputed_values[this_bin][q, :, 5]
 
-                    pipi_L_int = GeV_to_pb * precomputed_values[this_bin][:, q, 0] * precomputed_values[this_bin][:, q, 2]
-                    pipj_L_int = GeV_to_pb * precomputed_values[this_bin][:,q, 1] * precomputed_values[this_bin][:,q, 2]
-                    
-                    pipi_R_int = GeV_to_pb *precomputed_values[this_bin][:,q, 3] * precomputed_values[this_bin][:,q, 5]
-                    pipj_R_int = GeV_to_pb * precomputed_values[this_bin][:,q, 4] * precomputed_values[this_bin][:,q, 5]
-                    
                     integral_pipi_L = simpson(pipi_L_int, Q2_vals[0][m])
                     integral_pipj_L = simpson(pipj_L_int, Q2_vals[0][m])
                     integral_pipi_R = simpson(pipi_R_int, Q2_vals[0][m])

@@ -13,7 +13,6 @@ import tensorflow as tf
 
 class LIV(POIModel):
    
-    
     @classmethod
     def parse_args(cls, indata, *args, **kwargs):
         """
@@ -80,7 +79,6 @@ class LIV(POIModel):
         **kwargs
     ):
         
-        print(len(coeff))
         self.indata = indata
         self.is_linear = False
 
@@ -89,11 +87,22 @@ class LIV(POIModel):
         self.pois = np.array([f"{coeff[i]}" for i in range(self.npoi)])
         self.xpoidefault = np.array([1]*self.npoi)
 
+
+        def efficiency_flattening(input_hist):
+            input_hist_full = input_hist[:, None]* tf.ones([1, self.nEtaBins*self.nPtBins], dtype=tf.float64) 
+            input_hist_pt_clipped = input_hist[:, None]* tf.ones([1, self.nEtaBins*(self.nPtBins-1)], dtype=tf.float64) 
+            input_hist_full = tf.reshape(input_hist_full, [-1, 1])[:, 0] #
+            input_hist_pt_clipped = tf.reshape(input_hist_pt_clipped, [-1, 1])[:, 0] #
+            full_hist = tf.concat([input_hist_full, input_hist_pt_clipped, input_hist_full, input_hist_full], axis = 0)
+            full_hist = tf.reshape(full_hist, [-1, 1])[:, 0] 
+            return full_hist
+        
+        
+        
                    
         ref_file = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
         ref_file_name = (
-            ref_file + "mz_dilepton_liv_scetlib_dyturbo_all_bins.hdf5"
-            # file_in + "mz_dilepton_liv_scetlib_dyturbo_CT18Z_N3p0LL_N2LO_Corr.hdf5"
+            ref_file + "mz_dilepton_liv_scetlib_dyturbo_CT18Z_N3p0LL_N2LO_Corr.hdf5"
         ) 
         h5file = h5py.File(ref_file_name, "r")
         results = input_tools.load_results_h5py(h5file)
@@ -104,18 +113,29 @@ class LIV(POIModel):
         self.Q_max = int(ex_histogram.axes["mll"][-1][1])
         self.nTimeBins = len(ex_histogram.axes["time"])
         self.nMassBins = len(ex_histogram.axes["mll"])
+        self.nPtBins = len(ex_histogram.axes["pt_probe"])
+        self.nEtaBins = len(ex_histogram.axes["eta_probe"])
+
+
         
         add_dir = "/home/submit/jbenke/WRemnants/rabbit/rabbit/poi_models/precomputed_sigma/"
             
         sm_filename = f"SM_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins.pkl" 
         
+        
         with open(add_dir + sm_filename, "rb") as f:
             precomp_dict = pickle.load(f)
             
-        sm_sigma = tf.cast([precomp_dict["values"]]*self.nTimeBins, dtype = tf.float64)          
-        self.sm_sigma = tf.reshape(sm_sigma, [-1, 1])[:, 0] ## flattens it
+        #7920 = the efficiency channels
+        #93316 = efficiency channel + masked channel
         
+        ## everything is consistently shaped as 7920
+
+        sm_sigma = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64)    
+        self.sm_sigma =  efficiency_flattening(sm_sigma) ## flattens it
         
+
+            
         sme_all = []
         print(coeff)
         for c in coeff:
@@ -125,24 +145,36 @@ class LIV(POIModel):
             #sme[time][mll]
             with open(add_dir + sme_L_filename, "rb") as f:
                 precomp_dict = pickle.load(f)
-            sme_left = tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64)
+            sme_left = tf.cast([precomp_dict["values"][:, 9]], dtype = tf.float64)
+            sme_left = tf.reshape(sme_left, [-1, 1])[:, 0] ## flattens it
+            sme_left_full = efficiency_flattening(sme_left)
+
             sme_R_filename = sme_L_filename[:-5] + "R" + sme_L_filename[-4:]
             #sme[time][mll]
             with open(add_dir + sme_R_filename, "rb") as f:
                 precomp_dict = pickle.load(f)
-            sme_right = tf.cast(np.array(precomp_dict["values"]).flatten(), dtype = tf.float64)
+            sme_right = tf.cast([precomp_dict["values"][:, 9]], dtype = tf.float64)
+            sme_right = tf.reshape(sme_right, [-1, 1])[:, 0] ## flattens it
+
+            sme_right_full = efficiency_flattening(sme_right)
             
             if c[0] == 'd':
-                sme_all.append(1/2*(sme_left - sme_right))
+                sme_all.append(1/2*(sme_left_full - sme_right_full))
             elif c[0] == 'c':
-                sme_all.append(1/2*(sme_left + sme_right))
-
-        self.sme = np.array(sme_all)
+                sme_all.append(1/2*(sme_left_full + sme_right_full))
         
+        
+        # input_shape = ex_histogram 
+        # input_h2_shape = remove_low_bins(ex_histogram)
+        
+        
+        self.sme = np.array(sme_all)
+
         
     def compute(self, poi):
         flattened_xsec = self.sm_sigma/self.sm_sigma
-        for i in range(len(poi)):
+        # for i in range(len(poi)):
+        for i in range(poi.shape[0]):
             flattened_xsec += (self.sme[i] * poi[i]*1e-6)/self.sm_sigma
         output = tf.reshape(flattened_xsec, [-1, 1])
         return output

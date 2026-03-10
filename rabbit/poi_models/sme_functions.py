@@ -299,14 +299,13 @@ def sme(Q_min, Q_max, p1, p2, quark_couplings, num_steps_Q2 = 100, precomputed =
     Q2_values = np.linspace(Q_min**2, Q_max**2, num_steps_Q2)
     if precomputed:
         integrand_values = np.array([d_sigma_precomp(Q2_values[i], p1, p2, quark_couplings, precomputed = True, precomputed_values = precomputed_values[i]) for i in range(len(Q2_values))])
-    
+        integral_liv = simpson(integrand_values, Q2_values)
+        print(integral_liv)
     if not precomputed:
-        combined_array = zip(*[d_sigma_calc(Q2, p1, p2, quark_couplings) for Q2 in Q2_values])
-        ## store left and right in the same file
-
-    # Use Simpson's rule to integrate over the Q2_values array
-    integral_liv = simpson(integrand_values, Q2_values)
-    print(integral_liv)
+        combined_array =np.array(list(zip(*[d_sigma_calc(Q2, p1, p2, quark_couplings) for Q2 in Q2_values])))
+        # store left and right in the same file
+        
+        
     if precomputed:
         return integral_liv
     else:
