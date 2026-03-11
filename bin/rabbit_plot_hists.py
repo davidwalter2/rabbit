@@ -683,8 +683,16 @@ def make_plot(
                 )
                 continue
 
-            two_sided = hdown is not None and hdown[i] is not None and len(args.varOneSided) == 0
-            fill_alpha = args.fillVariationsAlphas[i] if i < len(args.fillVariationsAlphas) else 0.0
+            two_sided = (
+                hdown is not None
+                and hdown[i] is not None
+                and len(args.varOneSided) == 0
+            )
+            fill_alpha = (
+                args.fillVariationsAlphas[i]
+                if i < len(args.fillVariationsAlphas)
+                else 0.0
+            )
 
             if fill_alpha > 0 and hup is not None and two_sided:
                 edges = hup[i].axes[0].edges
@@ -1022,10 +1030,12 @@ def make_plot(
         ):
             linewidth = 2
             scaleVariation = [
-                args.scaleVariation[i] if i < len(args.scaleVariation) else 1 for i in range(len(varLabels))
+                args.scaleVariation[i] if i < len(args.scaleVariation) else 1
+                for i in range(len(varLabels))
             ]
             varOneSided = [
-                args.varOneSided[i] if i < len(args.varOneSided) else 0 for i in range(len(varLabels))
+                args.varOneSided[i] if i < len(args.varOneSided) else 0
+                for i in range(len(varLabels))
             ]
 
             step_offset = 0
@@ -1094,7 +1104,11 @@ def make_plot(
                     )
                     continue
 
-                fill_alpha = args.fillVariationsAlphas[i] if i < len(args.fillVariationsAlphas) else 0.0
+                fill_alpha = (
+                    args.fillVariationsAlphas[i]
+                    if i < len(args.fillVariationsAlphas)
+                    else 0.0
+                )
 
                 if fill_alpha > 0 and not varOneSided[i]:
                     edges = hvars[0].axes[0].edges
@@ -1219,7 +1233,11 @@ def make_plot(
             text_size=args.legSize,
             extra_handles=extra_handles_upper,
             extra_labels=extra_labels_upper,
-            custom_handlers=["bandfilled"] if any(alpha > 0 for alpha in args.fillVariationsAlphas) else [],
+            custom_handlers=(
+                ["bandfilled"]
+                if any(alpha > 0 for alpha in args.fillVariationsAlphas)
+                else []
+            ),
             extra_text=text_pieces if not args.noExtraText else None,
             extra_text_loc=None if args.extraTextLoc is None else args.extraTextLoc[:2],
             padding_loc=args.legPadding,
@@ -1233,7 +1251,11 @@ def make_plot(
             text_size=args.legSize,
             extra_handles=extra_handles,
             extra_labels=extra_labels,
-            custom_handlers=["stacked", "bandfilled"] if any(alpha > 0 for alpha in args.fillVariationsAlphas) else ["stacked"],
+            custom_handlers=(
+                ["stacked", "bandfilled"]
+                if any(alpha > 0 for alpha in args.fillVariationsAlphas)
+                else ["stacked"]
+            ),
             padding_loc=args.lowerLegPadding,
         )
 
@@ -1374,15 +1396,21 @@ def make_plots(
             print(result.keys())
             key = f"hist_{fittype}_inclusive_global_impacts_grouped"
             if key not in result.keys():
-                raise ValueError(f"Grouped histogram impacts '{key}' not found. Make sure the fit was produced with --computeHistImpacts.")
+                raise ValueError(
+                    f"Grouped histogram impacts '{key}' not found. Make sure the fit was produced with --computeHistImpacts."
+                )
             hist_grouped = result[key].get()
             available_groups = np.array(hist_grouped.axes["impacts"], dtype=str)
             missing_groups = [g for g in args.varGroups if g not in available_groups]
             if missing_groups:
-                raise ValueError(f"Requested grouped variations {missing_groups} not found. Available groups include {available_groups.tolist()}")
+                raise ValueError(
+                    f"Requested grouped variations {missing_groups} not found. Available groups include {available_groups.tolist()}"
+                )
 
             for group in args.varGroups:
-                impact = hist_grouped[{"impacts": group}].project(*[a.name for a in axes])
+                impact = hist_grouped[{"impacts": group}].project(
+                    *[a.name for a in axes]
+                )
                 hist_up = hist_inclusive.copy()
                 hist_down = hist_inclusive.copy()
                 hist_up.values()[...] = hist_inclusive.values() + impact.values()
@@ -1561,14 +1589,21 @@ def main():
             syst_labels = getattr(config, "systematics_labels", {})
             varLabels = [syst_labels.get(x, x) for x in variation_names]
         elif len(varLabels) != len(variation_names):
-            raise ValueError(f"Must specify the same number of args for variation names and --varLabels. Found variations={len(variation_names)} and varLabels={len(varLabels)}")
+            raise ValueError(
+                f"Must specify the same number of args for variation names and --varLabels. Found variations={len(variation_names)} and varLabels={len(varLabels)}"
+            )
         if varColors is None:
-            varColors = [colormaps["tab10" if len(variation_names) < 10 else "tab20"](i)for i in range(len(variation_names))]
+            varColors = [
+                colormaps["tab10" if len(variation_names) < 10 else "tab20"](i)
+                for i in range(len(variation_names))
+            ]
 
     if len(args.fillVariationsAlphas) == 1 and len(variation_names) > 1:
         args.fillVariationsAlphas = args.fillVariationsAlphas * len(variation_names)
     elif len(args.fillVariationsAlphas) not in [0, len(variation_names)]:
-        raise ValueError(f"Must specify either zero, one, or exactly one alpha per variation with --fillVariationsAlphas. Found {len(args.fillVariationsAlphas)} alphas for {len(variation_names)} variations.")
+        raise ValueError(
+            f"Must specify either zero, one, or exactly one alpha per variation with --fillVariationsAlphas. Found {len(args.fillVariationsAlphas)} alphas for {len(variation_names)} variations."
+        )
 
     fittype = "prefit" if args.prefit else "postfit"
 
