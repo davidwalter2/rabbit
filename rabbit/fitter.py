@@ -1449,26 +1449,60 @@ class Fitter:
                             beta = solve_quad_eq(abeta, bbeta, cbeta)
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
+                            logbeta0 = self.logbeta0[: self.indata.nbins]
+
+                            # Minimum total expected yield for which all betas are positive.
+                            # Optimise in log-space u = log(x - threshold_cs) so that
+                            # x = threshold_cs + exp(u) > threshold_cs for any real u,
+                            # guaranteeing den > 0 and beta > 0 without any clipping.
+                            # Protect against zero norm_profile for masked processes:
+                            # kstat/0 = inf for the argmin gradient gives 0*(-inf) = NaN.
+                            # Use a dummy norm=1 for betamask bins so the division is finite,
+                            # then set those entries to +inf to exclude them from the min.
+                            norm_thresh = tf.where(
+                                betamask, tf.ones_like(norm_profile), norm_profile
+                            )
+                            f_thresh = tf.where(
+                                betamask,
+                                tf.fill(
+                                    tf.shape(kstat), tf.cast(float("inf"), kstat.dtype)
+                                ),
+                                kstat / norm_thresh,
+                            )
+                            threshold_cs = self.nobs - self.varnobs * tf.reduce_min(
+                                f_thresh, axis=1
+                            )
+
+                            # Initialise nbeta in log-space.
+                            self.nbeta.assign(tf.ones_like(self.nobs))
 
                             # solving nbeta numerically using newtons method (does not work with forward differentiation i.e. use --globalImpacts with --globalImpactsDisableJVP)
-                            def fnll_nbeta(x):
-                                beta = (
+                            def fnll_nbeta(u):
+                                # x = threshold_cs + exp(u) > threshold_cs always; den > 0 guaranteed.
+                                x = threshold_cs + tf.exp(u)
+
+                                den = (
                                     kstat
-                                    * beta0
-                                    / (
-                                        kstat
-                                        + ((x - self.nobs) / self.varnobs)[..., None]
-                                        * norm_profile
-                                    )
+                                    + ((x - self.nobs) / self.varnobs)[..., None]
+                                    * norm_profile
                                 )
+                                beta = kstat * beta0 / den
+
                                 beta = tf.where(betamask, beta0, beta)
+
+                                # some safeguards
+                                betasafe = tf.where(
+                                    beta0 == 0.0,
+                                    tf.constant(1.0, dtype=beta.dtype),
+                                    beta,
+                                )
+                                logbeta = tf.math.log(betasafe)
+
                                 new_nexp = tf.reduce_sum(beta * norm_profile, axis=-1)
                                 ln = 0.5 * (new_nexp - self.nobs) ** 2 / self.varnobs
                                 lbeta = tf.reduce_sum(
                                     kstat * (beta - beta0)
-                                    - kstat
-                                    * beta0
-                                    * (tf.math.log(beta) - tf.math.log(beta0)),
+                                    - kstat * beta0 * (logbeta - logbeta0),
                                     axis=-1,
                                 )
                                 return ln + lbeta
@@ -1476,7 +1510,7 @@ class Fitter:
                             def body(i, edm):
                                 with tf.GradientTape() as t2:
                                     with tf.GradientTape() as t1:
-                                        nll = fnll_nbeta(nexp_profile * self.nbeta)
+                                        nll = fnll_nbeta(self.nbeta)
                                     grad = t1.gradient(nll, self.nbeta)
                                 hess = t2.gradient(grad, self.nbeta)
 
@@ -1500,15 +1534,13 @@ class Fitter:
                             edm0 = tf.constant(tf.float64.max)
                             tf.while_loop(cond, body, loop_vars=(i0, edm0))
 
+                            x = threshold_cs + tf.exp(self.nbeta)
                             beta = (
                                 kstat
                                 * beta0
                                 / (
                                     kstat
-                                    + (
-                                        (nexp_profile * self.nbeta - self.nobs)
-                                        / self.varnobs
-                                    )[..., None]
+                                    + ((x - self.nobs) / self.varnobs)[..., None]
                                     * norm_profile
                                 )
                             )
@@ -1665,31 +1697,67 @@ class Fitter:
                             beta = (self.nobs + kstat * beta0) / (nexp_profile + kstat)
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
+                            logbeta0 = self.logbeta0[: self.indata.nbins]
+
+                            # Minimum total expected yield for which all betas are positive.
+                            # Optimise in log-space u = log(x - threshold) so that
+                            # x = threshold + exp(u) > threshold for any real u,
+                            # guaranteeing den > 0 and beta > 0 without any clipping.
+                            # Protect against zero norm_profile for masked processes:
+                            # kstat/0 = inf for the argmin gradient gives 0*(-inf) = NaN.
+                            # Use a dummy norm=1 for betamask bins so the division is finite,
+                            # then set those entries to +inf to exclude them from the min.
+                            norm_thresh = tf.where(
+                                betamask, tf.ones_like(norm_profile), norm_profile
+                            )
+                            f_thresh = tf.where(
+                                betamask,
+                                tf.fill(
+                                    tf.shape(kstat), tf.cast(float("inf"), kstat.dtype)
+                                ),
+                                1.0 + kstat / norm_thresh,
+                            )
+                            threshold = self.nobs / tf.reduce_min(f_thresh, axis=1)
+
+                            # Initialise nbeta in log-space from the current nexp_profile.
+                            self.nbeta.assign(tf.ones_like(self.nobs))
 
                             # solving nbeta numerically using newtons method (does not work with forward differentiation i.e. use --globalImpacts with --globalImpactsDisableJVP)
-                            def fnll_nbeta(x):
-                                beta = (
-                                    kstat
-                                    * beta0
-                                    / (
-                                        norm_profile
-                                        + kstat
-                                        - (self.nobs / x)[..., None] * norm_profile
-                                    )
-                                )
+                            def fnll_nbeta(u):
+                                # x = threshold + exp(u) > threshold always; den > 0 guaranteed.
+                                x = threshold + tf.exp(u)
+
+                                den = (1 - self.nobs / x)[
+                                    ..., None
+                                ] * norm_profile + kstat
+                                beta = kstat * beta0 / den
+
                                 beta = tf.where(betamask, beta0, beta)
+
+                                # some safeguards
+                                betasafe = tf.where(
+                                    beta0 == 0.0,
+                                    tf.constant(1.0, dtype=beta.dtype),
+                                    beta,
+                                )
+                                logbeta = tf.math.log(betasafe)
+
                                 new_nexp = tf.reduce_sum(beta * norm_profile, axis=-1)
+                                nexpsafe = tf.where(
+                                    self.nobs == 0.0,
+                                    tf.constant(1.0, dtype=new_nexp.dtype),
+                                    new_nexp,
+                                )
+                                lognexp = tf.math.log(nexpsafe)
+
                                 ln = (
                                     new_nexp
                                     - self.nobs
-                                    - self.nobs
-                                    * (tf.math.log(new_nexp) - tf.math.log(self.nobs))
+                                    - self.nobs * (lognexp - self.lognobs)
                                 )
                                 lbeta = tf.reduce_sum(
                                     kstat * (beta - beta0)
-                                    - kstat
-                                    * beta0
-                                    * (tf.math.log(beta) - tf.math.log(beta0)),
+                                    - kstat * beta0 * (logbeta - logbeta0),
                                     axis=-1,
                                 )
                                 return ln + lbeta
@@ -1697,7 +1765,7 @@ class Fitter:
                             def body(i, edm):
                                 with tf.GradientTape() as t2:
                                     with tf.GradientTape() as t1:
-                                        nll = fnll_nbeta(nexp_profile * self.nbeta)
+                                        nll = fnll_nbeta(self.nbeta)
                                     grad = t1.gradient(nll, self.nbeta)
                                 hess = t2.gradient(grad, self.nbeta)
 
@@ -1721,15 +1789,12 @@ class Fitter:
                             edm0 = tf.constant(tf.float64.max)
                             tf.while_loop(cond, body, loop_vars=(i0, edm0))
 
+                            x = threshold + tf.exp(self.nbeta)
                             beta = (
                                 kstat
                                 * beta0
                                 / (
-                                    norm_profile
-                                    - (self.nobs / (nexp_profile * self.nbeta))[
-                                        ..., None
-                                    ]
-                                    * norm_profile
+                                    (1 - self.nobs / x)[..., None] * norm_profile
                                     + kstat
                                 )
                             )
@@ -2100,6 +2165,7 @@ class Fitter:
                     lbeta = -kstat * beta0 * (logbeta - self.logbeta0) + kstat * (
                         beta - beta0
                     )
+
             elif self.binByBinStatType == "normal-multiplicative":
                 kstat = self.kstat
                 betamask = self.betamask
