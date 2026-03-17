@@ -1452,8 +1452,8 @@ class Fitter:
                             logbeta0 = self.logbeta0[: self.indata.nbins]
 
                             # Minimum total expected yield for which all betas are positive.
-                            # Optimise in log-space u = log(x - threshold_cs) so that
-                            # x = threshold_cs + exp(u) > threshold_cs for any real u,
+                            # Optimise in log-space u = log(x - threshold) so that
+                            # x = threshold + exp(u) > threshold for any real u,
                             # guaranteeing den > 0 and beta > 0 without any clipping.
                             # Protect against zero norm_profile for masked processes:
                             # kstat/0 = inf for the argmin gradient gives 0*(-inf) = NaN.
@@ -1469,17 +1469,17 @@ class Fitter:
                                 ),
                                 kstat / norm_thresh,
                             )
-                            threshold_cs = self.nobs - self.varnobs * tf.reduce_min(
+                            threshold = self.nobs - self.varnobs * tf.reduce_min(
                                 f_thresh, axis=1
                             )
 
                             # Initialise nbeta in log-space.
-                            self.nbeta.assign(tf.ones_like(self.nobs))
+                            self.nbeta.assign(tf.zeros_like(self.nobs))
 
                             # solving nbeta numerically using newtons method (does not work with forward differentiation i.e. use --globalImpacts with --globalImpactsDisableJVP)
                             def fnll_nbeta(u):
-                                # x = threshold_cs + exp(u) > threshold_cs always; den > 0 guaranteed.
-                                x = threshold_cs + tf.exp(u)
+                                # x = threshold + exp(u) > threshold always; den > 0 guaranteed.
+                                x = threshold + tf.exp(u)
 
                                 den = (
                                     kstat
@@ -1507,25 +1507,22 @@ class Fitter:
                                 )
                                 return ln + lbeta
 
-                            def body(i, edm):
+                            def val_grad_hess_nbeta():
                                 with tf.GradientTape() as t2:
                                     with tf.GradientTape() as t1:
-                                        nll = fnll_nbeta(self.nbeta)
-                                    grad = t1.gradient(nll, self.nbeta)
+                                        val = fnll_nbeta(self.nbeta)
+                                    grad = t1.gradient(val, self.nbeta)
                                 hess = t2.gradient(grad, self.nbeta)
+                                return val, grad, hess
 
-                                eps = 1e-8
-                                hess_sign = tf.where(
-                                    hess != 0, tf.sign(hess), tf.ones_like(hess)
-                                )
-                                safe_hess = hess_sign * tf.maximum(tf.abs(hess), eps)
-                                step = grad / safe_hess
+                            def body(i, edm):
+                                val, grad, hess = val_grad_hess_nbeta()
+                                safe_hess = tf.maximum(hess, 1e-8)
+                                step = tf.clip_by_value(grad / safe_hess, -2.0, 2.0)
 
                                 self.nbeta.assign_sub(step)
 
-                                return i + 1, tf.reduce_max(
-                                    tf.reduce_max(0.5 * grad * step)
-                                )
+                                return i + 1, tf.reduce_max(0.5 * grad**2 / safe_hess)
 
                             def cond(i, edm):
                                 return tf.logical_and(i < 50, edm > 1e-10)
@@ -1534,7 +1531,7 @@ class Fitter:
                             edm0 = tf.constant(tf.float64.max)
                             tf.while_loop(cond, body, loop_vars=(i0, edm0))
 
-                            x = threshold_cs + tf.exp(self.nbeta)
+                            x = threshold + tf.exp(self.nbeta)
                             beta = (
                                 kstat
                                 * beta0
@@ -1720,7 +1717,7 @@ class Fitter:
                             threshold = self.nobs / tf.reduce_min(f_thresh, axis=1)
 
                             # Initialise nbeta in log-space from the current nexp_profile.
-                            self.nbeta.assign(tf.ones_like(self.nobs))
+                            self.nbeta.assign(tf.zeros_like(self.nobs))
 
                             # solving nbeta numerically using newtons method (does not work with forward differentiation i.e. use --globalImpacts with --globalImpactsDisableJVP)
                             def fnll_nbeta(u):
@@ -1762,25 +1759,22 @@ class Fitter:
                                 )
                                 return ln + lbeta
 
-                            def body(i, edm):
+                            def val_grad_hess_nbeta():
                                 with tf.GradientTape() as t2:
                                     with tf.GradientTape() as t1:
-                                        nll = fnll_nbeta(self.nbeta)
-                                    grad = t1.gradient(nll, self.nbeta)
+                                        val = fnll_nbeta(self.nbeta)
+                                    grad = t1.gradient(val, self.nbeta)
                                 hess = t2.gradient(grad, self.nbeta)
+                                return val, grad, hess
 
-                                eps = 1e-8
-                                hess_sign = tf.where(
-                                    hess != 0, tf.sign(hess), tf.ones_like(hess)
-                                )
-                                safe_hess = hess_sign * tf.maximum(tf.abs(hess), eps)
-                                step = grad / safe_hess
+                            def body(i, edm):
+                                val, grad, hess = val_grad_hess_nbeta()
+                                safe_hess = tf.maximum(hess, 1e-8)
+                                step = tf.clip_by_value(grad / safe_hess, -2.0, 2.0)
 
                                 self.nbeta.assign_sub(step)
 
-                                return i + 1, tf.reduce_max(
-                                    tf.reduce_max(0.5 * grad * step)
-                                )
+                                return i + 1, tf.reduce_max(0.5 * grad**2 / safe_hess)
 
                             def cond(i, edm):
                                 return tf.logical_and(i < 50, edm > 1e-10)
