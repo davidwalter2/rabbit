@@ -22,14 +22,21 @@ def solve_quad_eq(a, b, c):
 def match_regexp_params(regular_expressions, parameter_names):
     if isinstance(regular_expressions, str):
         regular_expressions = [regular_expressions]
-    # Find parameters that match any regex
+
+    # Check for exact matches first
+    exact_matches = [
+        s for expr in regular_expressions for s in parameter_names if s.decode() == expr
+    ]
+    if exact_matches:
+        return exact_matches
+
+    # Fall back to regex matching
     compiled_expressions = [re.compile(expr) for expr in regular_expressions]
-    matched_parameters = [
+    return [
         s
         for s in parameter_names
         if any(regex.match(s.decode()) for regex in compiled_expressions)
     ]
-    return matched_parameters
 
 
 class FitterCallback:
@@ -47,9 +54,7 @@ class FitterCallback:
     def __call__(self, intermediate_result):
         loss = intermediate_result.fun
 
-        logger.debug(
-            f"Iteration {self.iiter}: loss value {loss}"
-        )  # ; status {intermediate_result.status}")
+        logger.debug(f"Iteration {self.iiter}: loss value {loss}")
         if np.isnan(loss):
             raise ValueError(f"Loss value is NaN at iteration {self.iiter}")
 
@@ -92,15 +97,6 @@ class Fitter:
                 self.binByBinStatType = "gamma"
         else:
             self.binByBinStatType = options.binByBinStatType
-
-        if (
-            self.binByBinStat
-            and self.binByBinStatMode == "full"
-            and not self.binByBinStatType.startswith("normal")
-        ):
-            raise Exception(
-                'bin-by-bin stat only for option "--binByBinStatMode full" with "--binByBinStatType normal"'
-            )
 
         if (
             options.covarianceFit
@@ -258,9 +254,14 @@ class Fitter:
                     self.sumw = self.indata.sumw
 
             if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
-                self.kstat = self.sumw**2 / self.varbeta
-                self.betamask = (self.varbeta == 0.0) | (self.kstat == 0.0)
-                self.kstat = tf.where(self.betamask, 1.0, self.kstat)
+                self.betamask = (self.varbeta == 0.0) | (self.sumw == 0.0)
+                self.kstat = tf.where(self.betamask, 1.0, self.sumw**2 / self.varbeta)
+
+                if self.binByBinStatType == "gamma" and self.binByBinStatMode == "full":
+                    self.nbeta = tf.Variable(
+                        tf.ones_like(self.nobs), trainable=True, name="nbeta"
+                    )
+
             elif self.binByBinStatType == "normal-additive":
                 # precompute decomposition of composite matrix to speed up
                 # calculation of profiled beta values
@@ -358,6 +359,7 @@ class Fitter:
             self._profile_beta()
 
     def update_frozen_params(self):
+        logger.debug(f"Updated list of frozen params: {self.frozen_params}")
         new_mask_np = np.isin(self.parms, self.frozen_params)
 
         self.frozen_params_mask.assign(new_mask_np)
@@ -455,7 +457,6 @@ class Fitter:
             tf.stop_gradient(theta),
             theta,
         )
-        theta = self.x[self.poi_model.npoi :]
         if self.do_blinding:
             return theta + self._blinding_offsets_theta
         else:
@@ -1363,7 +1364,7 @@ class Fitter:
         poi = self.get_poi()
         theta = self.get_theta()
 
-        rnorm = self.poi_model.compute(poi)
+        rnorm = self.poi_model.compute(poi, full)
 
         normcentral = None
         if self.indata.symmetric_tensor:
@@ -1458,13 +1459,79 @@ class Fitter:
                 if self.chisqFit:
                     if self.binByBinStatType == "gamma":
                         kstat = self.kstat[: self.indata.nbins]
-
-                        abeta = nexp_profile**2
-                        bbeta = kstat * self.varnobs - nexp_profile * self.nobs
-                        cbeta = -kstat * self.varnobs * beta0
-                        beta = solve_quad_eq(abeta, bbeta, cbeta)
-
                         betamask = self.betamask[: self.indata.nbins]
+
+                        if self.binByBinStatMode == "lite":
+                            abeta = nexp_profile**2
+                            bbeta = kstat * self.varnobs - nexp_profile * self.nobs
+                            cbeta = -kstat * self.varnobs * beta0
+                            beta = solve_quad_eq(abeta, bbeta, cbeta)
+                        elif self.binByBinStatMode == "full":
+                            norm_profile = norm[: self.indata.nbins]
+
+                            # solving nbeta numerically using newtons method (does not work with forward differentiation i.e. use --globalImpacts with --globalImpactsDisableJVP)
+                            def fnll_nbeta(x):
+                                beta = (
+                                    kstat
+                                    * beta0
+                                    / (
+                                        kstat
+                                        + ((x - self.nobs) / self.varnobs)[..., None]
+                                        * norm_profile
+                                    )
+                                )
+                                beta = tf.where(betamask, beta0, beta)
+                                new_nexp = tf.reduce_sum(beta * norm_profile, axis=-1)
+                                ln = 0.5 * (new_nexp - self.nobs) ** 2 / self.varnobs
+                                lbeta = tf.reduce_sum(
+                                    kstat * (beta - beta0)
+                                    - kstat
+                                    * beta0
+                                    * (tf.math.log(beta) - tf.math.log(beta0)),
+                                    axis=-1,
+                                )
+                                return ln + lbeta
+
+                            def body(i, edm):
+                                with tf.GradientTape() as t2:
+                                    with tf.GradientTape() as t1:
+                                        nll = fnll_nbeta(nexp_profile * self.nbeta)
+                                    grad = t1.gradient(nll, self.nbeta)
+                                hess = t2.gradient(grad, self.nbeta)
+
+                                eps = 1e-8
+                                hess_sign = tf.where(
+                                    hess != 0, tf.sign(hess), tf.ones_like(hess)
+                                )
+                                safe_hess = hess_sign * tf.maximum(tf.abs(hess), eps)
+                                step = grad / safe_hess
+
+                                self.nbeta.assign_sub(step)
+
+                                return i + 1, tf.reduce_max(
+                                    tf.reduce_max(0.5 * grad * step)
+                                )
+
+                            def cond(i, edm):
+                                return tf.logical_and(i < 50, edm > 1e-10)
+
+                            i0 = tf.constant(0)
+                            edm0 = tf.constant(tf.float64.max)
+                            tf.while_loop(cond, body, loop_vars=(i0, edm0))
+
+                            beta = (
+                                kstat
+                                * beta0
+                                / (
+                                    kstat
+                                    + (
+                                        (nexp_profile * self.nbeta - self.nobs)
+                                        / self.varnobs
+                                    )[..., None]
+                                    * norm_profile
+                                )
+                            )
+
                         beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
@@ -1613,7 +1680,79 @@ class Fitter:
                         kstat = self.kstat[: self.indata.nbins]
                         betamask = self.betamask[: self.indata.nbins]
 
-                        beta = (self.nobs + kstat * beta0) / (nexp_profile + kstat)
+                        if self.binByBinStatMode == "lite":
+                            beta = (self.nobs + kstat * beta0) / (nexp_profile + kstat)
+                        elif self.binByBinStatMode == "full":
+                            norm_profile = norm[: self.indata.nbins]
+
+                            # solving nbeta numerically using newtons method (does not work with forward differentiation i.e. use --globalImpacts with --globalImpactsDisableJVP)
+                            def fnll_nbeta(x):
+                                beta = (
+                                    kstat
+                                    * beta0
+                                    / (
+                                        norm_profile
+                                        + kstat
+                                        - (self.nobs / x)[..., None] * norm_profile
+                                    )
+                                )
+                                beta = tf.where(betamask, beta0, beta)
+                                new_nexp = tf.reduce_sum(beta * norm_profile, axis=-1)
+                                ln = (
+                                    new_nexp
+                                    - self.nobs
+                                    - self.nobs
+                                    * (tf.math.log(new_nexp) - tf.math.log(self.nobs))
+                                )
+                                lbeta = tf.reduce_sum(
+                                    kstat * (beta - beta0)
+                                    - kstat
+                                    * beta0
+                                    * (tf.math.log(beta) - tf.math.log(beta0)),
+                                    axis=-1,
+                                )
+                                return ln + lbeta
+
+                            def body(i, edm):
+                                with tf.GradientTape() as t2:
+                                    with tf.GradientTape() as t1:
+                                        nll = fnll_nbeta(nexp_profile * self.nbeta)
+                                    grad = t1.gradient(nll, self.nbeta)
+                                hess = t2.gradient(grad, self.nbeta)
+
+                                eps = 1e-8
+                                hess_sign = tf.where(
+                                    hess != 0, tf.sign(hess), tf.ones_like(hess)
+                                )
+                                safe_hess = hess_sign * tf.maximum(tf.abs(hess), eps)
+                                step = grad / safe_hess
+
+                                self.nbeta.assign_sub(step)
+
+                                return i + 1, tf.reduce_max(
+                                    tf.reduce_max(0.5 * grad * step)
+                                )
+
+                            def cond(i, edm):
+                                return tf.logical_and(i < 50, edm > 1e-10)
+
+                            i0 = tf.constant(0)
+                            edm0 = tf.constant(tf.float64.max)
+                            tf.while_loop(cond, body, loop_vars=(i0, edm0))
+
+                            beta = (
+                                kstat
+                                * beta0
+                                / (
+                                    norm_profile
+                                    - (self.nobs / (nexp_profile * self.nbeta))[
+                                        ..., None
+                                    ]
+                                    * norm_profile
+                                    + kstat
+                                )
+                            )
+
                         beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal-multiplicative":
                         kstat = self.kstat[: self.indata.nbins]
@@ -2165,7 +2304,70 @@ class Fitter:
 
         return val, grad, hess
 
-    def minimize(self, eraly_stopping=10):
+    def fit(self):
+
+        def scipy_loss(xval):
+            self.x.assign(xval)
+            val, grad = self.loss_val_grad()
+            return val.__array__(), grad.__array__()
+
+        def scipy_hessp(xval, pval):
+            self.x.assign(xval)
+            p = tf.convert_to_tensor(pval)
+            val, grad, hessp = self.loss_val_grad_hessp(p)
+            return hessp.__array__()
+
+        def scipy_hess(xval):
+            self.x.assign(xval)
+            val, grad, hess = self.loss_val_grad_hess()
+            if self.diagnostics:
+                cond_number = tfh.cond_number(hess)
+                logger.info(f"  - Condition number: {cond_number}")
+                edmval = tfh.edmval(grad, hess)
+                logger.info(f"  - edmval: {edmval}")
+            return hess.__array__()
+
+        xval = self.x.numpy()
+
+        callback = FitterCallback(xval, self.earlyStopping)
+
+        if self.minimizer_method in [
+            "trust-krylov",
+            "trust-ncg",
+        ]:
+            info_minimize = dict(hessp=scipy_hessp)
+        elif self.minimizer_method in [
+            "trust-exact",
+            "dogleg",
+        ]:
+            info_minimize = dict(hess=scipy_hess)
+        else:
+            info_minimize = dict()
+
+        try:
+            res = scipy.optimize.minimize(
+                scipy_loss,
+                xval,
+                method=self.minimizer_method,
+                jac=True,
+                tol=0.0,
+                callback=callback,
+                **info_minimize,
+            )
+        except Exception as ex:
+            # minimizer could have called the loss or hessp functions with "random" values, so restore the
+            # state from the end of the last iteration before the exception
+            xval = callback.xval
+            logger.debug(ex)
+        else:
+            xval = res["x"]
+            logger.debug(res)
+
+        self.x.assign(xval)
+
+        return callback
+
+    def minimize(self):
         if self.is_linear:
             logger.info(
                 "Likelihood is purely quadratic, solving by Cholesky decomposition instead of iterative fit"
@@ -2192,78 +2394,16 @@ class Fitter:
 
             callback = None
         else:
-            logger.info("Perform iterative fit")
-
-            def scipy_loss(xval):
-                self.x.assign(xval)
-                val, grad = self.loss_val_grad()
-                # logger.debug(f"xval = {xval}")
-                # logger.debug(f"val = {val}; grad = {grad}")
-                return val.__array__(), grad.__array__()
-
-            def scipy_hessp(xval, pval):
-                self.x.assign(xval)
-                p = tf.convert_to_tensor(pval)
-                val, grad, hessp = self.loss_val_grad_hessp(p)
-                # logger.debug(f"xval = {xval}")
-                # logger.debug(f"p = {p}")
-                # logger.debug(f"val = {val}; grad = {grad}; hessp = {hessp}")
-                return hessp.__array__()
-
-            def scipy_hess(xval):
-                self.x.assign(xval)
-                val, grad, hess = self.loss_val_grad_hess()
-                if self.diagnostics:
-                    cond_number = tfh.cond_number(hess)
-                    logger.info(f"  - Condition number: {cond_number}")
-                    edmval = tfh.edmval(grad, hess)
-                    logger.info(f"  - edmval: {edmval}")
-                return hess.__array__()
-
-            xval = self.x.numpy()
-
-            callback = FitterCallback(xval, self.earlyStopping)
-
-            if self.minimizer_method in [
-                "trust-krylov",
-                "trust-ncg",
-            ]:
-                info_minimize = dict(hessp=scipy_hessp)
-            elif self.minimizer_method in [
-                "trust-exact",
-                "dogleg",
-            ]:
-                info_minimize = dict(hess=scipy_hess)
-            else:
-                info_minimize = dict()
-
-            try:
-                res = scipy.optimize.minimize(
-                    scipy_loss,
-                    xval,
-                    method=self.minimizer_method,
-                    jac=True,
-                    tol=0.0,
-                    callback=callback,
-                    **info_minimize,
-                )
-            except Exception as ex:
-                # minimizer could have called the loss or hessp functions with "random" values, so restore the
-                # state from the end of the last iteration before the exception
-                logger.debug("Fitter exception")
-                xval = callback.xval
-                logger.debug(ex)
-            else:
-                xval = res["x"]
-                logger.debug(res)
-
-            self.x.assign(xval)
+            callback = self.fit()
 
         return callback
 
     def nll_scan(self, param, scan_range, scan_points, use_prefit=False):
         # make a likelihood scan for a single parameter
         # assuming the likelihood is minimized
+
+        # freeze minimize which mean to not update it in the fit
+        self.freeze_params(param)
 
         idx = np.where(self.parms.astype(str) == param)[0][0]
 
@@ -2290,50 +2430,27 @@ class Fitter:
                 if i == 0:
                     continue
 
+                logger.debug(f"Now at i={i} x={ixval}")
                 self.x.assign(tf.tensor_scatter_nd_update(self.x, [[idx]], [ixval]))
 
-                def scipy_loss(xval):
-                    self.x.assign(xval)
-                    val, grad = self.loss_val_grad()
-                    grad = grad.numpy()
-                    grad[idx] = 0  # Zero out gradient for the frozen parameter
-                    return val.numpy(), grad
+                self.fit()
 
-                def scipy_hessp(xval, pval):
-                    self.x.assign(xval)
-                    pval[idx] = (
-                        0  # Ensure the perturbation does not affect frozen parameter
-                    )
-                    p = tf.convert_to_tensor(pval)
-                    val, grad, hessp = self.loss_val_grad_hessp(p)
-                    hessp = hessp.numpy()
-                    # TODO: worth testing modifying the loss/grad/hess functions to imply 1
-                    # for the corresponding hessian element instead of 0,
-                    # since this might allow the minimizer to converge more efficiently
-                    hessp[idx] = (
-                        0  # Zero out Hessian-vector product at the frozen index
-                    )
-                    return hessp
+                dnlls[nscans // 2 + sign * i] = self.reduced_nll().numpy() - nll_best
 
-                res = scipy.optimize.minimize(
-                    scipy_loss,
-                    self.x,
-                    method="trust-krylov",
-                    jac=True,
-                    hessp=scipy_hessp,
-                )
-                if res["success"]:
-                    dnlls[nscans // 2 + sign * i] = (
-                        self.reduced_nll().numpy() - nll_best
-                    )
-                    scan_vals[nscans // 2 + sign * i] = ixval
+                scan_vals[nscans // 2 + sign * i] = ixval
 
             # reset x to original state
             self.x.assign(xval)
 
+        # let the parameter be free again
+        self.defreeze_params(param)
+
         return scan_vals, dnlls
 
     def nll_scan2D(self, param_tuple, scan_range, scan_points, use_prefit=False):
+
+        # freeze minimize which mean to not update it in the fit
+        self.freeze_params(param_tuple)
 
         idx0 = np.where(self.parms.astype(str) == param_tuple[0])[0][0]
         idx1 = np.where(self.parms.astype(str) == param_tuple[1])[0][0]
@@ -2381,7 +2498,9 @@ class Fitter:
             ix = best_fit - i
             iy = best_fit + j
 
-            # print(f"i={i}, j={j}, r={r} drow={drow}, dcol={dcol} | ix={ix}, iy={iy}")
+            logger.debug(
+                f"Now at (ix,iy) = ({ix},{iy}) (x,y)= ({x_scans[ix]},{y_scans[iy]})"
+            )
 
             self.x.assign(
                 tf.tensor_scatter_nd_update(
@@ -2389,41 +2508,15 @@ class Fitter:
                 )
             )
 
-            def scipy_loss(xval):
-                self.x.assign(xval)
-                val, grad = self.loss_val_grad()
-                grad = grad.numpy()
-                grad[idx0] = 0
-                grad[idx1] = 0
-                return val.numpy(), grad
+            self.fit()
 
-            def scipy_hessp(xval, pval):
-                self.x.assign(xval)
-                pval[idx0] = 0
-                pval[idx1] = 0
-                p = tf.convert_to_tensor(pval)
-                val, grad, hessp = self.loss_val_grad_hessp(p)
-                hessp = hessp.numpy()
-                hessp[idx0] = 0
-                hessp[idx1] = 0
-
-                if np.allclose(hessp, 0, atol=1e-8):
-                    return np.zeros_like(hessp)
-
-                return hessp
-
-            res = scipy.optimize.minimize(
-                scipy_loss,
-                self.x,
-                method="trust-krylov",
-                jac=True,
-                hessp=scipy_hessp,
-            )
-
-            if res["success"]:
-                dnlls[ix, iy] = self.reduced_nll().numpy() - nll_best
+            dnlls[ix, iy] = self.reduced_nll().numpy() - nll_best
 
         self.x.assign(xval)
+
+        # let the parameter be free again
+        self.defreeze_params(param_tuple)
+
         return x_scans, y_scans, dnlls
 
     def contour_scan(self, param, nll_min, q=1, signs=[-1, 1], fun=None):
