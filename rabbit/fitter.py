@@ -258,6 +258,9 @@ class Fitter:
                 self.kstat = tf.where(self.betamask, 1.0, self.sumw**2 / self.varbeta)
 
                 if self.binByBinStatType == "gamma" and self.binByBinStatMode == "full":
+                    logger.warning(
+                        "Running with '--binByBinStatType gamma --binByBinStatMode full' is experimental and results should be taken with care"
+                    )
                     self.nbeta = tf.Variable(
                         tf.ones_like(self.nobs), trainable=True, name="nbeta"
                     )
@@ -1537,7 +1540,7 @@ class Fitter:
                             def body(i, edm):
                                 val, grad, hess = val_grad_hess_nbeta()
                                 safe_hess = tf.maximum(hess, 1e-8)
-                                step = tf.clip_by_value(grad / safe_hess, -2.0, 2.0)
+                                step = tf.clip_by_value(grad / safe_hess, -1.0, 1.0)
 
                                 self.nbeta.assign_sub(step)
 
@@ -1789,7 +1792,7 @@ class Fitter:
                             def body(i, edm):
                                 val, grad, hess = val_grad_hess_nbeta()
                                 safe_hess = tf.maximum(hess, 1e-8)
-                                step = tf.clip_by_value(grad / safe_hess, -2.0, 2.0)
+                                step = tf.clip_by_value(grad / safe_hess, -1.0, 1.0)
 
                                 self.nbeta.assign_sub(step)
 
