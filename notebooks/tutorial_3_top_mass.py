@@ -9,137 +9,195 @@ import mplhep as hep
 from rabbit import tensorwriter
 
 # ==============================================================================
-# Tutorial 3: Fitting the Top Quark Mass
+# Tutorial 3: Fitting the Top Quark Mass with in-situ JES calibration
 # ==============================================================================
-# In this tutorial we will learn how to extract a parameter of interest like
-# the top quark mass from an invariant mass distribution. We'll simulate a
-# typical top mass measurement where templates are generated for different
-# mass hypotheses.
+# In this tutorial we extract the top quark mass from the invariant mass
+# distribution of the 3-jet combination (reconstructed top) while simultaneously
+# fitting the Jet Energy Scale (JES) using the 2-jet combination (reconstructed W).
 #
-# We use a technique where the mass dependence is implemented as a continuous
-# shape systematic variation, mapping the mass variation (e.g., Delta m_t) as
-# an unconstrained parameter in the fit.
+# We use a 2D template approach (m_W vs m_top) to capture the correlation between
+# the two observables. The JES acts as a constrained shape systematic that shifts
+# both m_W and m_top. The top mass shift acts as an unconstrained parameter
+# affecting only m_top.
 
 # ------------------------------------------------------------------------------
 # Setting up the environment
 # ------------------------------------------------------------------------------
-# Emulate RABBIT_BASE (points to the 'rabbit' root)
 rabbit_base = str(Path(os.getcwd()).parent.absolute())
 os.environ['RABBIT_BASE'] = rabbit_base
 
-# Append rabbit_base to PYTHONPATH so `import rabbit` works
 if rabbit_base not in sys.path:
     sys.path.append(rabbit_base)
 
-# Emulate sourcing setup.sh by putting rabbit/bin in PATH
 rabbit_bin = os.path.join(rabbit_base, 'bin')
 current_path = os.environ.get('PATH', '')
 if rabbit_bin not in current_path:
     os.environ['PATH'] = f"{current_path}:{rabbit_bin}"
 
-print("RABBIT_BASE:", os.environ['RABBIT_BASE'])
-print("PATH:", os.environ['PATH'])
-
 # ------------------------------------------------------------------------------
-# Generating the invariant mass distribution
+# Generating the invariant mass distributions (2D: m_W vs m_top)
 # ------------------------------------------------------------------------------
 hep.style.use("CMS")
 
-# Create an output directory for the results
 outdir = "results/top_mass"
 os.makedirs(outdir, exist_ok=True)
 
-# Define an axis for the reconstructed top mass
-mass_axis = hist.axis.Regular(40, 130, 210, name="m_top", label="Reconstructed Mass [GeV]")
+# Define axes for the reconstructed W and top masses
+w_mass_axis = hist.axis.Regular(20, 50, 110, name="m_W", label="Reconstructed W Mass [GeV]")
+top_mass_axis = hist.axis.Regular(40, 130, 210, name="m_top", label="Reconstructed Top Mass [GeV]")
 
-def get_hist(axis):
-    return hist.Hist(axis, storage=hist.storage.Weight())
+def get_hist(axes):
+    return hist.Hist(*axes, storage=hist.storage.Weight())
 
-# Nominal top mass and variations
+# Physics parameters
 m_top_nom = 172.5
-dm = 1.0 # 1 GeV variation
+m_w_nom = 80.4
+dm_top = 1.0 # 1 GeV variation for the top mass shift parameter
+
+# JES parameter
+# We define a relative JES uncertainty. e.g. JES = 1.0 means nominal
+jes_nom = 1.0
+djes = 0.02 # 2% variation for the up/dn templates
 
 np.random.seed(42)
 n_sig = 50000
 n_bkg = 20000
 
-# Generate background (exponential or broad distribution)
-bkg_mass = np.random.uniform(130, 210, n_bkg)
-h_bkg = get_hist(mass_axis)
-h_bkg.fill(bkg_mass)
+# Background (uncorrelated 2D distribution)
+bkg_w_mass = np.random.uniform(50, 110, n_bkg)
+bkg_top_mass = np.random.uniform(130, 210, n_bkg)
+h_bkg = get_hist((w_mass_axis, top_mass_axis))
+h_bkg.fill(bkg_w_mass, bkg_top_mass)
 
-# Function to generate signal given a top mass
-def generate_signal(m_top):
-    # simple Gaussian resolution
-    resolution = 15.0
-    mass = np.random.normal(m_top, resolution, n_sig)
-    h = get_hist(mass_axis)
-    h.fill(mass)
+# Function to generate signal given a top mass and a JES factor
+def generate_signal(m_top, jes):
+    # Base physics values (before JES)
+    w_res, top_res = 8.0, 15.0 # resolutions
+
+    # Generate true-like values, then scale by JES to get reconstructed values
+    # The true W mass is always m_w_nom (it's a known constant of nature)
+    # The true top mass depends on the hypothesis m_top
+    w_mass_base = np.random.normal(m_w_nom, w_res, n_sig)
+    top_mass_base = np.random.normal(m_top, top_res, n_sig)
+
+    # Apply Jet Energy Scale (JES). This affects both reconstructed masses linearly.
+    w_mass_reco = w_mass_base * jes
+    top_mass_reco = top_mass_base * jes
+
+    h = get_hist((w_mass_axis, top_mass_axis))
+    h.fill(w_mass_reco, top_mass_reco)
     return h
 
-h_sig_nom = generate_signal(m_top_nom)
-h_sig_up = generate_signal(m_top_nom + dm)
-h_sig_dn = generate_signal(m_top_nom - dm)
+# Nominal templates (m_t = 172.5, JES = 1.0)
+h_sig_nom = generate_signal(m_top_nom, jes_nom)
 
-# Pseudodata (we will inject m_top = 173.2 GeV)
+# Top mass variations (JES = 1.0)
+h_sig_mtop_up = generate_signal(m_top_nom + dm_top, jes_nom)
+h_sig_mtop_dn = generate_signal(m_top_nom - dm_top, jes_nom)
+
+# JES variations (m_t = 172.5, JES shifted by 2%)
+h_sig_jes_up = generate_signal(m_top_nom, jes_nom + djes)
+h_sig_jes_dn = generate_signal(m_top_nom, jes_nom - djes)
+
+# Background JES variations
+# For simplicity, we just shift the background linearly, though in reality
+# one would re-evaluate the background estimation with shifted JES.
+bkg_w_mass_up, bkg_top_mass_up = bkg_w_mass * (1+djes), bkg_top_mass * (1+djes)
+bkg_w_mass_dn, bkg_top_mass_dn = bkg_w_mass * (1-djes), bkg_top_mass * (1-djes)
+
+h_bkg_jes_up = get_hist((w_mass_axis, top_mass_axis))
+h_bkg_jes_dn = get_hist((w_mass_axis, top_mass_axis))
+h_bkg_jes_up.fill(bkg_w_mass_up, bkg_top_mass_up)
+h_bkg_jes_dn.fill(bkg_w_mass_dn, bkg_top_mass_dn)
+
+
+# Pseudodata
+# We inject a true top mass of 173.2 GeV, and a true JES of 1.01 (+1%)
 m_top_true = 173.2
-h_sig_true = generate_signal(m_top_true)
-h_data = get_hist(mass_axis)
-h_data.view()[...] = h_sig_true.view() + h_bkg.view()
+jes_true = 1.01
+h_sig_true = generate_signal(m_top_true, jes_true)
+h_bkg_true = get_hist((w_mass_axis, top_mass_axis))
+h_bkg_true.fill(bkg_w_mass * jes_true, bkg_top_mass * jes_true)
 
-# Plot the templates
-fig, ax = plt.subplots(figsize=(8, 6))
-hep.histplot([h_bkg, h_sig_nom], stack=True, histtype='fill', label=['Background', 'Signal (m_t=172.5)'], ax=ax)
-hep.histplot(h_data, histtype='errorbar', color='black', label=f'Data (m_t={m_top_true})', ax=ax)
-ax.legend()
-ax.set_ylabel("Events")
-plt.savefig(f"{outdir}/templates.png", bbox_inches="tight")
-plt.show()
+h_data = get_hist((w_mass_axis, top_mass_axis))
+h_data.view()[...] = h_sig_true.view() + h_bkg_true.view()
+
+# Plot the 1D projections of the nominal templates
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+# W mass projection
+hep.histplot([h_bkg.project("m_W"), h_sig_nom.project("m_W")], stack=True, histtype='fill', label=['Background', 'Signal'], ax=ax1)
+hep.histplot(h_data.project("m_W"), histtype='errorbar', color='black', label='Pseudodata', ax=ax1)
+ax1.set_xlabel("Reconstructed W Mass [GeV]")
+ax1.set_ylabel("Events")
+ax1.legend()
+
+# Top mass projection
+hep.histplot([h_bkg.project("m_top"), h_sig_nom.project("m_top")], stack=True, histtype='fill', label=['Background', 'Signal'], ax=ax2)
+hep.histplot(h_data.project("m_top"), histtype='errorbar', color='black', label='Pseudodata', ax=ax2)
+ax2.set_xlabel("Reconstructed Top Mass [GeV]")
+ax2.set_ylabel("Events")
+ax2.legend()
+
+plt.savefig(f"{outdir}/templates_2d_projections.png", bbox_inches="tight")
 
 # ------------------------------------------------------------------------------
 # Writing the tensor
 # ------------------------------------------------------------------------------
-# We encode the mass dependence as a shape variation (`mass_shift`) and declare
-# it as an unconstrained parameter (`constrained=False`). This tells the fitter
-# to treat the shift as a freely floating parameter instead of pulling it to a
-# Gaussian prior.
 writer = tensorwriter.TensorWriter()
 
-writer.add_channel(h_data.axes, "mass_region")
-writer.add_data(h_data, "mass_region")
+# The channel is now a 2D histogram
+writer.add_channel(h_data.axes, "mass_region_2d")
+writer.add_data(h_data, "mass_region_2d")
 
-writer.add_process(h_sig_nom, "signal", "mass_region", signal=True)
-writer.add_process(h_bkg, "background", "mass_region", signal=False)
+writer.add_process(h_sig_nom, "signal", "mass_region_2d", signal=True)
+writer.add_process(h_bkg, "background", "mass_region_2d", signal=False)
 
-# Add standard background normalization uncertainty
-writer.add_norm_systematic("bkg_norm", "background", "mass_region", 1.10) # 10% uncertainty
+# Normalization uncertainty for background
+writer.add_norm_systematic("bkg_norm", "background", "mass_region_2d", 1.10)
 
-# Add the mass variation as an UNCONSTRAINED systematic
-# Since we generated up/dn variations with +/- 1 GeV,
-# a value of +1 for this parameter means m_t = 173.5 GeV.
+# Unconstrained shape systematic for top mass extraction (affects signal only)
+# +1 sigma corresponds to +1 GeV top mass shift
 writer.add_systematic(
-    [h_sig_up, h_sig_dn],
+    [h_sig_mtop_up, h_sig_mtop_dn],
     "top_mass_shift",
     "signal",
-    "mass_region",
+    "mass_region_2d",
     symmetrize="average",
-    constrained=False,  # This is the key for a parameter measurement!
-    noi=True            # Nuisance parameter of interest
+    constrained=False,
+    noi=True
 )
 
-out_hdf5 = f"{outdir}/top_mass_tensor.hdf5"
-writer.write(outfolder=outdir, outfilename="top_mass_tensor")
+# Constrained shape systematic for JES (affects both signal and background)
+# +1 sigma corresponds to +2% JES shift
+writer.add_systematic(
+    [h_sig_jes_up, h_sig_jes_dn],
+    "jes",
+    "signal",
+    "mass_region_2d",
+    symmetrize="average",
+    constrained=True
+)
+
+writer.add_systematic(
+    [h_bkg_jes_up, h_bkg_jes_dn],
+    "jes",
+    "background",
+    "mass_region_2d",
+    symmetrize="average",
+    constrained=True
+)
+
+out_hdf5 = f"{outdir}/top_mass_jes_tensor.hdf5"
+writer.write(outfolder=outdir, outfilename="top_mass_jes_tensor")
 print(f"Tensor written to {out_hdf5}")
 
 # ------------------------------------------------------------------------------
 # Running the fit
 # ------------------------------------------------------------------------------
-# Now we run the maximum likelihood fit to extract the top mass. We will scan
-# the `top_mass_shift` parameter to compute the likelihood profile and its
-# uncertainty. By default, `rabbit_fit.py` scans parameters specified with `--scan`.
 print("\nRunning the fit...")
 subprocess.run(
-    f"rabbit_fit.py {outdir}/top_mass_tensor.hdf5 -t 0 -o {outdir} --scan top_mass_shift --unblind --postfix mass_fit",
+    f"rabbit_fit.py {outdir}/top_mass_jes_tensor.hdf5 -t 0 -o {outdir} --scan top_mass_shift --unblind --postfix mass_fit_jes",
     shell=True,
     check=True
 )
@@ -147,30 +205,19 @@ subprocess.run(
 # ------------------------------------------------------------------------------
 # Interpreting the result
 # ------------------------------------------------------------------------------
-# We can check the parameter pulls and constraints. The `top_mass_shift` is an
-# unconstrained parameter, so its "pull" is actually the best fit value of the
-# parameter.
 print("\nPrinting pulls and constraints...")
 subprocess.run(
-    f"rabbit_print_pulls_and_constraints.py {outdir}/fitresults_mass_fit.hdf5",
+    f"rabbit_print_pulls_and_constraints.py {outdir}/fitresults_mass_fit_jes.hdf5",
     shell=True,
     check=True
 )
-# We set up our templates such that +1 on `top_mass_shift` corresponds to +1 GeV
-# in mass relative to 172.5 GeV. Our pseudodata was generated with
-# m_{top} = 173.2 GeV. The fitted value of `top_mass_shift` should therefore
-# be close to 0.7.
 
 # ------------------------------------------------------------------------------
 # Plotting the likelihood scan
 # ------------------------------------------------------------------------------
-# We can plot the likelihood profile we scanned during the fit. The scan output
-# provides the 1D Delta ln(L) curve. The minimum of the parabola corresponds
-# to the best fit mass shift. The width of the parabola at 2 Delta ln(L) = 1
-# gives the 1 sigma uncertainty.
 print("\nPlotting likelihood scan...")
 subprocess.run(
-    f"rabbit_plot_likelihood_scan.py {outdir}/fitresults_mass_fit.hdf5 --param top_mass_shift -o {outdir}",
+    f"rabbit_plot_likelihood_scan.py {outdir}/fitresults_mass_fit_jes.hdf5 --param top_mass_shift -o {outdir}",
     shell=True,
     check=True
 )
