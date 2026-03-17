@@ -11,8 +11,8 @@ class OptionalListAction(argparse.Action):
             setattr(namespace, self.dest, values)
 
 
-def common_parser():
-    parser = argparse.ArgumentParser()
+def common_parser(description=""):
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "-v",
         "--verbose",

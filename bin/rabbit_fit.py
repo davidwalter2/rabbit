@@ -23,7 +23,7 @@ logger = None
 
 
 def make_parser():
-    parser = parsing.common_parser()
+    parser = parsing.common_parser("Perform binned profilme maximum likelihood fits")
     parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
     parser.add_argument(
         "--fullNll",
