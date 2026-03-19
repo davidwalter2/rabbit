@@ -891,11 +891,12 @@ def make_plot(
 
         if diff:
             h0 = hh.addHists(h_num, h_num, scale2=-1)
-            h2 = hh.addHists(h_data, h_den, scale2=-1)
+            h2 = hh.addHists(h_num, h_den, scale2=-1)
             if h_data_stat is not None:
-                h2_stat = hh.divideHists(
-                    h_data_stat, h_den, cutoff=cutoff, rel_unc=True
-                )
+                if args.ratioToData:
+                    h2_stat = hh.addHists(h_num, h_data_stat, scale2=-1)
+                else:
+                    h2_stat = hh.addHists(h_data_stat, h_den, scale2=-1)
         else:
             h0 = hh.divideHists(
                 h_num,
@@ -938,7 +939,7 @@ def make_plot(
                     h2_stat,
                     histtype="errorbar",
                     color="black",
-                    yerr=True if counts else h2.variances() ** 0.5,
+                    yerr=True if counts else h2_stat.variances() ** 0.5,
                     linewidth=2,
                     capsize=2,
                     ax=ax2,
@@ -971,10 +972,14 @@ def make_plot(
                 label_unc = args.uncertaintyLabel
 
             if diff:
+                # The difference panel is centered at zero; only the upper-panel
+                # uncertainty band is centered on the nominal prediction.
+                lower_hi = std
+                lower_lo = -std
                 ax2.fill_between(
                     edges,
-                    np.append((nom + std), ((nom + std))[-1]),
-                    np.append((nom - std), ((nom - std))[-1]),
+                    np.append(lower_hi, lower_hi[-1]),
+                    np.append(lower_lo, lower_lo[-1]),
                     step="post",
                     facecolor=facecolor,
                     zorder=0,
