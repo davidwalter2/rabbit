@@ -53,26 +53,29 @@ class Mapping:
     def get_data(self, *args, **kwargs):
         return self._get_data(*args, **kwargs)
 
-    def _get_data(self, data, data_cov_inv=None):
+    def _get_data(self, data, data_var=None, data_cov_inv=None):
         with tf.GradientTape() as t:
             t.watch(data)
             output = self.compute_flat(None, data)
 
+        # jacobian shape=(output, data)
         jacobian = t.jacobian(output, data)
 
         # Ensure the Jacobian has at least 2 dimensions (expand in case output is a scalar)
         if len(jacobian.shape) == 1:
             jacobian = tf.expand_dims(jacobian, axis=0)
 
-        if data_cov_inv is None:
-            # Assume poisson uncertainties on data
-            cov_output = (jacobian * data) @ tf.transpose(jacobian)
-        else:
+        if data_cov_inv is not None:
             # General case with full covariance matrix
             # the following is equivalent to, but faster than: cov_output = jacobian @ tf.linalg.inv(data_cov_inv) @ tf.transpose(jacobian)
             cov_output = jacobian @ tf.linalg.solve(
                 data_cov_inv, tf.transpose(jacobian)
             )
+        elif data_var is not None:
+            cov_output = (jacobian * data_var) @ tf.transpose(jacobian)
+        else:
+            # Assume poisson uncertainties on data
+            cov_output = (jacobian * data) @ tf.transpose(jacobian)
 
         variances_output = tf.linalg.diag_part(cov_output)
 
