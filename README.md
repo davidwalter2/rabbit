@@ -11,6 +11,7 @@ Implemented approximations in the limit of large sample size simplify intensive 
 Jupyter notebook tutorials are available in [notebooks/](notebooks/):
 - [Tutorial 1: Getting started](notebooks/tutorial_1_getting_started.ipynb)
 - [Tutorial 2: Advanced topics (mappings, masked channels, POI models)](notebooks/tutorial_2_advanced.ipynb)
+- [Tutorial 3: Fitting the Top Quark Mass](notebooks/tutorial_3_top_mass.ipynb)
 
 Talks given about rabbit:
 - [ACAT 2025](https://indico.cern.ch/event/1488410/contributions/6561542/)

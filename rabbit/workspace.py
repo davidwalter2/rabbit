@@ -191,15 +191,24 @@ class Workspace:
         self.add_value(float(chi2), "chi2" + postfix, mapping.key)
 
     def add_observed_hists(
-        self, mapping, data_obs, nobs, data_cov_inv=None, nobs_cov_inv=None
+        self,
+        mapping,
+        data_obs,
+        nobs,
+        data_varobs=None,
+        varnobs=None,
+        data_cov_inv=None,
+        nobs_cov_inv=None,
     ):
         hists_data_obs = {}
         hists_nobs = {}
 
         values_data_obs, variances_data_obs, cov_data_obs = mapping.get_data(
-            data_obs, data_cov_inv
+            data_obs, data_varobs, data_cov_inv
         )
-        values_nobs, variances_nobs, cov_nobs = mapping.get_data(nobs, nobs_cov_inv)
+        values_nobs, variances_nobs, cov_nobs = mapping.get_data(
+            nobs, varnobs, nobs_cov_inv
+        )
 
         start = 0
         for channel, info in mapping.channel_info.items():
