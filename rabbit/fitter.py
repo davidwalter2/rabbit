@@ -11,6 +11,7 @@ from wums import logging
 
 from rabbit import io_tools
 from rabbit import tfhelpers as tfh
+from rabbit.impacts import global_impacts, nonprofiled_impacts, traditional_impacts
 
 logger = logging.child_logger(__name__)
 
@@ -730,339 +731,71 @@ class Fitter:
                     )
                 )
 
-    def nonprofiled_impacts_parms(self, unconstrained_err=1.0):
-        x_tmp = tf.identity(self.x.value())
-        x_tmp_tiled = tf.tile(
-            tf.reshape(x_tmp, [1, 1, -1]), [len(self.frozen_indices), 2, 1]
-        )
-        nonprofiled_impacts = tf.Variable(x_tmp_tiled)
-
-        theta0_tmp = tf.identity(self.theta0.value())
-
-        err_theta = tf.where(
-            self.indata.constraintweights == 0.0,
-            unconstrained_err,
-            tf.math.reciprocal(self.indata.constraintweights),
-        )
-
-        for i, idx in enumerate(self.frozen_indices):
-            logger.info(f"Now at parameter {self.frozen_params[i]}")
-
-            for j, sign in enumerate((1, -1)):
-                variation = (
-                    sign * err_theta[idx - self.poi_model.npoi]
-                    + theta0_tmp[idx - self.poi_model.npoi]
-                )
-                # vary the non-profile parameter
-                self.theta0[idx - self.poi_model.npoi].assign(variation)
-                self.x[idx].assign(
-                    variation
-                )  # this should not be needed but should accelerates the minimization
-                # minimize
-                self.minimize()
-                if self.diagnostics:
-                    val, grad, hess = self.loss_val_grad_hess()
-                    edmval, cov = tfh.edmval_cov(grad, hess)
-                    logger.info(f"edmval: {edmval}")
-                # difference w.r.t. nominal fit
-                diff = x_tmp - self.x.value()
-                nonprofiled_impacts[i, j].assign(diff)
-                self.x.assign(x_tmp)
-
-            # back to original value
-            self.theta0[idx - self.poi_model.npoi].assign(
-                theta0_tmp[idx - self.poi_model.npoi]
-            )
-
-        # grouped nonprofiled impacts
-        @tf.function
-        def envelope(values):
-            zeros = tf.zeros(
-                (tf.shape(values)[0], tf.shape(values)[-1]), dtype=values.dtype
-            )
-            vmin = tf.reduce_min(values, axis=1)
-            vmax = tf.reduce_max(values, axis=1)
-            lower = -tf.sqrt(tf.reduce_sum(tf.minimum(zeros, vmin) ** 2, axis=0))
-            upper = tf.sqrt(tf.reduce_sum(tf.maximum(zeros, vmax) ** 2, axis=0))
-            return tf.stack([lower, upper])
-
-        impact_group_names = []
-        impact_groups = []
-
-        for group, idxs in zip(self.indata.systgroups, self.indata.systgroupidxs):
-            frozen_mask = tf.constant(np.isin(self.frozen_indices, idxs))
-            frozen_idxs = tf.where(frozen_mask)
-            if tf.size(frozen_idxs) > 0:
-                selected_impacts = tf.gather(nonprofiled_impacts, frozen_idxs[:, 0])
-                group_env = envelope(selected_impacts)
-                impact_groups.append(group_env)
-                impact_group_names.append(group)
-
-        # Add total envelope
-        total_env = envelope(nonprofiled_impacts)
-        impact_groups.append(total_env)
-        impact_group_names.append(b"Total")
-
-        impact_groups = tf.stack(impact_groups)
-
-        return (
-            self.frozen_params,
-            nonprofiled_impacts.numpy(),
-            impact_group_names,
-            impact_groups.numpy(),
-        )
-
-    def _compute_impact_group(self, v, idxs):
-        cov_reduced = tf.gather(
-            self.cov[self.poi_model.npoi :, self.poi_model.npoi :], idxs, axis=0
-        )
-        cov_reduced = tf.gather(cov_reduced, idxs, axis=1)
-        v_reduced = tf.gather(v, idxs, axis=1)
-        invC_v = tf.linalg.solve(cov_reduced, tf.transpose(v_reduced))
-        v_invC_v = tf.einsum("ij,ji->i", v_reduced, invC_v)
-        return tf.sqrt(v_invC_v)
-
-    def _gather_poi_noi_vector(self, v):
-        v_poi = v[: self.poi_model.npoi]
-        # protection for constained NOIs, set them to 0
-        mask = (self.indata.noiidxs >= 0) & (
-            self.indata.noiidxs < tf.shape(v[self.poi_model.npoi :])[0]
-        )
-        safe_idxs = tf.where(mask, self.indata.noiidxs, 0)
-        mask = tf.cast(mask, v.dtype)
-        mask = tf.reshape(
-            mask,
-            tf.concat(
-                [tf.shape(mask), tf.ones(tf.rank(v) - 1, dtype=tf.int32)], axis=0
-            ),
-        )
-        v_noi = tf.gather(v[self.poi_model.npoi :], safe_idxs) * mask
-        v_gathered = tf.concat([v_poi, v_noi], axis=0)
-        return v_gathered
-
     @tf.function
     def impacts_parms(self, hess):
-        # impact for poi at index i in covariance matrix from nuisance with index j is C_ij/sqrt(C_jj) = <deltax deltatheta>/sqrt(<deltatheta^2>)
-        v = self._gather_poi_noi_vector(self.cov)
-        impacts = v / tf.reshape(tf.sqrt(tf.linalg.diag_part(self.cov)), [1, -1])
 
         nstat = self.poi_model.npoi + self.indata.nsystnoconstraint
         hess_stat = hess[:nstat, :nstat]
-        inv_hess_stat = tf.linalg.inv(hess_stat)
+        cov_stat = tf.linalg.inv(hess_stat)
 
         if self.binByBinStat:
-            # impact bin-by-bin stat
             val_no_bbb, grad_no_bbb, hess_no_bbb = self.loss_val_grad_hess(
                 profile=False
             )
-
             hess_stat_no_bbb = hess_no_bbb[:nstat, :nstat]
-            inv_hess_stat_no_bbb = tf.linalg.inv(hess_stat_no_bbb)
-            impacts_data_stat = tf.sqrt(tf.linalg.diag_part(inv_hess_stat_no_bbb))
-            impacts_data_stat = self._gather_poi_noi_vector(impacts_data_stat)
-            impacts_data_stat = tf.reshape(impacts_data_stat, (-1, 1))
-
-            impacts_bbb_sq = tf.linalg.diag_part(inv_hess_stat - inv_hess_stat_no_bbb)
-            impacts_bbb_sq = self._gather_poi_noi_vector(impacts_bbb_sq)
-            impacts_bbb = tf.sqrt(tf.nn.relu(impacts_bbb_sq))  # max(0,x)
-            impacts_bbb = tf.reshape(impacts_bbb, (-1, 1))
-            impacts_grouped = tf.concat([impacts_data_stat, impacts_bbb], axis=1)
+            cov_stat_no_bbb = tf.linalg.inv(hess_stat_no_bbb)
         else:
-            impacts_data_stat = tf.sqrt(tf.linalg.diag_part(inv_hess_stat))
-            impacts_data_stat = self._gather_poi_noi_vector(impacts_data_stat)
-            impacts_data_stat = tf.reshape(impacts_data_stat, (-1, 1))
-            impacts_grouped = impacts_data_stat
+            cov_stat_no_bbb = None
 
-        if len(self.indata.systgroupidxs):
-            impacts_grouped_syst = tf.map_fn(
-                lambda idxs: self._compute_impact_group(
-                    v[:, self.poi_model.npoi :], idxs
-                ),
-                tf.ragged.constant(self.indata.systgroupidxs, dtype=tf.int32),
-                fn_output_signature=tf.TensorSpec(
-                    shape=(impacts.shape[0],), dtype=tf.float64
-                ),
-            )
-            impacts_grouped_syst = tf.transpose(impacts_grouped_syst)
-            impacts_grouped = tf.concat([impacts_grouped_syst, impacts_grouped], axis=1)
+        impacts, impacts_grouped = traditional_impacts.impacts_parms(
+            self.cov,
+            cov_stat,
+            cov_stat_no_bbb,
+            self.poi_model.npoi,
+            self.indata.noiidxs,
+            self.indata.systgroupidxs,
+        )
 
         return impacts, impacts_grouped
 
-    def _compute_global_impact_group(self, d_squared, idxs):
-        gathered = tf.gather(d_squared, idxs, axis=-1)
-        d_squared_summed = tf.reduce_sum(gathered, axis=-1)
-        return tf.sqrt(d_squared_summed)
-
-    def dbetadx_tangents(self, tangent_vector):
-        """
-        Computes JVP for a single tangent vector (column of cov_dexpdx).
-        """
-        # Setup Forward Accumulator for this tangent
-        with tf.autodiff.ForwardAccumulator(self.x, tangent_vector) as acc:
-            _1, _2, beta = self._compute_yields_with_beta(
-                profile=True, compute_norm=False, full=False
-            )
-        return acc.jvp(beta)
-
-    def _compute_global_impacts_beta0_jvp(self, cov_dexpdx, profile=True):
-        """
-        Computes global impacts from beta parameters via JVP in forward accumulator mode.
-        This is fast in case of more beta parameters than explicit parameters (self.x) and 'cov_dexpdx' has only a few columns.
-        It should always be more memory efficient
-        """
-        with tf.GradientTape() as t2:
-            t2.watch(self.ubeta)
-            with tf.GradientTape() as t1:
-                t1.watch(self.ubeta)
-                _1, _2, beta = self._compute_yields_with_beta(
-                    profile=profile, compute_norm=False, full=False
-                )
-                lbeta = self._compute_lbeta(beta)
-            pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
-
-        # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
-        pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
-
-        # this the cholesky decomposition of pd2lbetadbeta2
-        sbeta = tf.linalg.LinearOperatorDiag(
-            tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
+    def _global_impacts_context(self):
+        return global_impacts.GlobalImpactsContext(
+            x=self.x,
+            ubeta=self.ubeta,
+            beta_shape=self.beta_shape,
+            compute_yields_with_beta_fn=self._compute_yields_with_beta,
+            compute_lbeta_fn=self._compute_lbeta,
+            compute_lc_fn=self._compute_lc,
+            npoi=self.poi_model.npoi,
+            systgroupidxs=self.indata.systgroupidxs,
+            bin_by_bin_stat=self.binByBinStat,
+            bin_by_bin_stat_mode=self.binByBinStatMode,
+            global_impacts_from_jvp=self.globalImpactsFromJVP,
         )
-
-        impacts_beta_shape = (*self.beta_shape, cov_dexpdx.shape[-1])
-        impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=cov_dexpdx.dtype)
-
-        if profile:
-            # dbeta/dx is None if not profiled (no relation)
-            tangents = tf.transpose(cov_dexpdx)
-            dbetadx_cov_dexpdx = tf.vectorized_map(self.dbetadx_tangents, tangents)
-
-            # flatten all but first axes
-            dbetadx_cov_dexpdx = tf.reshape(
-                dbetadx_cov_dexpdx, [tf.shape(dbetadx_cov_dexpdx)[0], -1]
-            )
-            dbetadx_cov_dexpdx = tf.transpose(dbetadx_cov_dexpdx)
-
-            impacts_beta0 += tf.reshape(sbeta @ dbetadx_cov_dexpdx, impacts_beta_shape)
-
-        return impacts_beta0, sbeta
-
-    def _compute_global_impacts_beta0(self, cov_dexpdx, profile=True):
-        """
-        Computes global impacts from beta parameters in the traditional mode.
-        This is fast in case of less beta parameters than explicit parameters (self.x) or 'cov_dexpdx' has many columns.
-        """
-        with tf.GradientTape(persistent=True) as t2:
-            t2.watch([self.x, self.ubeta])
-            with tf.GradientTape(persistent=True) as t1:
-                t1.watch([self.x, self.ubeta])
-                _1, _2, beta = self._compute_yields_with_beta(
-                    profile=profile, compute_norm=False, full=False
-                )
-                lbeta = self._compute_lbeta(beta)
-            pdlbetadbeta = t1.gradient(lbeta, self.ubeta)
-            dbetadx = t1.jacobian(beta, self.x)
-        # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
-        pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, self.ubeta)
-
-        # this the cholesky decomposition of pd2lbetadbeta2
-        sbeta = tf.linalg.LinearOperatorDiag(
-            tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
-        )
-
-        impacts_beta_shape = (*self.beta_shape, cov_dexpdx.shape[-1])
-        impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=cov_dexpdx.dtype)
-
-        if profile:
-            dbetadx_cov_dexpdx = dbetadx @ cov_dexpdx
-            dbetadx_cov_dexpdx = tf.reshape(
-                dbetadx_cov_dexpdx, [-1, tf.shape(dbetadx_cov_dexpdx)[-1]]
-            )
-
-            impacts_beta0 += tf.reshape(sbeta @ dbetadx_cov_dexpdx, impacts_beta_shape)
-
-        return impacts_beta0, sbeta
-
-    def _compute_global_impacts_x0(self, cov_dexpdx):
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                lc = self._compute_lc()
-            dlcdx = t1.gradient(lc, self.x)
-        # d2lcdx2 is diagonal so we can use gradient instead of jacobian
-        d2lcdx2_diag = t2.gradient(dlcdx, self.x)
-
-        # sc is the cholesky decomposition of d2lcdx2
-        sc = tf.linalg.LinearOperatorDiag(tf.sqrt(d2lcdx2_diag), is_self_adjoint=True)
-        return sc @ cov_dexpdx
 
     @tf.function
     def global_impacts_parms(self):
-        # TODO migrate this to a mapping to avoid the below code which is largely duplicated
-
-        idxs_poi = tf.range(self.poi_model.npoi, dtype=tf.int64)
-        idxs_noi = tf.constant(
-            self.poi_model.npoi + self.indata.noiidxs, dtype=tf.int64
+        return global_impacts.global_impacts_parms(
+            self._global_impacts_context(),
+            self.cov,
+            self.indata.noiidxs,
         )
-        idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
 
-        dexpdx = tf.one_hot(idxsout, depth=self.cov.shape[0], dtype=self.cov.dtype)
-
-        cov_dexpdx = tf.matmul(self.cov, dexpdx, transpose_b=True)
-
-        var_total = tf.linalg.diag_part(self.cov)
-        var_total = tf.gather(var_total, idxsout)
-
-        if self.binByBinStat:
-            if self.globalImpactsFromJVP:
-                impacts_beta0, _ = self._compute_global_impacts_beta0_jvp(cov_dexpdx)
-            else:
-                impacts_beta0, _ = self._compute_global_impacts_beta0(cov_dexpdx)
-
-            var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
-
-            if self.binByBinStatMode == "full":
-                impacts_beta0_process = tf.sqrt(var_beta0)
-                var_beta0 = tf.reduce_sum(var_beta0, axis=0)
-
-            impacts_beta0_total = tf.sqrt(var_beta0)
-
-        impacts_x0 = self._compute_global_impacts_x0(cov_dexpdx)
-        impacts_theta0 = impacts_x0[self.poi_model.npoi :]
-
-        impacts_theta0 = tf.transpose(impacts_theta0)
-        impacts = impacts_theta0
-
-        impacts_theta0_sq = tf.square(impacts_theta0)
-        var_theta0 = tf.reduce_sum(impacts_theta0_sq, axis=-1)
-
-        var_nobs = var_total - var_theta0
-
-        if self.binByBinStat:
-            var_nobs -= var_beta0
-
-        impacts_nobs = tf.sqrt(var_nobs)
-
-        if self.binByBinStat:
-            impacts_grouped = tf.stack([impacts_nobs, impacts_beta0_total], axis=-1)
-            if self.binByBinStatMode == "full":
-                impacts_grouped = tf.concat(
-                    [impacts_grouped, tf.transpose(impacts_beta0_process)], axis=-1
-                )
-
-        else:
-            impacts_grouped = impacts_nobs[..., None]
-
-        if len(self.indata.systgroupidxs):
-            impacts_grouped_syst = tf.map_fn(
-                lambda idxs: self._compute_global_impact_group(impacts_theta0_sq, idxs),
-                tf.ragged.constant(self.indata.systgroupidxs, dtype=tf.int64),
-                fn_output_signature=tf.TensorSpec(
-                    shape=(impacts_theta0_sq.shape[0],), dtype=impacts_theta0_sq.dtype
-                ),
-            )
-            impacts_grouped_syst = tf.transpose(impacts_grouped_syst)
-            impacts_grouped = tf.concat([impacts_grouped_syst, impacts_grouped], axis=1)
-
-        return impacts, impacts_grouped
+    def nonprofiled_impacts_parms(self, unconstrained_err=1.0):
+        return nonprofiled_impacts.nonprofiled_impacts_parms(
+            self.x,
+            self.theta0,
+            self.frozen_indices,
+            self.frozen_params,
+            self.indata.constraintweights,
+            self.indata.systgroups,
+            self.indata.systgroupidxs,
+            self.poi_model.npoi,
+            self.minimize,
+            self.diagnostics,
+            self.loss_val_grad_hess,
+            unconstrained_err,
+        )
 
     def _pd2ldbeta2(self, profile=False):
         with tf.GradientTape(watch_accessed_variables=False) as t2:
@@ -1205,97 +938,15 @@ class Fitter:
         expvar = tf.reshape(expvar_flat, tf.shape(expected))
 
         if compute_global_impacts:
-            # the fully general contribution to the covariance matrix
-            # for a factorized likelihood L = sum_i L_i can be written as
-            # cov_i = dexpdx @ cov_x @ d2L_i/dx2 @ cov_x @ dexpdx.T
-            # This is totally general and always adds up to the total covariance matrix
-
-            # This can be factorized into impacts only if the individual contributions
-            # are rank 1.  This is not the case in general for the data stat uncertainties,
-            # in particular where postfit nexpected != nobserved and nexpected is not a linear
-            # function of the poi's and nuisance parameters x
-
-            # For the systematic and MC stat uncertainties this is equivalent to the
-            # more conventional global impact calculation (and without needing to insert the uncertainty on
-            # the global observables "by hand", which can be non-trivial beyond the Gaussian case)
-
-            if self.binByBinStat:
-                if self.globalImpactsFromJVP:
-                    impacts_beta0, sbeta = self._compute_global_impacts_beta0_jvp(
-                        cov_dexpdx, profile
-                    )
-                else:
-                    impacts_beta0, sbeta = self._compute_global_impacts_beta0(
-                        cov_dexpdx, profile
-                    )
-
-                if pdexpdbeta is not None:
-                    impacts_beta0 += tf.reshape(
-                        sbeta @ pd2ldbeta2_pdexpdbeta, impacts_beta0.shape
-                    )
-
-                var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
-                if self.binByBinStatMode == "full":
-                    impacts_beta0_process = tf.sqrt(var_beta0)
-                    var_beta0 = tf.reduce_sum(var_beta0, axis=0)
-
-                impacts_beta0_total = tf.sqrt(var_beta0)
-
-            # protect against inconsistency
-            # FIXME this should be handled more generally e.g. through modification of
-            # the constraintweights for prefit vs postfit, though special handling of the zero
-            # uncertainty case would still be needed
-            if (not profile) and self.prefitUnconstrainedNuisanceUncertainty != 0.0:
-                raise NotImplementedError(
-                    "Global impacts calculation not implemented for prefit case where prefitUnconstrainedNuisanceUncertainty != 0."
-                )
-
-            impacts_x0 = self._compute_global_impacts_x0(cov_dexpdx)
-            impacts_theta0 = impacts_x0[self.poi_model.npoi :]
-
-            impacts_theta0 = tf.transpose(impacts_theta0)
-            impacts = impacts_theta0
-
-            impacts_theta0_sq = tf.square(impacts_theta0)
-            var_theta0 = tf.reduce_sum(impacts_theta0_sq, axis=-1)
-
-            var_nobs = expvar_flat - var_theta0
-
-            if self.binByBinStat:
-                var_nobs -= var_beta0
-
-            impacts_nobs = tf.sqrt(var_nobs)
-
-            if self.binByBinStat:
-                impacts_grouped = tf.stack([impacts_nobs, impacts_beta0_total], axis=-1)
-                if self.binByBinStatMode == "full":
-                    impacts_grouped = tf.concat(
-                        [impacts_grouped, tf.transpose(impacts_beta0_process)], axis=-1
-                    )
-
-            else:
-                impacts_grouped = impacts_nobs[..., None]
-
-            if len(self.indata.systgroupidxs):
-                impacts_grouped_syst = tf.map_fn(
-                    lambda idxs: self._compute_global_impact_group(
-                        impacts_theta0_sq, idxs
-                    ),
-                    tf.ragged.constant(self.indata.systgroupidxs, dtype=tf.int64),
-                    fn_output_signature=tf.TensorSpec(
-                        shape=(impacts_theta0_sq.shape[0],),
-                        dtype=impacts_theta0_sq.dtype,
-                    ),
-                )
-                impacts_grouped_syst = tf.transpose(impacts_grouped_syst)
-
-                impacts_grouped = tf.concat(
-                    [impacts_grouped_syst, impacts_grouped], axis=-1
-                )
-
-            impacts = tf.reshape(impacts, [*expvar.shape, impacts.shape[-1]])
-            impacts_grouped = tf.reshape(
-                impacts_grouped, [*expvar.shape, impacts_grouped.shape[-1]]
+            impacts, impacts_grouped = global_impacts.global_impacts_obs(
+                self._global_impacts_context(),
+                cov_dexpdx,
+                expvar_flat,
+                expvar.shape,
+                profile,
+                pdexpdbeta,
+                pd2ldbeta2_pdexpdbeta if pdexpdbeta is not None else None,
+                self.prefitUnconstrainedNuisanceUncertainty,
             )
         else:
             impacts = None
