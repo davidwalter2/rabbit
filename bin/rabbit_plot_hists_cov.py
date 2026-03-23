@@ -125,6 +125,7 @@ def parseArgs():
     parser.add_argument(
         "--selectionAxes",
         type=str,
+        nargs="*",
         default=["charge", "passIso", "passMT", "cosThetaStarll", "qGen"],
         help="List of axes where for each bin a separate plot is created",
     )
