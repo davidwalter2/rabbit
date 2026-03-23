@@ -783,6 +783,26 @@ class Fitter:
             self.indata.noiidxs,
         )
 
+    @tf.function
+    def gaussian_global_impacts_parms(self):
+        dxdtheta0, dxdnobs, dxdbeta0 = self._dxdvars()
+        impacts, impacts_grouped = global_impacts.gaussian_global_impacts_parms(
+            self._global_impacts_context(),
+            dxdtheta0,
+            dxdnobs,
+            dxdbeta0,
+            self.indata.noiidxs,
+            self.nobs if self.varnobs is None else self.varnobs,
+            (
+                self.varbeta
+                if self.binByBinStatType in ["normal-additive"]
+                else 1.0 / self.kstat
+            ),
+            self.data_cov_inv,
+        )
+
+        return impacts, impacts_grouped
+
     def nonprofiled_impacts_parms(self, unconstrained_err=1.0):
         return nonprofiled_impacts.nonprofiled_impacts_parms(
             self.x,

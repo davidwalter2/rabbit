@@ -852,7 +852,12 @@ def parseArgs():
     )
     parser.add_argument("--noImpacts", action="store_true", help="Don't show impacts")
     parser.add_argument(
-        "--globalImpacts", action="store_true", help="Print global impacts"
+        "--globalImpacts", action="store_true", help="Plot global impacts"
+    )
+    parser.add_argument(
+        "--gaussianGlobalImpacts",
+        action="store_true",
+        help="Plot global impacts in the fully gaussian approximation",
     )
     parser.add_argument(
         "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
@@ -1023,6 +1028,8 @@ def load_dataframe_parms(
 ):
     if args.globalImpacts:
         impact_type = "global"
+    elif args.gaussianGlobalImpacts:
+        impact_type = "gaussian_global"
     elif args.nonprofiledImpacts:
         impact_type = "nonprofiled"
     else:
@@ -1309,6 +1316,8 @@ def main():
         impacts_name = "impacts"
         if args.globalImpacts:
             impacts_name = f"global_{impacts_name}"
+        elif args.gaussianGlobalImpacts:
+            impacts_name = f"gaussian_global_{impacts_name}"
         elif args.nonprofiledImpacts:
             impacts_name = f"nonprofiled_{impacts_name}"
 

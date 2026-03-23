@@ -165,7 +165,13 @@ def make_parser():
         "--globalImpacts",
         default=False,
         action="store_true",
-        help="compute impacts in terms of variations of global observables (as opposed to nuisance parameters directly)",
+        help="compute impacts in terms of variations from the likelihood of global observables (as opposed to nuisance parameters directly)",
+    )
+    parser.add_argument(
+        "--gaussianGlobalImpacts",
+        default=False,
+        action="store_true",
+        help="compute impacts in terms of variations of global observables in the fully gaussian approximation (as opposed to nuisance parameters directly)",
     )
     parser.add_argument(
         "--globalImpactsDisableJVP",
@@ -323,7 +329,18 @@ def fit(args, fitter, ws, dofit=True):
         del hess
 
         if args.globalImpacts:
-            ws.add_global_impacts_hists(*fitter.global_impacts_parms())
+            ws.add_impacts_hists(
+                *fitter.global_impacts_parms(),
+                base_name="global_impacts",
+                global_impacts=True,
+            )
+
+        if args.gaussianGlobalImpacts:
+            ws.add_impacts_hists(
+                *fitter.gaussian_global_impacts_parms(),
+                base_name="gaussian_global_impacts",
+                global_impacts=True,
+            )
 
     nllvalreduced = fitter.reduced_nll().numpy()
 

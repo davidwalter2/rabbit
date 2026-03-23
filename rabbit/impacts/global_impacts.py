@@ -184,7 +184,6 @@ def _compute_grouped_impacts(
 
 
 def global_impacts_parms(ctx, cov, noiidxs):
-    # TODO migrate this to a mapping to avoid the below code which is largely duplicated
     idxs_poi = tf.range(ctx.npoi, dtype=tf.int64)
     idxs_noi = tf.constant(ctx.npoi + noiidxs, dtype=tf.int64)
     idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
@@ -287,5 +286,77 @@ def global_impacts_obs(
     impacts_grouped = tf.reshape(
         impacts_grouped, [*expvar_shape, impacts_grouped.shape[-1]]
     )
+
+    return impacts, impacts_grouped
+
+
+def gaussian_global_impacts_parms(
+    ctx,
+    dxdtheta0,
+    dxdnobs,
+    dxdbeta0,
+    noigroupidxs,
+    varnobs,
+    varbeta,
+    data_cov_inv=None,
+):
+    # compute impacts for pois and nois
+    dxdtheta0_poi = dxdtheta0[: ctx.npoi]
+    dxdtheta0_noi = tf.gather(dxdtheta0[ctx.npoi :], noigroupidxs)
+    dxdtheta0 = tf.concat([dxdtheta0_poi, dxdtheta0_noi], axis=0)
+    dxdtheta0_squared = tf.square(dxdtheta0)
+
+    # global impact data stat
+    dxdnobs_poi = dxdnobs[: ctx.npoi]
+    dxdnobs_noi = tf.gather(dxdnobs[ctx.npoi :], noigroupidxs)
+    dxdnobs = tf.concat([dxdnobs_poi, dxdnobs_noi], axis=0)
+
+    if data_cov_inv is not None:
+        data_cov = tf.linalg.inv(data_cov_inv)
+        # equivalent to tf.linalg.diag_part(dxdnobs @ data_cov @ tf.transpose(dxdnobs)) but avoiding computing full matrix
+        data_stat = tf.einsum("ij,jk,ik->i", dxdnobs, data_cov, dxdnobs)
+    else:
+        data_stat = tf.reduce_sum(tf.square(dxdnobs) * varnobs, axis=-1)
+
+    impacts_data_stat = tf.sqrt(data_stat)
+
+    if ctx.bin_by_bin_stat:
+        # global impact bin-by-bin stat
+        dxdbeta0_poi = dxdbeta0[: ctx.npoi]
+        dxdbeta0_noi = tf.gather(dxdbeta0[ctx.npoi :], noigroupidxs)
+        dxdbeta0 = tf.concat([dxdbeta0_poi, dxdbeta0_noi], axis=0)
+
+        var_beta0 = tf.reduce_sum(
+            tf.reshape(tf.square(dxdbeta0), (-1, *ctx.beta_shape)) * varbeta, axis=1
+        )
+
+        impacts_beta0_process = None
+        if ctx.bin_by_bin_stat_mode == "full":
+            impacts_beta0_process = tf.sqrt(var_beta0)
+            var_beta0 = tf.reduce_sum(var_beta0, axis=-1)
+
+        impacts_beta0_total = tf.sqrt(var_beta0)
+
+        impacts_grouped = tf.stack([impacts_data_stat, impacts_beta0_total], axis=-1)
+        if ctx.bin_by_bin_stat_mode == "full":
+            impacts_grouped = tf.concat(
+                [impacts_grouped, impacts_beta0_process], axis=-1
+            )
+    else:
+        impacts_grouped = impacts_data_stat
+
+    if len(ctx.systgroupidxs):
+        impacts_grouped_syst = tf.map_fn(
+            lambda idxs: _compute_global_impact_group(dxdtheta0_squared, idxs),
+            tf.ragged.constant(ctx.systgroupidxs, dtype=tf.int64),
+            fn_output_signature=tf.TensorSpec(
+                shape=(dxdtheta0_squared.shape[0],), dtype=tf.float64
+            ),
+        )
+        impacts_grouped_syst = tf.transpose(impacts_grouped_syst)
+        impacts_grouped = tf.concat([impacts_grouped_syst, impacts_grouped], axis=1)
+
+    # global impacts of unconstrained parameters are always 0, only store impacts of constrained ones
+    impacts = dxdtheta0
 
     return impacts, impacts_grouped

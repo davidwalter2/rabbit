@@ -23,6 +23,11 @@ def parseArgs():
         "--globalImpacts", action="store_true", help="Print global impacts"
     )
     parser.add_argument(
+        "--gaussianGlobalImpacts",
+        action="store_true",
+        help="Print global impacts in the fully gaussian approximation",
+    )
+    parser.add_argument(
         "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
     )
     parser.add_argument(
@@ -88,6 +93,8 @@ def printImpactsParm(args, fitresult, poi):
 
     if args.globalImpacts:
         impact_type = "global"
+    elif args.gaussianGlobalImpacts:
+        impact_type = "gaussian_global"
     elif args.nonprofiledImpacts:
         impact_type = "nonprofiled"
     else:

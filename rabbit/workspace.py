@@ -408,11 +408,6 @@ class Workspace:
             impacts_grouped,
         )
 
-    def add_global_impacts_hists(self, *args, base_name="global_impacts", **kwargs):
-        self.add_impacts_hists(
-            *args, **kwargs, base_name=base_name, global_impacts=True
-        )
-
     def add_expected_hists(
         self,
         mapping,
