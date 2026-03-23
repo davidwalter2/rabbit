@@ -196,8 +196,10 @@ def save_observed_hists(args, mappings, fitter, ws):
             mapping,
             fitter.indata.data_obs,
             fitter.nobs.value(),
+            fitter.indata.data_var,
+            fitter.varnobs.value() if fitter.varnobs is not None else None,
             fitter.indata.data_cov_inv,
-            fitter.data_cov_inv,
+            fitter.data_cov_inv.numpy() if fitter.data_cov_inv is not None else None,
         )
 
 

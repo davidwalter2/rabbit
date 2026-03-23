@@ -190,6 +190,8 @@ class Fitter:
         self.lognobs = tf.Variable(
             tf.zeros_like(self.indata.data_obs), trainable=False, name="lognobs"
         )
+
+        self.varnobs = None
         self.data_cov_inv = None
 
         if self.chisqFit:
@@ -201,7 +203,7 @@ class Fitter:
                 logger.warning(
                     "No covariance provided, use reciproval of data variances"
                 )
-                self.data_cov_inv = np.diag(
+                self.data_cov_inv = tf.linalg.diag(
                     1.0 / self.indata.getattr("data_obs", "data_var")
                 )
             else:
@@ -1631,6 +1633,8 @@ class Fitter:
             res_cov_stat = dresdnobs @ tf.linalg.solve(
                 self.data_cov_inv, tf.transpose(dresdnobs)
             )
+        elif self.varnobs is not None:
+            res_cov_stat = dresdnobs @ (self.varnobs[:, None] * tf.transpose(dresdnobs))
         else:
             res_cov_stat = dresdnobs @ (self.nobs[:, None] * tf.transpose(dresdnobs))
 
@@ -1663,7 +1667,7 @@ class Fitter:
         return residuals, res_cov
 
     def _residuals(self, fun, fun_data):
-        data, _0, data_cov = fun_data(self.nobs, self.data_cov_inv)
+        data, _0, data_cov = fun_data(self.nobs, self.varnobs, self.data_cov_inv)
         pred, _0, pred_cov, _1, _2 = self._expected_with_variance(
             fun,
             profile=False,
@@ -1751,6 +1755,7 @@ class Fitter:
                 mapping.ndf_reduction,
                 profile=profile,
             )
+            logger.info(f"chi2/ndf = {chi2val.numpy()}/{ndf.numpy()}")
 
             aux.append(chi2val)
             aux.append(ndf)
