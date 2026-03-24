@@ -455,7 +455,7 @@ def readFitInfoFromFile(
     fitresult,
     poi,
     group=False,
-    impact_type=False,
+    impact_type=None,
     grouping=None,
     asym=False,
     filters=[],
@@ -474,6 +474,7 @@ def readFitInfoFromFile(
             impact_type=impact_type,
             add_total=group and not impact_type == "nonprofiled",
         )
+
         if group:
             impacts, labels = out
             if normalize:
@@ -554,8 +555,12 @@ def readFitInfoFromFile(
         df["abspull"] = np.abs(df["pull"])
 
         if asym:
-            df["constraint_down"] = -constraints[..., 1]
-            df["constraint_up"] = constraints[..., 0]
+            if impact_type == "nonprofiled":
+                df["constraint_down"] = -constraints
+                df["constraint_up"] = constraints
+            else:
+                df["constraint_down"] = -constraints[..., 1]
+                df["constraint_up"] = constraints[..., 0]
         else:
             df["constraint"] = constraints
             valid = (1 - constraints**2) > 0
@@ -563,7 +568,6 @@ def readFitInfoFromFile(
             df.loc[valid, "newpull"] = df.loc[valid]["pull"] / np.sqrt(
                 1 - df.loc[valid]["constraint"] ** 2
             )
-
     if poi:
         df = df.drop(df.loc[df["label"] == poi].index)
 
@@ -850,17 +854,19 @@ def parseArgs():
         type=str,
         help="Title for impacts",
     )
-    parser.add_argument("--noImpacts", action="store_true", help="Don't show impacts")
     parser.add_argument(
-        "--globalImpacts", action="store_true", help="Plot global impacts"
-    )
-    parser.add_argument(
-        "--gaussianGlobalImpacts",
-        action="store_true",
-        help="Plot global impacts in the fully gaussian approximation",
-    )
-    parser.add_argument(
-        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
+        "--impactType",
+        type=str,
+        default="traditional",
+        choices=[
+            None,
+            "none",
+            "traditional",
+            "global",
+            "gaussian_global",
+            "nonprofiled",
+        ],
+        help="Impact definition",
     )
     parser.add_argument(
         "--asymImpacts",
@@ -942,6 +948,7 @@ def make_plots(
     pullrange=None,
     meta=None,
     postfix=None,
+    impacts=False,
     impact_title=None,
 ):
 
@@ -985,16 +992,14 @@ def make_plots(
         pullrange=pullrange,
         title=args.title,
         subtitle=args.subtitle,
-        impacts=not args.noImpacts,
+        impacts=impacts,
         asym=asym,
         asym_pulls=args.diffPullAsym,
         include_ref=include_ref,
         ref_name=args.refName,
         name=args.name,
         show_numbers=args.showNumbers,
-        show_legend=(not group and not args.noImpacts)
-        or include_ref
-        or args.name is not None,
+        show_legend=(not group and impacts) or include_ref or args.name is not None,
         group=group,
         diff_pulls=not args.pullsNoDiff,
     )
@@ -1024,17 +1029,9 @@ def load_dataframe_parms(
     normalize=False,
     fitresult_ref=None,
     grouping=None,
+    impact_type=None,
     translate_label={},
 ):
-    if args.globalImpacts:
-        impact_type = "global"
-    elif args.gaussianGlobalImpacts:
-        impact_type = "gaussian_global"
-    elif args.nonprofiledImpacts:
-        impact_type = "nonprofiled"
-    else:
-        impact_type = "traditional"
-
     if not group:
         df = readFitInfoFromFile(
             fitresult,
@@ -1183,6 +1180,7 @@ def produce_plots_parms(
     pullrange=None,
     meta=None,
     postfix=None,
+    impact_type=None,
     impact_title=None,
     grouping=None,
     translate_label={},
@@ -1197,6 +1195,7 @@ def produce_plots_parms(
         normalize=normalize,
         fitresult_ref=fitresult_ref,
         grouping=grouping,
+        impact_type=impact_type,
         translate_label=translate_label,
     )
 
@@ -1213,6 +1212,7 @@ def produce_plots_parms(
         pullrange=pullrange,
         meta=meta,
         postfix=postfix,
+        impacts=impact_type not in [None, "none"],
         impact_title=impact_title,
     )
 
@@ -1267,6 +1267,7 @@ def produce_plots_hist(
         pullrange=pullrange,
         meta=meta,
         postfix=postfix,
+        impacts=hist_impacts is not None,
         impact_title=impact_title,
     )
 
@@ -1307,19 +1308,15 @@ def main():
         translate_label=translate_label,
     )
 
-    if args.noImpacts:
+    if args.impactType in [None, "none"]:
         # do one pulls plot, ungrouped
-        produce_plots_parms(args, fitresult, outdir, outfile="pulls.html", **kwargs)
+        produce_plots_parms(
+            args, fitresult, outdir, outfile="pulls.html", impact_type=None, **kwargs
+        )
     else:
         kwargs.update(dict(normalize=args.normalize, impact_title=args.impactTitle))
 
-        impacts_name = "impacts"
-        if args.globalImpacts:
-            impacts_name = f"global_{impacts_name}"
-        elif args.gaussianGlobalImpacts:
-            impacts_name = f"gaussian_global_{impacts_name}"
-        elif args.nonprofiledImpacts:
-            impacts_name = f"nonprofiled_{impacts_name}"
+        impacts_name = f"{args.impactType}_impacts"
 
         grouping = None
         if args.grouping is not None:
@@ -1330,9 +1327,9 @@ def main():
                 raise NotImplementedError(
                     "Asymetric impacts on observables is not yet implemented"
                 )
-            if not args.globalImpacts:
+            if args.impactType not in ["global", "gaussian_global"]:
                 raise NotImplementedError(
-                    "Only global impacts on observables is implemented (use --globalImpacts)"
+                    "Only global impacts on observables is implemented (use '--impactType' with 'global' or 'gaussian_global')"
                 )
 
             def get_mapping_key(result, key):
@@ -1378,7 +1375,7 @@ def main():
                 for mode in modes:
                     group = mode == "group"
 
-                    key = "hist_postfit_inclusive_global_impacts"
+                    key = f"hist_postfit_inclusive_{impacts_name}"
                     if group:
                         key += "_grouped"
 

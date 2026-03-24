@@ -126,6 +126,12 @@ def make_parser():
         help="propagate global impacts on histogram bins (inclusive in processes)",
     )
     parser.add_argument(
+        "--computeHistGaussianImpacts",
+        default=False,
+        action="store_true",
+        help="propagate gaussian global impacts on histogram bins (inclusive in processes)",
+    )
+    parser.add_argument(
         "--computeVariations",
         default=False,
         action="store_true",
@@ -225,6 +231,7 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 compute_cov=args.computeHistCov,
                 compute_chi2=not args.noChi2 and mapping.has_data,
                 compute_global_impacts=args.computeHistImpacts,
+                compute_gaussian_global_impacts=args.computeHistGaussianImpacts,
                 profile=profile,
             )
 
@@ -235,11 +242,13 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 cov=aux[1],
                 impacts=aux[2],
                 impacts_grouped=aux[3],
+                gaussian_impacts=aux[4],
+                gaussian_grouped_impacts=aux[5],
                 prefit=prefit,
             )
 
-            if aux[4] is not None:
-                ws.add_chi2(aux[4], aux[5], prefit, mapping)
+            if aux[-2] is not None:
+                ws.add_chi2(aux[-2], aux[-1], prefit, mapping)
 
         if args.saveHistsPerProcess and not mapping.skip_per_process:
             logger.info(f"Save processes histogram for {mapping.key}")
@@ -305,13 +314,13 @@ def fit(args, fitter, ws, dofit=True):
 
     if not args.noHessian:
         # compute the covariance matrix and estimated distance to minimum
-
-        val, grad, hess = fitter.loss_val_grad_hess()
-        edmval, cov = edmval_cov(grad, hess)
+        _, grad, hess = fitter.loss_val_grad_hess()
+        edmval, cov = fitter.edmval_cov(grad, hess)
         logger.info(f"edmval: {edmval}")
 
-        fitter.cov.assign(cov)
+        ws.add_cov_hist(cov)
 
+        fitter.cov.assign(cov)
         del cov
 
         if fitter.binByBinStat and fitter.diagnostics:
@@ -320,7 +329,7 @@ def fit(args, fitter, ws, dofit=True):
             # It should be near-zero by construction as long as the analytic profiling is
             # correct
             _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
-            edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
+            edmvalbeta = edmval_cov(gradbeta, hessbeta)
             logger.info(f"edmvalbeta: {edmvalbeta}")
 
         if args.doImpacts:
@@ -376,12 +385,11 @@ def fit(args, fitter, ws, dofit=True):
         hist_name="parms",
     )
 
-    if not args.noHessian:
-        ws.add_cov_hist(fitter.cov)
-
     if args.nonProfiledImpacts:
         # TODO: based on covariance
-        ws.add_nonprofiled_impacts_hist(*fitter.nonprofiled_impacts_parms())
+        ws.add_impacts_asym_hist(
+            *fitter.nonprofiled_impacts_parms(), base_name="nonprofiled_impacts_asym"
+        )
 
     # Likelihood scans
     if args.scan is not None:

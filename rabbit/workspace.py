@@ -265,33 +265,6 @@ class Workspace:
         )
         self.add_hist(hist_name, [axis_parms_x, axis_parms_y], cov)
 
-    def add_nonprofiled_impacts_hist(
-        self,
-        parms,
-        impacts,
-        params_grouped,
-        impacts_grouped,
-        base_name="nonprofiled_impacts",
-    ):
-        axis_impacts = hist.axis.StrCategory(parms, name="impacts")
-        axis_parms = hist.axis.StrCategory(
-            np.array(self.parms).astype(str), name="parms"
-        )
-        self.add_hist(
-            base_name,
-            [axis_impacts, axis_downUpVar, axis_parms],
-            impacts,
-            label="Impacts of non profiled parameter variations",
-        )
-
-        axis_impacts_grouped = hist.axis.StrCategory(params_grouped, name="impacts")
-        name = f"{base_name}_grouped"
-        self.add_hist(
-            name,
-            [axis_impacts_grouped, axis_downUpVar, axis_parms],
-            impacts_grouped,
-        )
-
     def add_limits_hist(
         self, limits, params, cls_list, clb_list=None, base_name="asymptoticLimits"
     ):
@@ -408,6 +381,33 @@ class Workspace:
             impacts_grouped,
         )
 
+    def add_impacts_asym_hist(
+        self,
+        parms,
+        impacts,
+        params_grouped,
+        impacts_grouped,
+        base_name="asym_impacts",
+    ):
+        axis_impacts = hist.axis.StrCategory(parms, name="impacts")
+        axis_parms = hist.axis.StrCategory(
+            np.array(self.parms).astype(str), name="parms"
+        )
+        self.add_hist(
+            base_name,
+            [axis_impacts, axis_downUpVar, axis_parms],
+            impacts,
+            label="Impacts of non profiled parameter variations",
+        )
+
+        axis_impacts_grouped = hist.axis.StrCategory(params_grouped, name="impacts")
+        name = f"{base_name}_grouped"
+        self.add_hist(
+            name,
+            [axis_impacts_grouped, axis_downUpVar, axis_parms],
+            impacts_grouped,
+        )
+
     def add_expected_hists(
         self,
         mapping,
@@ -416,6 +416,8 @@ class Workspace:
         cov=None,
         impacts=None,
         impacts_grouped=None,
+        gaussian_impacts=None,
+        gaussian_impacts_grouped=None,
         process_axis=False,
         name=None,
         label=None,
@@ -470,20 +472,34 @@ class Workspace:
             )
 
             if impacts is not None:
-                axis_impacts = self.global_impact_axis
                 self.add_hist(
                     f"{name}_global_impacts",
-                    [*hist_axes, axis_impacts],
+                    [*hist_axes, self.global_impact_axis],
                     impacts,
                     **opts,
                 )
 
             if impacts_grouped is not None:
-                axis_impacts_grouped = self.grouped_global_impact_axis
                 self.add_hist(
                     f"{name}_global_impacts_grouped",
-                    [*hist_axes, axis_impacts_grouped],
+                    [*hist_axes, self.grouped_global_impact_axis],
                     impacts_grouped,
+                    **opts,
+                )
+
+            if gaussian_impacts is not None:
+                self.add_hist(
+                    f"{name}_gaussian_global_impacts",
+                    [*hist_axes, self.global_impact_axis],
+                    gaussian_impacts,
+                    **opts,
+                )
+
+            if gaussian_impacts_grouped is not None:
+                self.add_hist(
+                    f"{name}_gaussian_global_impacts_grouped",
+                    [*hist_axes, self.grouped_global_impact_axis],
+                    gaussian_impacts_grouped,
                     **opts,
                 )
 

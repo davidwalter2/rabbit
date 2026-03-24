@@ -12,6 +12,7 @@ from wums import logging
 from rabbit import io_tools
 from rabbit import tfhelpers as tfh
 from rabbit.impacts import global_impacts, nonprofiled_impacts, traditional_impacts
+from rabbit.tfhelpers import edmval_cov
 
 logger = logging.child_logger(__name__)
 
@@ -216,6 +217,11 @@ class Fitter:
             trainable=False,
             name="theta0",
         )
+        self.var_theta0 = tf.where(
+            self.indata.constraintweights == 0.0,
+            tf.zeros_like(self.indata.constraintweights),
+            tf.math.reciprocal(self.indata.constraintweights),
+        )
 
         # FIXME for now this is needed even if binByBinStat is off because of how it is used in the global impacts
         #  and uncertainty band computations (gradient is allowed to be zero or None and then propagated or skipped only later)
@@ -362,6 +368,7 @@ class Fitter:
 
         self.frozen_params_mask.assign(new_mask_np)
         self.frozen_indices = np.where(new_mask_np)[0]
+        self.floating_indices = np.where(~self.frozen_params_mask)[0]
 
     def freeze_params(self, frozen_parmeter_expressions):
         self.frozen_params.extend(
@@ -733,6 +740,30 @@ class Fitter:
                     )
                 )
 
+    def edmval_cov(self, grad, hess):
+        if len(self.frozen_params) > 0:
+            # Only keep parameters that were floating in the fit
+            subgrad = tf.gather(grad, self.floating_indices, axis=0)
+            subhess = tf.gather(hess, self.floating_indices, axis=0)
+            subhess = tf.gather(subhess, self.floating_indices, axis=1)
+            edmval, cov = edmval_cov(subgrad, subhess)
+
+            # update only the covariance entries for parameters that were floating in the fit
+            coords = tf.stack(
+                tf.meshgrid(
+                    self.floating_indices, self.floating_indices, indexing="ij"
+                ),
+                axis=-1,
+            )
+            coords = tf.reshape(coords, [-1, 2])
+
+            updates = tf.reshape(cov, [-1])
+
+            cov = tf.tensor_scatter_nd_update(self.cov, coords, updates)
+            return edmval, cov
+        else:
+            return edmval_cov(grad, hess)
+
     @tf.function
     def impacts_parms(self, hess):
 
@@ -769,6 +800,7 @@ class Fitter:
             compute_lbeta_fn=self._compute_lbeta,
             compute_lc_fn=self._compute_lc,
             npoi=self.poi_model.npoi,
+            noiidxs=self.indata.noiidxs,
             systgroupidxs=self.indata.systgroupidxs,
             bin_by_bin_stat=self.binByBinStat,
             bin_by_bin_stat_mode=self.binByBinStatMode,
@@ -780,18 +812,18 @@ class Fitter:
         return global_impacts.global_impacts_parms(
             self._global_impacts_context(),
             self.cov,
-            self.indata.noiidxs,
         )
 
     @tf.function
     def gaussian_global_impacts_parms(self):
         dxdtheta0, dxdnobs, dxdbeta0 = self._dxdvars()
+
         impacts, impacts_grouped = global_impacts.gaussian_global_impacts_parms(
             self._global_impacts_context(),
             dxdtheta0,
             dxdnobs,
             dxdbeta0,
-            self.indata.noiidxs,
+            self.var_theta0,
             self.nobs if self.varnobs is None else self.varnobs,
             (
                 self.varbeta
@@ -866,6 +898,27 @@ class Fitter:
 
         return dxdtheta0, dxdnobs, dxdbeta0
 
+    def _dndvars(self, fun):
+        with tf.GradientTape() as t:
+            t.watch([self.theta0, self.nobs, self.beta0])
+            n = fun()
+            n_flat = tf.reshape(n, (-1,))
+
+        pdndx, pdndtheta0, pdndnobs, pdndbeta0 = t.jacobian(
+            n_flat,
+            [self.x, self.theta0, self.nobs, self.beta0],
+            unconnected_gradients="zero",
+        )
+
+        # apply chain rule to take into account correlations with the fit parameters
+        dxdtheta0, dxdnobs, dxdbeta0 = self._dxdvars()
+
+        dndtheta0 = pdndtheta0 + pdndx @ dxdtheta0
+        dndnobs = pdndnobs + pdndx @ dxdnobs
+        dndbeta0 = tf.reshape(pdndbeta0, [pdndbeta0.shape[0], -1]) + pdndx @ dxdbeta0
+
+        return n, dndtheta0, dndnobs, dndbeta0
+
     def _compute_expected(
         self, fun_exp, inclusive=True, profile=False, full=True, need_observables=True
     ):
@@ -884,6 +937,7 @@ class Fitter:
         fun_exp,
         compute_cov=False,
         compute_global_impacts=False,
+        compute_gaussian_global_impacts=False,
         profile=False,
         inclusive=True,
         full=True,
@@ -974,7 +1028,47 @@ class Fitter:
             impacts = None
             impacts_grouped = None
 
-        return expected, expvar, expcov, impacts, impacts_grouped
+        if compute_gaussian_global_impacts:
+
+            def fun_n():
+                return self._compute_expected(
+                    fun_exp,
+                    inclusive=inclusive,
+                    profile=profile,
+                    full=full,
+                    need_observables=need_observables,
+                )
+
+            _, dndtheta0, dndnobs, dndbeta0 = self._dndvars(fun_n)
+            impacts_gaussian, impacts_gaussian_grouped = (
+                global_impacts.gaussian_global_impacts_obs(
+                    self._global_impacts_context(),
+                    dndtheta0,
+                    dndnobs,
+                    dndbeta0,
+                    self.var_theta0,
+                    self.nobs if self.varnobs is None else self.varnobs,
+                    (
+                        self.varbeta
+                        if self.binByBinStatType in ["normal-additive"]
+                        else 1.0 / self.kstat
+                    ),
+                    self.data_cov_inv,
+                )
+            )
+        else:
+            impacts_gaussian = None
+            impacts_gaussian_grouped = None
+
+        return (
+            expected,
+            expvar,
+            expcov,
+            impacts,
+            impacts_grouped,
+            impacts_gaussian,
+            impacts_gaussian_grouped,
+        )
 
     def _expected_variations(
         self,
@@ -1613,8 +1707,7 @@ class Fitter:
         fun,
     ):
 
-        with tf.GradientTape() as t:
-            t.watch([self.theta0, self.nobs, self.beta0])
+        def fun_res():
             expected = self._compute_expected(
                 fun,
                 inclusive=True,
@@ -1623,31 +1716,11 @@ class Fitter:
                 need_observables=True,
             )
             observed = fun(None, self.nobs)
-            residuals = expected - observed
+            return expected - observed
 
-            residuals_flat = tf.reshape(residuals, (-1,))
-        pdresdx, pdresdtheta0, pdresdnobs, pdresdbeta0 = t.jacobian(
-            residuals_flat,
-            [self.x, self.theta0, self.nobs, self.beta0],
-            unconnected_gradients="zero",
-        )
+        residuals, dresdtheta0, dresdnobs, dresdbeta0 = self._dndvars(fun_res)
 
-        # apply chain rule to take into account correlations with the fit parameters
-        dxdtheta0, dxdnobs, dxdbeta0 = self._dxdvars()
-
-        dresdtheta0 = pdresdtheta0 + pdresdx @ dxdtheta0
-        dresdnobs = pdresdnobs + pdresdx @ dxdnobs
-        dresdbeta0 = (
-            tf.reshape(pdresdbeta0, [pdresdbeta0.shape[0], -1]) + pdresdx @ dxdbeta0
-        )
-
-        var_theta0 = tf.where(
-            self.indata.constraintweights == 0.0,
-            tf.zeros_like(self.indata.constraintweights),
-            tf.math.reciprocal(self.indata.constraintweights),
-        )
-
-        res_cov = dresdtheta0 @ (var_theta0[:, None] * tf.transpose(dresdtheta0))
+        res_cov = dresdtheta0 @ (self.var_theta0[:, None] * tf.transpose(dresdtheta0))
 
         if self.covarianceFit:
             res_cov_stat = dresdnobs @ tf.linalg.solve(
@@ -1727,6 +1800,7 @@ class Fitter:
         compute_variance=True,
         compute_cov=False,
         compute_global_impacts=False,
+        compute_gaussian_global_impacts=False,
         compute_variations=False,
         correlated_variations=False,
         profile=True,
@@ -1734,25 +1808,33 @@ class Fitter:
     ):
 
         if compute_variations and (
-            compute_variance or compute_cov or compute_global_impacts
+            compute_variance
+            or compute_cov
+            or compute_global_impacts
+            or compute_gaussian_global_impacts
         ):
             raise NotImplementedError()
 
         fun = mapping.compute_flat if inclusive else mapping.compute_flat_per_process
 
         aux = [None] * 4
-        if compute_cov or compute_variance or compute_global_impacts:
-            exp, exp_var, exp_cov, exp_impacts, exp_impacts_grouped = (
-                self.expected_with_variance(
-                    fun,
-                    profile=profile,
-                    compute_cov=compute_cov,
-                    compute_global_impacts=compute_global_impacts,
-                    need_observables=mapping.need_observables,
-                    inclusive=inclusive and not mapping.need_processes,
-                )
+        if (
+            compute_cov
+            or compute_variance
+            or compute_global_impacts
+            or compute_gaussian_global_impacts
+        ):
+            out = self.expected_with_variance(
+                fun,
+                profile=profile,
+                compute_cov=compute_cov,
+                compute_global_impacts=compute_global_impacts,
+                compute_gaussian_global_impacts=compute_gaussian_global_impacts,
+                need_observables=mapping.need_observables,
+                inclusive=inclusive and not mapping.need_processes,
             )
-            aux = [exp_var, exp_cov, exp_impacts, exp_impacts_grouped]
+            exp = out[0]
+            aux = out[1:]
         elif compute_variations:
             exp = self.expected_variations(
                 fun,
@@ -2215,7 +2297,7 @@ class Fitter:
         return x_scans, y_scans, dnlls
 
     def contour_scan(self, param, nll_min, q=1, signs=[-1, 1], fun=None):
-
+        # TODO this is basically traditional asymmetric impacts
         def scipy_loss(x):
             self.x.assign(x)
             val = self.loss_val()

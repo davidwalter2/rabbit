@@ -23,10 +23,17 @@ class GlobalImpactsContext:
     compute_lc_fn: object
     # config
     npoi: int
+    noiidxs: object
     systgroupidxs: object
     bin_by_bin_stat: bool
     bin_by_bin_stat_mode: str
     global_impacts_from_jvp: bool
+
+
+def _gather_poi_noi_vector(v, noiidxs, npoi=0):
+    v_poi = v[:npoi]
+    v_noi = tf.gather(v[npoi:], noiidxs)
+    return tf.concat([v_poi, v_noi], axis=0)
 
 
 def _compute_global_impact_group(d_squared, idxs):
@@ -183,9 +190,9 @@ def _compute_grouped_impacts(
     return impacts_grouped
 
 
-def global_impacts_parms(ctx, cov, noiidxs):
+def global_impacts_parms(ctx, cov):
     idxs_poi = tf.range(ctx.npoi, dtype=tf.int64)
-    idxs_noi = tf.constant(ctx.npoi + noiidxs, dtype=tf.int64)
+    idxs_noi = tf.constant(ctx.npoi + ctx.noiidxs, dtype=tf.int64)
     idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
 
     dexpdx = tf.one_hot(idxsout, depth=cov.shape[0], dtype=cov.dtype)
@@ -290,27 +297,16 @@ def global_impacts_obs(
     return impacts, impacts_grouped
 
 
-def gaussian_global_impacts_parms(
+def _gaussian_global_impacts(
     ctx,
     dxdtheta0,
     dxdnobs,
     dxdbeta0,
-    noigroupidxs,
+    vartheta0,
     varnobs,
-    varbeta,
+    varbeta0,
     data_cov_inv=None,
 ):
-    # compute impacts for pois and nois
-    dxdtheta0_poi = dxdtheta0[: ctx.npoi]
-    dxdtheta0_noi = tf.gather(dxdtheta0[ctx.npoi :], noigroupidxs)
-    dxdtheta0 = tf.concat([dxdtheta0_poi, dxdtheta0_noi], axis=0)
-    dxdtheta0_squared = tf.square(dxdtheta0)
-
-    # global impact data stat
-    dxdnobs_poi = dxdnobs[: ctx.npoi]
-    dxdnobs_noi = tf.gather(dxdnobs[ctx.npoi :], noigroupidxs)
-    dxdnobs = tf.concat([dxdnobs_poi, dxdnobs_noi], axis=0)
-
     if data_cov_inv is not None:
         data_cov = tf.linalg.inv(data_cov_inv)
         # equivalent to tf.linalg.diag_part(dxdnobs @ data_cov @ tf.transpose(dxdnobs)) but avoiding computing full matrix
@@ -321,13 +317,8 @@ def gaussian_global_impacts_parms(
     impacts_data_stat = tf.sqrt(data_stat)
 
     if ctx.bin_by_bin_stat:
-        # global impact bin-by-bin stat
-        dxdbeta0_poi = dxdbeta0[: ctx.npoi]
-        dxdbeta0_noi = tf.gather(dxdbeta0[ctx.npoi :], noigroupidxs)
-        dxdbeta0 = tf.concat([dxdbeta0_poi, dxdbeta0_noi], axis=0)
-
         var_beta0 = tf.reduce_sum(
-            tf.reshape(tf.square(dxdbeta0), (-1, *ctx.beta_shape)) * varbeta, axis=1
+            tf.reshape(tf.square(dxdbeta0), (-1, *ctx.beta_shape)) * varbeta0, axis=1
         )
 
         impacts_beta0_process = None
@@ -346,6 +337,8 @@ def gaussian_global_impacts_parms(
         impacts_grouped = impacts_data_stat
 
     if len(ctx.systgroupidxs):
+        dxdtheta0_squared = tf.square(dxdtheta0) * vartheta0
+
         impacts_grouped_syst = tf.map_fn(
             lambda idxs: _compute_global_impact_group(dxdtheta0_squared, idxs),
             tf.ragged.constant(ctx.systgroupidxs, dtype=tf.int64),
@@ -356,7 +349,39 @@ def gaussian_global_impacts_parms(
         impacts_grouped_syst = tf.transpose(impacts_grouped_syst)
         impacts_grouped = tf.concat([impacts_grouped_syst, impacts_grouped], axis=1)
 
-    # global impacts of unconstrained parameters are always 0, only store impacts of constrained ones
-    impacts = dxdtheta0
+    return dxdtheta0, impacts_grouped
 
-    return impacts, impacts_grouped
+
+def gaussian_global_impacts_parms(
+    ctx,
+    dxdtheta0,
+    dxdnobs,
+    dxdbeta0,
+    vartheta0,
+    varnobs,
+    varbeta0,
+    data_cov_inv=None,
+):
+    # compute impacts for pois and nois
+    dxdtheta0 = _gather_poi_noi_vector(dxdtheta0, ctx.noiidxs, ctx.npoi)
+    dxdnobs = _gather_poi_noi_vector(dxdnobs, ctx.noiidxs, ctx.npoi)
+    dxdbeta0 = _gather_poi_noi_vector(dxdbeta0, ctx.noiidxs, ctx.npoi)
+
+    return _gaussian_global_impacts(
+        ctx, dxdtheta0, dxdnobs, dxdbeta0, vartheta0, varnobs, varbeta0, data_cov_inv
+    )
+
+
+def gaussian_global_impacts_obs(
+    ctx,
+    dndtheta0,
+    dndnobs,
+    dndbeta0,
+    vartheta0,
+    varnobs,
+    varbeta0,
+    data_cov_inv=None,
+):
+    return _gaussian_global_impacts(
+        ctx, dndtheta0, dndnobs, dndbeta0, vartheta0, varnobs, varbeta0, data_cov_inv
+    )
