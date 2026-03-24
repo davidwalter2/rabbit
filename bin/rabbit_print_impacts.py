@@ -20,15 +20,18 @@ def parseArgs():
         "-s", "--sort", action="store_true", help="Sort nuisances by impact"
     )
     parser.add_argument(
-        "--globalImpacts", action="store_true", help="Print global impacts"
-    )
-    parser.add_argument(
-        "--gaussianGlobalImpacts",
-        action="store_true",
-        help="Print global impacts in the fully gaussian approximation",
-    )
-    parser.add_argument(
-        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
+        "--impactType",
+        type=str,
+        default="traditional",
+        choices=[
+            None,
+            "none",
+            "traditional",
+            "global",
+            "gaussian_global",
+            "nonprofiled",
+        ],
+        help="Impact definition",
     )
     parser.add_argument(
         "--asymImpacts",
@@ -91,22 +94,13 @@ def printImpactsParm(args, fitresult, poi):
     if args.relative:
         raise NotImplementedError("Relative uncertainty for POIs not implemented")
 
-    if args.globalImpacts:
-        impact_type = "global"
-    elif args.gaussianGlobalImpacts:
-        impact_type = "gaussian_global"
-    elif args.nonprofiledImpacts:
-        impact_type = "nonprofiled"
-    else:
-        impact_type = "traditional"
-
     impacts, labels = io_tools.read_impacts_poi(
         fitresult,
         poi,
-        add_total=not args.nonprofiledImpacts,
+        add_total=args.impactType not in ["nonprofiled"],
         asym=args.asymImpacts,
         grouped=not args.ungroup,
-        impact_type=impact_type,
+        impact_type=args.impactType,
     )
     printImpacts(args, impacts, labels, poi)
 
@@ -151,9 +145,9 @@ def main():
             raise NotImplementedError(
                 "Asymetric impacts on observables is not yet implemented"
             )
-        if not args.globalImpacts:
+        if args.impactType not in ["global", "gaussian_global"]:
             raise NotImplementedError(
-                "Only global impacts on observables is implemented (use --globalImpacts)"
+                "Only global impacts on observables is implemented (use '--impactType' with 'global' or 'gaussian_global')"
             )
 
         mapping_key = " ".join(args.mapping)

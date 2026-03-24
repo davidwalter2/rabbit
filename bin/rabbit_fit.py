@@ -243,7 +243,7 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 impacts=aux[2],
                 impacts_grouped=aux[3],
                 gaussian_impacts=aux[4],
-                gaussian_grouped_impacts=aux[5],
+                gaussian_impacts_grouped=aux[5],
                 prefit=prefit,
             )
 

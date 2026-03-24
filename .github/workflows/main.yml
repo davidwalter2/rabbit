@@ -348,10 +348,10 @@ jobs:
         run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s
 
       - name: print global impacts
-        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s --globalImpacts
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s --impactType global
 
       - name: print global impacts of observable
-        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 --globalImpacts -m Project ch0_masked --ungroup --sort
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 --impactType global -m Project ch0_masked --ungroup --sort
 
       - name: plot impacts
         run: >-

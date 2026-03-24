@@ -262,10 +262,10 @@ class Fitter:
                     self.varbeta = self.indata.sumw2
                     self.sumw = self.indata.sumw
 
-            if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
-                self.betamask = (self.varbeta == 0.0) | (self.sumw == 0.0)
-                self.kstat = tf.where(self.betamask, 1.0, self.sumw**2 / self.varbeta)
+            self.betamask = (self.varbeta == 0.0) | (self.sumw == 0.0)
+            self.kstat = tf.where(self.betamask, 1.0, self.sumw**2 / self.varbeta)
 
+            if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
                 if self.binByBinStatType == "gamma" and self.binByBinStatMode == "full":
                     logger.warning(
                         "Running with '--binByBinStatType gamma --binByBinStatMode full' is experimental and results should be taken with care"
@@ -825,11 +825,7 @@ class Fitter:
             dxdbeta0,
             self.var_theta0,
             self.nobs if self.varnobs is None else self.varnobs,
-            (
-                self.varbeta
-                if self.binByBinStatType in ["normal-additive"]
-                else 1.0 / self.kstat
-            ),
+            1.0 if self.binByBinStatType in ["normal-additive"] else 1.0 / self.kstat,
             self.data_cov_inv,
         )
 
@@ -1049,7 +1045,7 @@ class Fitter:
                     self.var_theta0,
                     self.nobs if self.varnobs is None else self.varnobs,
                     (
-                        self.varbeta
+                        1.0
                         if self.binByBinStatType in ["normal-additive"]
                         else 1.0 / self.kstat
                     ),
@@ -1761,7 +1757,7 @@ class Fitter:
 
     def _residuals(self, fun, fun_data):
         data, _0, data_cov = fun_data(self.nobs, self.varnobs, self.data_cov_inv)
-        pred, _0, pred_cov, _1, _2 = self._expected_with_variance(
+        pred, _0, pred_cov, *_ = self._expected_with_variance(
             fun,
             profile=False,
             full=False,
@@ -1834,7 +1830,7 @@ class Fitter:
                 inclusive=inclusive and not mapping.need_processes,
             )
             exp = out[0]
-            aux = out[1:]
+            aux = [o for o in out[1:]]
         elif compute_variations:
             exp = self.expected_variations(
                 fun,
@@ -1937,7 +1933,7 @@ class Fitter:
 
                 if full_nll:
                     # TODO: verify
-                    sigma2 = self.varbeta / tf.square(self.sumw)
+                    sigma2 = 1.0 / self.kstat
 
                     # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
                     lbeta = (
