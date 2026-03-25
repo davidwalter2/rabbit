@@ -87,7 +87,6 @@ class LIV(POIModel):
         self.pois = np.array([f"{coeff[i]}" for i in range(self.npoi)])
         self.xpoidefault = np.array([1]*self.npoi)
 
-
         def efficiency_flattening(input_hist):
             input_hist_full = input_hist[:, None]* tf.ones([1, self.nEtaBins*self.nPtBins], dtype=tf.float64) 
             input_hist_pt_clipped = input_hist[:, None]* tf.ones([1, self.nEtaBins*(self.nPtBins-1)], dtype=tf.float64) 
@@ -96,8 +95,6 @@ class LIV(POIModel):
             full_hist = tf.concat([input_hist_full, input_hist_pt_clipped, input_hist_full, input_hist_full], axis = 0)
             full_hist = tf.reshape(full_hist, [-1, 1])[:, 0] 
             return full_hist
-        
-        
         
                    
         ref_file = "/work/submit/jbenke/WRemnants/scripts/histmakers/"
@@ -116,37 +113,28 @@ class LIV(POIModel):
         self.nPtBins = len(ex_histogram.axes["pt_probe"])
         self.nEtaBins = len(ex_histogram.axes["eta_probe"])
 
-
         
         add_dir = "/home/submit/jbenke/WRemnants/rabbit/rabbit/poi_models/precomputed_sigma/"
-            
         sm_filename = f"SM_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins.pkl" 
-        
-        
+    
         with open(add_dir + sm_filename, "rb") as f:
             precomp_dict = pickle.load(f)
-            
-        #7920 = the efficiency channels
-        #93316 = efficiency channel + masked channel
         
-        ## everything is consistently shaped as 7920
-
         sm_sigma_eff = tf.cast([precomp_dict["values"][9]]*self.nTimeBins, dtype = tf.float64) 
         
         sm_sigma_mll = tf.cast([precomp_dict["values"]]*self.nTimeBins, dtype = tf.float64) 
         sm_sigma_mll = tf.reshape(sm_sigma_mll, [-1, 1])[:, 0] 
-        ## this goes mll, time not time, mll
         sm_sigma_mll_full = tf.concat([sm_sigma_mll, sm_sigma_mll, sm_sigma_mll, sm_sigma_mll], axis = 0)  
         
-        self.sm_sigma = tf.concat([efficiency_flattening(sm_sigma_eff), sm_sigma_mll_full], axis = 0) ## flattens it
-        
-        # self.sm_sigma = efficiency_flattening(sm_sigma_eff)
-        
+        self.sm_sigma = tf.concat([efficiency_flattening(sm_sigma_eff), sm_sigma_mll], axis = 0) ## flattens it
+
+                
         sme_all = []
         print(coeff)
         for c in coeff:
             tensor = c[1:3]
             quark = c[-1]
+            
             sme_L_filename = f"summation_{self.Q_min}_to_{self.Q_max}_GeV_{self.nMassBins}_bins_c{tensor}_{quark}_L.pkl"
             #sme[time][mll]
             with open(add_dir + sme_L_filename, "rb") as f:
@@ -159,12 +147,8 @@ class LIV(POIModel):
             sme_left_mll = tf.reshape(sme_left_mll, [-1, 1])[:, 0] ## flattens it
 
             sme_left_mll_full = tf.concat([sme_left_mll, sme_left_mll, sme_left_mll, sme_left_mll], axis = 0)
-            sme_left_full = tf.concat([sme_left_eff_full, sme_left_mll_full], axis = 0)
-
-            # sme_left_full =sme_left_eff_full
-
-
-
+            
+            sme_left_full = tf.concat([sme_left_eff_full, sme_left_mll], axis = 0)
 
 
             sme_R_filename = sme_L_filename[:-5] + "R" + sme_L_filename[-4:]
@@ -179,8 +163,7 @@ class LIV(POIModel):
             sme_right_mll = tf.reshape(sme_right_mll, [-1, 1])[:, 0] ## flattens it
 
             sme_right_mll_full = tf.concat([sme_right_mll, sme_right_mll, sme_right_mll, sme_right_mll], axis = 0)
-            sme_right_full = tf.concat([sme_right_eff_full, sme_right_mll_full], axis = 0)
-            # sme_right_full =sme_right_eff_full
+            sme_right_full = tf.concat([sme_right_eff_full, sme_right_mll], axis = 0)
             
             if c[0] == 'd':
                 sme_all.append(1/2*(sme_left_full - sme_right_full))

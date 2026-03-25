@@ -165,7 +165,7 @@ def term_1(Q2, e_f):
     return e_f**2 / (2*Q2**2)
     
 def term_2(Q2, e_f, g):
-    return abs((((1 - (m_Z**2 / Q2)) / ((Q2 - m_Z**2)**2 + m_Z**2 * Gamma_Z**2)) *
+    return ((((1 - (m_Z**2 / Q2)) / ((Q2 - m_Z**2)**2 + m_Z**2 * Gamma_Z**2)) *
             (1 - 4 * sin2th_w) / (4 * sin2th_w * (1- sin2th_w ))* e_f * g))
             
 def term_3(Q2, g):

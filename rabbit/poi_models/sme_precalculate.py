@@ -9,8 +9,7 @@ from sme_functions import *
 times, pm, pn = get_hour_array() ## i only want to compte this once when i do the 
 t = time.time()
 
-# mass_bins = [15, 30, 40, 45, 50, 55, 60, 65, 70, 76, 106, 110, 115, 120]
-mass_bins = [50, 91, 120]
+mass_bins = [15, 30, 40, 45, 50, 55, 60, 65, 70, 76, 106, 110, 115, 120]
 sme_filename = f"SME_{mass_bins[0]}_to_{mass_bins[-1]}_GeV_{len(mass_bins)-1}_bins.pkl"
 sm_filename = f"SM_{mass_bins[0]}_to_{mass_bins[-1]}_GeV_{len(mass_bins)-1}_bins.pkl"
 
@@ -28,6 +27,8 @@ all_sm_values = []
 precomputed = False
 SME = True
 summation = True  
+
+
 if not SME and not summation:
     for m in range(n_mass_bins):
     # for i in range(9,10):
@@ -69,7 +70,6 @@ if summation:
 
     sm_filename = f"SM_{min(mass_bins)}_to_{max(mass_bins)}_GeV_{n_mass_bins}_bins.pkl" 
     sme_filename = f"SME_{min(mass_bins)}_to_{max(mass_bins)}_GeV_{n_mass_bins}_bins.pkl" 
-    # sm_filename = "SM_15_to_120_GeV_13_bins.pkl"
 
     add_dir = "/home/submit/jbenke/WRemnants/rabbit/rabbit/poi_models/precomputed_sigma/"
         
