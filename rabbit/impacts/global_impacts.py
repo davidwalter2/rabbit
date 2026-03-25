@@ -1,7 +1,16 @@
 """
-Global impacts from shifting the nuisance parameter of auxiliary (global) observables.
+Global impacts from shifting of auxiliary (global) observables
+  i.e. shifting the nuisance parameter by its pre-fit uncertainty, the number of observed events in data by its uncertainty, etc.
 This is the "shifted global observable" method.
-Impacts from groups are obtained by adding impacts from individual global observables in quadrature.
+Grouped impacts are obtained from adding the impacts of individual sources in quadrature.
+
+There are three different definitions
+a) the fully gaussian global impacts, which are extracted from a gaussian approximation of the likelihood and the global observables.
+b) the likelihood based global impacts in the gaussian approximation, which are extracted from the likelihood terms of the global observables.
+In this definition the individual impacts add up in quadrature to the total.
+c) (TODO to be implemented) the fully likelihood based impacts, which are extracted by shifting the global observables and repeating the fit.
+
+Ref. https://arxiv.org/abs/2307.04007
 """
 
 import dataclasses

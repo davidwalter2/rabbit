@@ -1314,7 +1314,13 @@ def main():
             args, fitresult, outdir, outfile="pulls.html", impact_type=None, **kwargs
         )
     else:
-        kwargs.update(dict(normalize=args.normalize, impact_title=args.impactTitle))
+        kwargs.update(
+            dict(
+                normalize=args.normalize,
+                impact_type=args.impactType,
+                impact_title=args.impactTitle,
+            )
+        )
 
         impacts_name = f"{args.impactType}_impacts"
 
