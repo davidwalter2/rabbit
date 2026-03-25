@@ -819,7 +819,11 @@ class Fitter:
             dxdbeta0,
             self.var_theta0,
             self.nobs if self.varnobs is None else self.varnobs,
-            1.0 if self.binByBinStatType in ["normal-additive"] else 1.0 / self.kstat,
+            (
+                1.0
+                if self.binByBinStatType in ["normal-additive"] or not self.binByBinStat
+                else 1.0 / self.kstat
+            ),
             self.poi_model.npoi,
             self.indata.noiidxs,
             self.binByBinStat,
@@ -1056,6 +1060,7 @@ class Fitter:
                     (
                         1.0
                         if self.binByBinStatType in ["normal-additive"]
+                        or not self.binByBinStat
                         else 1.0 / self.kstat
                     ),
                     self.binByBinStat,
