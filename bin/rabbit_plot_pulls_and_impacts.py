@@ -1225,13 +1225,7 @@ def main():
             args, fitresult, outdir, outfile="pulls.html", impact_type=None, **kwargs
         )
     else:
-        kwargs.update(
-            dict(
-                normalize=args.normalize,
-                impact_type=args.impactType,
-                impact_title=args.impactTitle,
-            )
-        )
+        kwargs.update(dict(normalize=args.normalize, impact_title=args.impactTitle))
 
         impacts_name = f"{args.impactType}_impacts"
 
@@ -1359,7 +1353,13 @@ def main():
                     if not args.noPulls:
                         name = f"pulls_and_{name}"
                     produce_plots_parms(
-                        args, fitresult, outdir, outfile=name, poi=poi, **kwargs
+                        args,
+                        fitresult,
+                        outdir,
+                        outfile=name,
+                        poi=poi,
+                        impact_type=args.impactType,
+                        **kwargs,
                     )
                 if args.mode in ["both", "group"]:
                     produce_plots_parms(
@@ -1370,6 +1370,7 @@ def main():
                         poi=poi,
                         group=True,
                         grouping=grouping,
+                        impact_type=args.impactType,
                         **kwargs,
                     )
 
