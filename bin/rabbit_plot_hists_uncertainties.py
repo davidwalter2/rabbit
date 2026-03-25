@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
-import argparse
 import inspect
 import itertools
-import os
 
 import hist
 import matplotlib.pyplot as plt
@@ -11,6 +9,7 @@ import mplhep as hep
 import numpy as np
 
 import rabbit.io_tools
+from rabbit import parsing
 
 from wums import boostHistHelpers as hh  # isort: skip
 from wums import logging, output_tools, plot_tools  # isort: skip
@@ -20,126 +19,14 @@ hep.style.use(hep.style.ROOT)
 logger = None
 
 
-def parseArgs():
-
-    # choices for legend padding
-    choices_padding = ["auto", "lower left", "lower right", "upper left", "upper right"]
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "-o",
-        "--outpath",
-        type=str,
-        default=os.path.expanduser("./test"),
-        help="Base path for output",
-    )
-    parser.add_argument(
-        "--eoscp",
-        action="store_true",
-        help="Override use of xrdcp and use the mount instead",
-    )
-    parser.add_argument(
-        "-p", "--postfix", type=str, help="Postfix for output file name"
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config file for style formatting",
-    )
+def make_parser():
+    parser = parsing.plot_parser()
+    parsing.add_style_args(parser)
     parser.add_argument(
         "--grouping",
         type=str,
         default=None,
         help="Pre-defined grouping in config to select nuisance groups",
-    )
-    parser.add_argument(
-        "--lumi",
-        type=float,
-        default=16.8,
-        help="Luminosity used in the fit, needed to get the absolute cross section",
-    )
-    parser.add_argument(
-        "--title",
-        default="Rabbit",
-        type=str,
-        help="Title to be printed in upper left",
-    )
-    parser.add_argument(
-        "--subtitle",
-        default="",
-        type=str,
-        help="Subtitle to be printed after title",
-    )
-    parser.add_argument("--titlePos", type=int, default=2, help="title position")
-    parser.add_argument(
-        "--legPos", type=str, default="upper right", help="Set legend position"
-    )
-    parser.add_argument(
-        "--legSize",
-        type=str,
-        default="small",
-        help="Legend text size (small: axis ticks size, large: axis label size, number)",
-    )
-    parser.add_argument(
-        "--legCols", type=int, default=2, help="Number of columns in legend"
-    )
-    parser.add_argument(
-        "--legPadding",
-        type=str,
-        default="auto",
-        choices=choices_padding,
-        help="Where to put empty entries in legend",
-    )
-    parser.add_argument(
-        "--yscale",
-        type=float,
-        help="Scale the upper y axis by this factor (useful when auto scaling cuts off legend)",
-    )
-    parser.add_argument(
-        "--ylim",
-        type=float,
-        nargs=2,
-        help="Min and max values for y axis (if not specified, range set automatically)",
-    )
-    parser.add_argument("--xlim", type=float, nargs=2, help="min and max for x axis")
-    parser.add_argument(
-        "--rrange",
-        type=float,
-        nargs=2,
-        default=[0.9, 1.1],
-        help="y range for ratio plot",
-    )
-    parser.add_argument(
-        "--scaleTextSize",
-        type=float,
-        default=1.0,
-        help="Scale all text sizes by this number",
-    )
-    parser.add_argument(
-        "infile",
-        type=str,
-        help="hdf5 file from rabbit or root file from combinetf",
-    )
-    parser.add_argument(
-        "--result",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
-    parser.add_argument(
-        "--logy", action="store_true", help="Make the yscale logarithmic"
     )
     parser.add_argument(
         "--noUncertainty", action="store_true", help="Don't plot total uncertainty band"
@@ -202,12 +89,6 @@ def parseArgs():
         help="Invert the order of the axes when plotting",
     )
     parser.add_argument(
-        "--xlabel", type=str, default=None, help="x-axis label for plot labeling"
-    )
-    parser.add_argument(
-        "--ylabel", type=str, default=None, help="y-axis label for plot labeling"
-    )
-    parser.add_argument(
         "--processGrouping", type=str, default=None, help="key for grouping processes"
     )
     parser.add_argument(
@@ -217,20 +98,14 @@ def parseArgs():
         default=None,
         help="Location in (x,y) for additional text, aligned to upper left",
     )
-    parser.add_argument(
-        "--noSciy",
-        action="store_true",
-        help="Don't allow scientific notation for y axis",
-    )
+
     parser.add_argument(
         "--impactType",
         default="global",
         choices=["gaussian_global", "global"],
         help="Impact definition",
     )
-    args = parser.parse_args()
-
-    return args
+    return parser
 
 
 def make_plot(
@@ -341,6 +216,7 @@ def make_plot(
         lumi=None,
         loc=args.titlePos,
         text_size=args.legSize,
+        no_energy=args.noEnergy,
     )
 
     plot_tools.addLegend(
@@ -512,7 +388,7 @@ def main():
     """
     Plot the uncertainty breakdown of the histogram bins based on global impacts
     """
-    args = parseArgs()
+    args = make_parser().parse_args()
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
@@ -520,7 +396,7 @@ def main():
 
     outdir = output_tools.make_plot_dir(args.outpath, eoscp=args.eoscp)
 
-    # load .hdf5 file first, must exist in combinetf and rabbit
+    # load .hdf5 file
     fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
 
     plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize

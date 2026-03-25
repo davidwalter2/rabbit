@@ -331,7 +331,7 @@ class Fitter:
         cov_ext = None
         with h5py.File(fitresult_file, "r") as fext:
             if "x" in fext.keys():
-                # fitresult from combinetf
+                # fitresult from rabbit
                 x_ext = fext["x"][...]
                 parms_ext = fext["parms"][...].astype(str)
                 if "cov" in fext.keys():

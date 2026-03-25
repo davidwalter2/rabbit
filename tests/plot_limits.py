@@ -35,7 +35,7 @@ def parseArgs():
         "infiles",
         type=str,
         nargs="*",
-        help="hdf5 files from rabbit or root file from combinetf",
+        help="hdf5 files from rabbit",
     )
     parser.add_argument(
         "-o",

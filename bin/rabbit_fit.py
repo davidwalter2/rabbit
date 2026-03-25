@@ -195,7 +195,7 @@ def make_parser():
         help="compute impacts of frozen (non-profiled) systematics",
     )
 
-    return parser.parse_args()
+    return parser
 
 
 def save_observed_hists(args, mappings, fitter, ws):
@@ -460,7 +460,7 @@ def fit(args, fitter, ws, dofit=True):
 
 def main():
     start_time = time.time()
-    args = make_parser()
+    args = make_parser().parse_args()
 
     if args.eager:
         tf.config.run_functions_eagerly(True)
@@ -517,7 +517,7 @@ def main():
     }
 
     with workspace.Workspace(
-        args.output,
+        args.outpath,
         args.outname,
         postfix=args.postfix,
         fitter=ifitter,

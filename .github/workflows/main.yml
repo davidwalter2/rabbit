@@ -411,7 +411,7 @@ jobs:
 
       - name: plot histogram covariance matrices
         run: >-
-          rabbit_plot_hists_cov.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          rabbit_plot_cov.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
           --subtitle Preliminary -m Project ch1 a -m Project ch1 b --subtitle Preliminary --config tests/style_config.py
 
 
