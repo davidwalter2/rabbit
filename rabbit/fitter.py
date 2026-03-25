@@ -791,26 +791,21 @@ class Fitter:
 
         return impacts, impacts_grouped
 
-    def _global_impacts_context(self):
-        return global_impacts.GlobalImpactsContext(
-            x=self.x,
-            ubeta=self.ubeta,
-            beta_shape=self.beta_shape,
-            compute_yields_with_beta_fn=self._compute_yields_with_beta,
-            compute_lbeta_fn=self._compute_lbeta,
-            compute_lc_fn=self._compute_lc,
-            npoi=self.poi_model.npoi,
-            noiidxs=self.indata.noiidxs,
-            systgroupidxs=self.indata.systgroupidxs,
-            bin_by_bin_stat=self.binByBinStat,
-            bin_by_bin_stat_mode=self.binByBinStatMode,
-            global_impacts_from_jvp=self.globalImpactsFromJVP,
-        )
-
     @tf.function
     def global_impacts_parms(self):
         return global_impacts.global_impacts_parms(
-            self._global_impacts_context(),
+            self.x,
+            self.ubeta,
+            self.beta_shape,
+            self._compute_yields_with_beta,
+            self._compute_lbeta,
+            self._compute_lc,
+            self.poi_model.npoi,
+            self.indata.noiidxs,
+            self.indata.systgroupidxs,
+            self.binByBinStat,
+            self.binByBinStatMode,
+            self.globalImpactsFromJVP,
             self.cov,
         )
 
@@ -819,13 +814,18 @@ class Fitter:
         dxdtheta0, dxdnobs, dxdbeta0 = self._dxdvars()
 
         impacts, impacts_grouped = global_impacts.gaussian_global_impacts_parms(
-            self._global_impacts_context(),
             dxdtheta0,
             dxdnobs,
             dxdbeta0,
             self.var_theta0,
             self.nobs if self.varnobs is None else self.varnobs,
             1.0 if self.binByBinStatType in ["normal-additive"] else 1.0 / self.kstat,
+            self.poi_model.npoi,
+            self.indata.noiidxs,
+            self.binByBinStat,
+            self.binByBinStatMode,
+            self.beta_shape,
+            self.indata.systgroupidxs,
             self.data_cov_inv,
         )
 
@@ -1011,7 +1011,17 @@ class Fitter:
 
         if compute_global_impacts:
             impacts, impacts_grouped = global_impacts.global_impacts_obs(
-                self._global_impacts_context(),
+                self.x,
+                self.ubeta,
+                self.beta_shape,
+                self._compute_yields_with_beta,
+                self._compute_lbeta,
+                self._compute_lc,
+                self.poi_model.npoi,
+                self.indata.systgroupidxs,
+                self.binByBinStat,
+                self.binByBinStatMode,
+                self.globalImpactsFromJVP,
                 cov_dexpdx,
                 expvar_flat,
                 expvar.shape,
@@ -1038,7 +1048,6 @@ class Fitter:
             _, dndtheta0, dndnobs, dndbeta0 = self._dndvars(fun_n)
             impacts_gaussian, impacts_gaussian_grouped = (
                 global_impacts.gaussian_global_impacts_obs(
-                    self._global_impacts_context(),
                     dndtheta0,
                     dndnobs,
                     dndbeta0,
@@ -1049,6 +1058,10 @@ class Fitter:
                         if self.binByBinStatType in ["normal-additive"]
                         else 1.0 / self.kstat
                     ),
+                    self.binByBinStat,
+                    self.binByBinStatMode,
+                    self.beta_shape,
+                    self.indata.systgroupidxs,
                     self.data_cov_inv,
                 )
             )

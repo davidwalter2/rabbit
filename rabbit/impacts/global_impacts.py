@@ -13,30 +13,7 @@ c) (TODO to be implemented) the fully likelihood based impacts, which are extrac
 Ref. https://arxiv.org/abs/2307.04007
 """
 
-import dataclasses
-
 import tensorflow as tf
-
-
-@dataclasses.dataclass
-class GlobalImpactsContext:
-    """Bundles the fitter state and configuration needed for all global impact computations."""
-
-    # fit parameters
-    x: object
-    ubeta: object
-    beta_shape: tuple
-    # callables
-    compute_yields_with_beta_fn: object
-    compute_lbeta_fn: object
-    compute_lc_fn: object
-    # config
-    npoi: int
-    noiidxs: object
-    systgroupidxs: object
-    bin_by_bin_stat: bool
-    bin_by_bin_stat_mode: str
-    global_impacts_from_jvp: bool
 
 
 def _gather_poi_noi_vector(v, noiidxs, npoi=0):
@@ -51,38 +28,46 @@ def _compute_global_impact_group(d_squared, idxs):
     return tf.sqrt(d_squared_summed)
 
 
-def _compute_global_impacts_beta0_jvp(ctx, cov_dexpdx, profile=True):
+def _compute_global_impacts_beta0_jvp(
+    x,
+    ubeta,
+    beta_shape,
+    compute_yields_with_beta_fn,
+    compute_lbeta_fn,
+    cov_dexpdx,
+    profile=True,
+):
     """
     Computes global impacts from beta parameters via JVP in forward accumulator mode.
     This is fast in case of more beta parameters than explicit parameters (x) and 'cov_dexpdx' has only a few columns.
     It should always be more memory efficient.
     """
     with tf.GradientTape() as t2:
-        t2.watch(ctx.ubeta)
+        t2.watch(ubeta)
         with tf.GradientTape() as t1:
-            t1.watch(ctx.ubeta)
-            *_, beta = ctx.compute_yields_with_beta_fn(
+            t1.watch(ubeta)
+            *_, beta = compute_yields_with_beta_fn(
                 profile=profile, compute_norm=False, full=False
             )
-            lbeta = ctx.compute_lbeta_fn(beta)
-        pdlbetadbeta = t1.gradient(lbeta, ctx.ubeta)
+            lbeta = compute_lbeta_fn(beta)
+        pdlbetadbeta = t1.gradient(lbeta, ubeta)
 
     # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
-    pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, ctx.ubeta)
+    pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, ubeta)
 
     # this is the cholesky decomposition of pd2lbetadbeta2
     sbeta = tf.linalg.LinearOperatorDiag(
         tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
     )
 
-    impacts_beta_shape = (*ctx.beta_shape, cov_dexpdx.shape[-1])
+    impacts_beta_shape = (*beta_shape, cov_dexpdx.shape[-1])
     impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=cov_dexpdx.dtype)
 
     if profile:
         # dbeta/dx is None if not profiled (no relation)
         def _tangents(tangent_vector):
-            with tf.autodiff.ForwardAccumulator(ctx.x, tangent_vector) as acc:
-                *_, beta = ctx.compute_yields_with_beta_fn(
+            with tf.autodiff.ForwardAccumulator(x, tangent_vector) as acc:
+                *_, beta = compute_yields_with_beta_fn(
                     profile=True, compute_norm=False, full=False
                 )
             return acc.jvp(beta)
@@ -101,30 +86,38 @@ def _compute_global_impacts_beta0_jvp(ctx, cov_dexpdx, profile=True):
     return impacts_beta0, sbeta
 
 
-def _compute_global_impacts_beta0(ctx, cov_dexpdx, profile=True):
+def _compute_global_impacts_beta0(
+    x,
+    ubeta,
+    beta_shape,
+    compute_yields_with_beta_fn,
+    compute_lbeta_fn,
+    cov_dexpdx,
+    profile=True,
+):
     """
     Computes global impacts from beta parameters in the traditional mode.
     This is fast in case of less beta parameters than explicit parameters (x) or 'cov_dexpdx' has many columns.
     """
     with tf.GradientTape(persistent=True) as t2:
-        t2.watch([ctx.x, ctx.ubeta])
+        t2.watch([x, ubeta])
         with tf.GradientTape(persistent=True) as t1:
-            t1.watch([ctx.x, ctx.ubeta])
-            *_, beta = ctx.compute_yields_with_beta_fn(
+            t1.watch([x, ubeta])
+            *_, beta = compute_yields_with_beta_fn(
                 profile=profile, compute_norm=False, full=False
             )
-            lbeta = ctx.compute_lbeta_fn(beta)
-        pdlbetadbeta = t1.gradient(lbeta, ctx.ubeta)
-        dbetadx = t1.jacobian(beta, ctx.x)
+            lbeta = compute_lbeta_fn(beta)
+        pdlbetadbeta = t1.gradient(lbeta, ubeta)
+        dbetadx = t1.jacobian(beta, x)
     # pd2lbetadbeta2 is diagonal so we can use gradient instead of jacobian
-    pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, ctx.ubeta)
+    pd2lbetadbeta2_diag = t2.gradient(pdlbetadbeta, ubeta)
 
     # this is the cholesky decomposition of pd2lbetadbeta2
     sbeta = tf.linalg.LinearOperatorDiag(
         tf.sqrt(tf.reshape(pd2lbetadbeta2_diag, [-1])), is_self_adjoint=True
     )
 
-    impacts_beta_shape = (*ctx.beta_shape, cov_dexpdx.shape[-1])
+    impacts_beta_shape = (*beta_shape, cov_dexpdx.shape[-1])
     impacts_beta0 = tf.zeros(shape=impacts_beta_shape, dtype=cov_dexpdx.dtype)
 
     if profile:
@@ -138,34 +131,60 @@ def _compute_global_impacts_beta0(ctx, cov_dexpdx, profile=True):
     return impacts_beta0, sbeta
 
 
-def _compute_beta0_impacts(ctx, cov_dexpdx, profile, pdexpdbeta, pd2ldbeta2_pdexpdbeta):
+def _compute_beta0_impacts(
+    x,
+    ubeta,
+    beta_shape,
+    compute_yields_with_beta_fn,
+    compute_lbeta_fn,
+    global_impacts_from_jvp,
+    bin_by_bin_stat_mode,
+    cov_dexpdx,
+    profile,
+    pdexpdbeta,
+    pd2ldbeta2_pdexpdbeta,
+):
     """Compute beta0 impacts and variance, shared between parms and obs variants."""
-    if ctx.global_impacts_from_jvp:
+    if global_impacts_from_jvp:
         impacts_beta0, sbeta = _compute_global_impacts_beta0_jvp(
-            ctx, cov_dexpdx, profile
+            x,
+            ubeta,
+            beta_shape,
+            compute_yields_with_beta_fn,
+            compute_lbeta_fn,
+            cov_dexpdx,
+            profile,
         )
     else:
-        impacts_beta0, sbeta = _compute_global_impacts_beta0(ctx, cov_dexpdx, profile)
+        impacts_beta0, sbeta = _compute_global_impacts_beta0(
+            x,
+            ubeta,
+            beta_shape,
+            compute_yields_with_beta_fn,
+            compute_lbeta_fn,
+            cov_dexpdx,
+            profile,
+        )
 
     if pdexpdbeta is not None:
         impacts_beta0 += tf.reshape(sbeta @ pd2ldbeta2_pdexpdbeta, impacts_beta0.shape)
 
     var_beta0 = tf.reduce_sum(tf.square(impacts_beta0), axis=0)
     impacts_beta0_process = None
-    if ctx.bin_by_bin_stat_mode == "full":
+    if bin_by_bin_stat_mode == "full":
         impacts_beta0_process = tf.sqrt(var_beta0)
         var_beta0 = tf.reduce_sum(var_beta0, axis=0)
 
     return tf.sqrt(var_beta0), impacts_beta0_process, var_beta0
 
 
-def _compute_global_impacts_x0(ctx, cov_dexpdx):
+def _compute_global_impacts_x0(x, compute_lc_fn, cov_dexpdx):
     with tf.GradientTape() as t2:
         with tf.GradientTape() as t1:
-            lc = ctx.compute_lc_fn()
-        dlcdx = t1.gradient(lc, ctx.x)
+            lc = compute_lc_fn()
+        dlcdx = t1.gradient(lc, x)
     # d2lcdx2 is diagonal so we can use gradient instead of jacobian
-    d2lcdx2_diag = t2.gradient(dlcdx, ctx.x)
+    d2lcdx2_diag = t2.gradient(dlcdx, x)
 
     # sc is the cholesky decomposition of d2lcdx2
     sc = tf.linalg.LinearOperatorDiag(tf.sqrt(d2lcdx2_diag), is_self_adjoint=True)
@@ -173,22 +192,28 @@ def _compute_global_impacts_x0(ctx, cov_dexpdx):
 
 
 def _compute_grouped_impacts(
-    ctx, impacts_theta0_sq, impacts_nobs, impacts_beta0_total, impacts_beta0_process
+    bin_by_bin_stat,
+    bin_by_bin_stat_mode,
+    systgroupidxs,
+    impacts_theta0_sq,
+    impacts_nobs,
+    impacts_beta0_total,
+    impacts_beta0_process,
 ):
     """Assemble the grouped impacts tensor from all contributions."""
-    if ctx.bin_by_bin_stat:
+    if bin_by_bin_stat:
         impacts_grouped = tf.stack([impacts_nobs, impacts_beta0_total], axis=-1)
-        if ctx.bin_by_bin_stat_mode == "full":
+        if bin_by_bin_stat_mode == "full":
             impacts_grouped = tf.concat(
                 [impacts_grouped, tf.transpose(impacts_beta0_process)], axis=-1
             )
     else:
         impacts_grouped = impacts_nobs[..., None]
 
-    if len(ctx.systgroupidxs):
+    if len(systgroupidxs):
         impacts_grouped_syst = tf.map_fn(
             lambda idxs: _compute_global_impact_group(impacts_theta0_sq, idxs),
-            tf.ragged.constant(ctx.systgroupidxs, dtype=tf.int64),
+            tf.ragged.constant(systgroupidxs, dtype=tf.int64),
             fn_output_signature=tf.TensorSpec(
                 shape=(impacts_theta0_sq.shape[0],), dtype=impacts_theta0_sq.dtype
             ),
@@ -199,9 +224,23 @@ def _compute_grouped_impacts(
     return impacts_grouped
 
 
-def global_impacts_parms(ctx, cov):
-    idxs_poi = tf.range(ctx.npoi, dtype=tf.int64)
-    idxs_noi = tf.constant(ctx.npoi + ctx.noiidxs, dtype=tf.int64)
+def global_impacts_parms(
+    x,
+    ubeta,
+    beta_shape,
+    compute_yields_with_beta_fn,
+    compute_lbeta_fn,
+    compute_lc_fn,
+    npoi,
+    noiidxs,
+    systgroupidxs,
+    bin_by_bin_stat,
+    bin_by_bin_stat_mode,
+    global_impacts_from_jvp,
+    cov,
+):
+    idxs_poi = tf.range(npoi, dtype=tf.int64)
+    idxs_noi = tf.constant(npoi + noiidxs, dtype=tf.int64)
     idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
 
     dexpdx = tf.one_hot(idxsout, depth=cov.shape[0], dtype=cov.dtype)
@@ -210,22 +249,34 @@ def global_impacts_parms(ctx, cov):
     var_total = tf.gather(tf.linalg.diag_part(cov), idxsout)
 
     impacts_beta0_total, impacts_beta0_process, var_beta0 = None, None, None
-    if ctx.bin_by_bin_stat:
+    if bin_by_bin_stat:
         impacts_beta0_total, impacts_beta0_process, var_beta0 = _compute_beta0_impacts(
-            ctx, cov_dexpdx, profile=True, pdexpdbeta=None, pd2ldbeta2_pdexpdbeta=None
+            x,
+            ubeta,
+            beta_shape,
+            compute_yields_with_beta_fn,
+            compute_lbeta_fn,
+            global_impacts_from_jvp,
+            bin_by_bin_stat_mode,
+            cov_dexpdx,
+            profile=True,
+            pdexpdbeta=None,
+            pd2ldbeta2_pdexpdbeta=None,
         )
 
-    impacts_x0 = _compute_global_impacts_x0(ctx, cov_dexpdx)
-    impacts_theta0 = tf.transpose(impacts_x0[ctx.npoi :])
+    impacts_x0 = _compute_global_impacts_x0(x, compute_lc_fn, cov_dexpdx)
+    impacts_theta0 = tf.transpose(impacts_x0[npoi:])
 
     impacts_theta0_sq = tf.square(impacts_theta0)
     var_theta0 = tf.reduce_sum(impacts_theta0_sq, axis=-1)
     var_nobs = var_total - var_theta0
-    if ctx.bin_by_bin_stat:
+    if bin_by_bin_stat:
         var_nobs -= var_beta0
 
     impacts_grouped = _compute_grouped_impacts(
-        ctx,
+        bin_by_bin_stat,
+        bin_by_bin_stat_mode,
+        systgroupidxs,
         impacts_theta0_sq,
         tf.sqrt(var_nobs),
         impacts_beta0_total,
@@ -236,7 +287,17 @@ def global_impacts_parms(ctx, cov):
 
 
 def global_impacts_obs(
-    ctx,
+    x,
+    ubeta,
+    beta_shape,
+    compute_yields_with_beta_fn,
+    compute_lbeta_fn,
+    compute_lc_fn,
+    npoi,
+    systgroupidxs,
+    bin_by_bin_stat,
+    bin_by_bin_stat_mode,
+    global_impacts_from_jvp,
     cov_dexpdx,
     expvar_flat,
     expvar_shape,
@@ -276,22 +337,34 @@ def global_impacts_obs(
         )
 
     impacts_beta0_total, impacts_beta0_process, var_beta0 = None, None, None
-    if ctx.bin_by_bin_stat:
+    if bin_by_bin_stat:
         impacts_beta0_total, impacts_beta0_process, var_beta0 = _compute_beta0_impacts(
-            ctx, cov_dexpdx, profile, pdexpdbeta, pd2ldbeta2_pdexpdbeta
+            x,
+            ubeta,
+            beta_shape,
+            compute_yields_with_beta_fn,
+            compute_lbeta_fn,
+            global_impacts_from_jvp,
+            bin_by_bin_stat_mode,
+            cov_dexpdx,
+            profile,
+            pdexpdbeta,
+            pd2ldbeta2_pdexpdbeta,
         )
 
-    impacts_x0 = _compute_global_impacts_x0(ctx, cov_dexpdx)
-    impacts_theta0 = tf.transpose(impacts_x0[ctx.npoi :])
+    impacts_x0 = _compute_global_impacts_x0(x, compute_lc_fn, cov_dexpdx)
+    impacts_theta0 = tf.transpose(impacts_x0[npoi:])
 
     impacts_theta0_sq = tf.square(impacts_theta0)
     var_theta0 = tf.reduce_sum(impacts_theta0_sq, axis=-1)
     var_nobs = expvar_flat - var_theta0
-    if ctx.bin_by_bin_stat:
+    if bin_by_bin_stat:
         var_nobs -= var_beta0
 
     impacts_grouped = _compute_grouped_impacts(
-        ctx,
+        bin_by_bin_stat,
+        bin_by_bin_stat_mode,
+        systgroupidxs,
         impacts_theta0_sq,
         tf.sqrt(var_nobs),
         impacts_beta0_total,
@@ -307,13 +380,16 @@ def global_impacts_obs(
 
 
 def _gaussian_global_impacts(
-    ctx,
     dxdtheta0,
     dxdnobs,
     dxdbeta0,
     vartheta0,
     varnobs,
     varbeta0,
+    bin_by_bin_stat,
+    bin_by_bin_stat_mode,
+    beta_shape,
+    systgroupidxs,
     data_cov_inv=None,
 ):
     if data_cov_inv is not None:
@@ -325,32 +401,32 @@ def _gaussian_global_impacts(
 
     impacts_data_stat = tf.sqrt(data_stat)
 
-    if ctx.bin_by_bin_stat:
+    if bin_by_bin_stat:
         var_beta0 = tf.reduce_sum(
-            tf.reshape(tf.square(dxdbeta0), (-1, *ctx.beta_shape)) * varbeta0, axis=1
+            tf.reshape(tf.square(dxdbeta0), (-1, *beta_shape)) * varbeta0, axis=1
         )
 
         impacts_beta0_process = None
-        if ctx.bin_by_bin_stat_mode == "full":
+        if bin_by_bin_stat_mode == "full":
             impacts_beta0_process = tf.sqrt(var_beta0)
             var_beta0 = tf.reduce_sum(var_beta0, axis=-1)
 
         impacts_beta0_total = tf.sqrt(var_beta0)
 
         impacts_grouped = tf.stack([impacts_data_stat, impacts_beta0_total], axis=-1)
-        if ctx.bin_by_bin_stat_mode == "full":
+        if bin_by_bin_stat_mode == "full":
             impacts_grouped = tf.concat(
                 [impacts_grouped, impacts_beta0_process], axis=-1
             )
     else:
         impacts_grouped = impacts_data_stat
 
-    if len(ctx.systgroupidxs):
+    if len(systgroupidxs):
         dxdtheta0_squared = tf.square(dxdtheta0) * vartheta0
 
         impacts_grouped_syst = tf.map_fn(
             lambda idxs: _compute_global_impact_group(dxdtheta0_squared, idxs),
-            tf.ragged.constant(ctx.systgroupidxs, dtype=tf.int64),
+            tf.ragged.constant(systgroupidxs, dtype=tf.int64),
             fn_output_signature=tf.TensorSpec(
                 shape=(dxdtheta0_squared.shape[0],), dtype=tf.float64
             ),
@@ -362,35 +438,63 @@ def _gaussian_global_impacts(
 
 
 def gaussian_global_impacts_parms(
-    ctx,
     dxdtheta0,
     dxdnobs,
     dxdbeta0,
     vartheta0,
     varnobs,
     varbeta0,
+    npoi,
+    noiidxs,
+    bin_by_bin_stat,
+    bin_by_bin_stat_mode,
+    beta_shape,
+    systgroupidxs,
     data_cov_inv=None,
 ):
     # compute impacts for pois and nois
-    dxdtheta0 = _gather_poi_noi_vector(dxdtheta0, ctx.noiidxs, ctx.npoi)
-    dxdnobs = _gather_poi_noi_vector(dxdnobs, ctx.noiidxs, ctx.npoi)
-    dxdbeta0 = _gather_poi_noi_vector(dxdbeta0, ctx.noiidxs, ctx.npoi)
+    dxdtheta0 = _gather_poi_noi_vector(dxdtheta0, noiidxs, npoi)
+    dxdnobs = _gather_poi_noi_vector(dxdnobs, noiidxs, npoi)
+    dxdbeta0 = _gather_poi_noi_vector(dxdbeta0, noiidxs, npoi)
 
     return _gaussian_global_impacts(
-        ctx, dxdtheta0, dxdnobs, dxdbeta0, vartheta0, varnobs, varbeta0, data_cov_inv
+        dxdtheta0,
+        dxdnobs,
+        dxdbeta0,
+        vartheta0,
+        varnobs,
+        varbeta0,
+        bin_by_bin_stat,
+        bin_by_bin_stat_mode,
+        beta_shape,
+        systgroupidxs,
+        data_cov_inv,
     )
 
 
 def gaussian_global_impacts_obs(
-    ctx,
     dndtheta0,
     dndnobs,
     dndbeta0,
     vartheta0,
     varnobs,
     varbeta0,
+    bin_by_bin_stat,
+    bin_by_bin_stat_mode,
+    beta_shape,
+    systgroupidxs,
     data_cov_inv=None,
 ):
     return _gaussian_global_impacts(
-        ctx, dndtheta0, dndnobs, dndbeta0, vartheta0, varnobs, varbeta0, data_cov_inv
+        dndtheta0,
+        dndnobs,
+        dndbeta0,
+        vartheta0,
+        varnobs,
+        varbeta0,
+        bin_by_bin_stat,
+        bin_by_bin_stat_mode,
+        beta_shape,
+        systgroupidxs,
+        data_cov_inv,
     )
