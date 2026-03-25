@@ -26,7 +26,7 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: run isort
         run: |
@@ -63,7 +63,7 @@ jobs:
       PATH: ${{steps.export.outputs.PATH}}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: setup kerberos
         run: |
@@ -122,7 +122,7 @@ jobs:
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
           echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
     
       - name: symmetrizations
         run: >- 
@@ -150,7 +150,7 @@ jobs:
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
           echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: make tensor
         run: >-
@@ -203,7 +203,7 @@ jobs:
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: nominal fit
         run: >- 
@@ -256,7 +256,7 @@ jobs:
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: sparse tensor fit 
         run: >- 
@@ -306,7 +306,7 @@ jobs:
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: bsm limits
         run: >-
@@ -336,7 +336,7 @@ jobs:
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
           echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: print pulls & constraints blinded
         run: rabbit_print_pulls_and_constraints.py $RABBIT_OUTDIR/fitresults_blinded.hdf5 
@@ -433,7 +433,7 @@ jobs:
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
           echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: nominal fit with scans
         run: >- 
