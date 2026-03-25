@@ -241,6 +241,27 @@ jobs:
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix pseudodata
           -t 0 --pseudoData original --doImpacts --globalImpacts --unblind ^sig$
 
+  sparse-fits:
+    runs-on: [self-hosted, linux, x64]
+    needs: [setenv, make-tensor]
+    steps:
+      - env:
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
+          PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
+          PATH: ${{ needs.setenv.outputs.PATH }}
+        run: |
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
+          echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
+          echo "PATH=${PATH}" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v5
+
+      - name: sparse tensor fit 
+        run: >- 
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_sparse.hdf5 -o $RABBIT_OUTDIR/ --postfix sparse
+          -t 0 --noBinByBinStat --doImpacts --globalImpacts --computeVariations
+          --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
+          -m Project ch1 a -m Project ch1 b
 
   alternative-fits:
     runs-on: [self-hosted, linux, x64]
@@ -248,11 +269,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: sparse
-            tensor: test_tensor_sparse.hdf5
-            fit_args: >-
-              --noBinByBinStat --computeVariations              
+        include:              
           - name: covariance
             tensor: test_tensor.hdf5
             fit_args: >-
@@ -501,7 +518,7 @@ jobs:
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
-    needs: [setenv, symmerizations, alternative-fits, bsm, plotting, likelihoodscans]
+    needs: [setenv, symmerizations, sparse-fits, alternative-fits, bsm, plotting, likelihoodscans]
     if: always() 
     steps:
       - env:
