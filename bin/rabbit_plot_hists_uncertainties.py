@@ -222,6 +222,12 @@ def parseArgs():
         action="store_true",
         help="Don't allow scientific notation for y axis",
     )
+    parser.add_argument(
+        "--impactType",
+        default="global",
+        choices=["gaussian_global", "global"],
+        help="Impact definition",
+    )
     args = parser.parse_args()
 
     return args
@@ -381,11 +387,13 @@ def make_plots(
     args=None,
     channel="",
     lumi=1,
+    impacts_name="global_impacts_grouped",
     *opts,
     **kwopts,
 ):
-    if "hist_postfit_inclusive_global_impacts_grouped" in result.keys():
-        hist_impacts = result["hist_postfit_inclusive_global_impacts_grouped"].get()
+    hist_impacts_name = f"hist_postfit_inclusive_{impacts_name}"
+    if hist_impacts_name in result.keys():
+        hist_impacts = result[hist_impacts_name].get()
     else:
         hist_impacts = None
 
@@ -559,12 +567,15 @@ def main():
                 ]:
                     suffix = suffix.replace(sign, rpl)
 
+                impacts_name = f"{args.impactType}_impacts_grouped"
+
                 make_plots(
                     outdir,
                     result,
                     config,
                     channel=suffix,
                     lumi=info.get("lumi", None),
+                    impacts_name=impacts_name,
                     **opts,
                 )
 

@@ -13,6 +13,7 @@ import pandas as pd
 import scipy.stats
 from matplotlib import colormaps
 from matplotlib.lines import Line2D
+from matplotlib.patches import Polygon
 
 import rabbit.io_tools
 
@@ -332,6 +333,16 @@ def parseArgs():
         """,
     )
     parser.add_argument(
+        "--varGroups",
+        type=str,
+        nargs="*",
+        default=[],
+        help="""
+        Names of grouped postfit histogram impacts to overlay as nominal +/- impact.
+        These are read from hist_postfit_inclusive_global_impacts_grouped.
+        """,
+    )
+    parser.add_argument(
         "--varLabels",
         type=str,
         nargs="*",
@@ -358,6 +369,13 @@ def parseArgs():
         default="lower",
         choices=["upper", "lower", "both"],
         help="Plot the variations in the upper, lower panels, or both",
+    )
+    parser.add_argument(
+        "--fillVariationsAlphas",
+        type=float,
+        nargs="*",
+        default=[],
+        help="Alpha values for filled two-sided variation envelopes; 0 disables filling",
     )
     parser.add_argument(
         "--scaleVariation",
@@ -619,6 +637,9 @@ def make_plot(
             flow="none",
         )
 
+    extra_handles_upper = []
+    extra_labels_upper = []
+
     if args.showVariations in ["upper", "both"]:
         linewidth = 2
         step_offset = 0
@@ -662,28 +683,81 @@ def make_plot(
                 )
                 continue
 
-            if hup is not None:
+            two_sided = (
+                hdown is not None
+                and hdown[i] is not None
+                and len(args.varOneSided) == 0
+            )
+            fill_alpha = (
+                args.fillVariationsAlphas[i]
+                if i < len(args.fillVariationsAlphas)
+                else 0.0
+            )
+
+            if fill_alpha > 0 and hup is not None and two_sided:
+                edges = hup[i].axes[0].edges
+                y_up = hup[i].values()
+                y_dn = hdown[i].values()
+                if binwnorm:
+                    widths = edges[1:] - edges[:-1]
+                    y_up = y_up / widths
+                    y_dn = y_dn / widths
+
+                ax1.fill_between(
+                    edges,
+                    np.append(y_up, y_up[-1]),
+                    np.append(y_dn, y_dn[-1]),
+                    step="post",
+                    facecolor=varColors[i],
+                    alpha=fill_alpha,
+                    edgecolor=varColors[i],
+                    linewidth=linewidth,
+                    label=None,
+                    zorder=1.5,
+                )
+                extra_handles_upper.append(
+                    Polygon(
+                        [[0, 0], [1, 0], [1, 1], [0, 1]],
+                        closed=True,
+                        facecolor=varColors[i],
+                        alpha=fill_alpha,
+                        edgecolor=varColors[i],
+                        linewidth=linewidth,
+                        linestyle="-",
+                    )
+                )
+                extra_labels_upper.append(l)
                 hep.histplot(
-                    hup[i],
+                    [hup[i], hdown[i]],
                     histtype="step",
-                    color=varColors,
-                    linestyle="-",
+                    color=varColors[i],
+                    linestyle=["-", "--"],
                     yerr=False,
                     linewidth=linewidth,
-                    label=varLabels,
                     binwnorm=binwnorm,
                     ax=ax1,
                     flow="none",
                 )
-            if (
-                hdown is not None
-                and hdown[i] is not None
-                and len(args.varOneSided) == 0
-            ):
+                continue
+
+            if hup is not None:
+                hep.histplot(
+                    hup[i],
+                    histtype="step",
+                    color=varColors[i],
+                    linestyle="-",
+                    yerr=False,
+                    linewidth=linewidth,
+                    label=l,
+                    binwnorm=binwnorm,
+                    ax=ax1,
+                    flow="none",
+                )
+            if two_sided:
                 hep.histplot(
                     hdown[i],
                     histtype="step",
-                    color=varColors,
+                    color=varColors[i],
                     linestyle="--",
                     yerr=False,
                     linewidth=linewidth,
@@ -817,11 +891,12 @@ def make_plot(
 
         if diff:
             h0 = hh.addHists(h_num, h_num, scale2=-1)
-            h2 = hh.addHists(h_data, h_den, scale2=-1)
+            h2 = hh.addHists(h_num, h_den, scale2=-1)
             if h_data_stat is not None:
-                h2_stat = hh.divideHists(
-                    h_data_stat, h_den, cutoff=cutoff, rel_unc=True
-                )
+                if args.ratioToData:
+                    h2_stat = hh.addHists(h_num, h_data_stat, scale2=-1)
+                else:
+                    h2_stat = hh.addHists(h_data_stat, h_den, scale2=-1)
         else:
             h0 = hh.divideHists(
                 h_num,
@@ -864,7 +939,7 @@ def make_plot(
                     h2_stat,
                     histtype="errorbar",
                     color="black",
-                    yerr=True if counts else h2.variances() ** 0.5,
+                    yerr=True if counts else h2_stat.variances() ** 0.5,
                     linewidth=2,
                     capsize=2,
                     ax=ax2,
@@ -897,10 +972,14 @@ def make_plot(
                 label_unc = args.uncertaintyLabel
 
             if diff:
+                # The difference panel is centered at zero; only the upper-panel
+                # uncertainty band is centered on the nominal prediction.
+                lower_hi = std
+                lower_lo = -std
                 ax2.fill_between(
                     edges,
-                    np.append((nom + std), ((nom + std))[-1]),
-                    np.append((nom - std), ((nom - std))[-1]),
+                    np.append(lower_hi, lower_hi[-1]),
+                    np.append(lower_lo, lower_lo[-1]),
                     step="post",
                     facecolor=facecolor,
                     zorder=0,
@@ -957,11 +1036,11 @@ def make_plot(
             linewidth = 2
             scaleVariation = [
                 args.scaleVariation[i] if i < len(args.scaleVariation) else 1
-                for i in range(len(varNames))
+                for i in range(len(varLabels))
             ]
             varOneSided = [
                 args.varOneSided[i] if i < len(args.varOneSided) else 0
-                for i in range(len(varNames))
+                for i in range(len(varLabels))
             ]
 
             step_offset = 0
@@ -1028,6 +1107,52 @@ def make_plot(
                         label=varLabels[i] if args.showVariations != "both" else None,
                         zorder=0,
                     )
+                    continue
+
+                fill_alpha = (
+                    args.fillVariationsAlphas[i]
+                    if i < len(args.fillVariationsAlphas)
+                    else 0.0
+                )
+
+                if fill_alpha > 0 and not varOneSided[i]:
+                    edges = hvars[0].axes[0].edges
+                    y_up = hvars[0].values()
+                    y_dn = hvars[1].values()
+                    ax2.fill_between(
+                        edges,
+                        np.append(y_up, y_up[-1]),
+                        np.append(y_dn, y_dn[-1]),
+                        step="post",
+                        facecolor=varColors[i],
+                        alpha=fill_alpha,
+                        edgecolor=varColors[i],
+                        linewidth=linewidth,
+                        label=None,
+                        zorder=0,
+                    )
+                    hep.histplot(
+                        hvars,
+                        histtype="step",
+                        color=varColors[i],
+                        linestyle=linestyles,
+                        yerr=False,
+                        linewidth=linewidth,
+                        ax=ax2,
+                        flow="none",
+                    )
+                    extra_handles.append(
+                        Polygon(
+                            [[0, 0], [1, 0], [1, 1], [0, 1]],
+                            closed=True,
+                            facecolor=varColors[i],
+                            alpha=fill_alpha,
+                            edgecolor=varColors[i],
+                            linewidth=linewidth,
+                            linestyle="-",
+                        )
+                    )
+                    extra_labels.append(varLabels[i])
                     continue
 
                 hep.histplot(
@@ -1111,6 +1236,13 @@ def make_plot(
             ncols=args.legCols,
             loc=args.legPos,
             text_size=args.legSize,
+            extra_handles=extra_handles_upper,
+            extra_labels=extra_labels_upper,
+            custom_handlers=(
+                ["bandfilled"]
+                if any(alpha > 0 for alpha in args.fillVariationsAlphas)
+                else []
+            ),
             extra_text=text_pieces if not args.noExtraText else None,
             extra_text_loc=None if args.extraTextLoc is None else args.extraTextLoc[:2],
             padding_loc=args.legPadding,
@@ -1124,7 +1256,11 @@ def make_plot(
             text_size=args.legSize,
             extra_handles=extra_handles,
             extra_labels=extra_labels,
-            custom_handlers=["stacked"],
+            custom_handlers=(
+                ["stacked", "bandfilled"]
+                if any(alpha > 0 for alpha in args.fillVariationsAlphas)
+                else ["stacked"]
+            ),
             padding_loc=args.lowerLegPadding,
         )
 
@@ -1214,30 +1350,31 @@ def make_plots(
         l if p not in args.suppressProcsLabel else None for l, p in zip(labels, procs)
     ]
 
-    if varNames is not None:
+    if varNames is not None or len(args.varGroups):
         # take the first variations from the varFiles, empty if no varFiles are provided
-        if len(varFilesFitTypes) == 1:
+        if varNames is not None and len(varFilesFitTypes) == 1:
             varFilesFitTypes = varFilesFitTypes * len(varResults)
 
         hists_down = []
         hists_up = []
-        for r, t in zip(varResults, varFilesFitTypes):
-            h = r[f"hist_{t}_inclusive"].get()
+        if varNames is not None:
+            for r, t in zip(varResults, varFilesFitTypes):
+                h = r[f"hist_{t}_inclusive"].get()
 
-            hist_up = h.copy()
-            hist_up.values()[...] = (
-                hist_up.values()[...] + hist_up.variances()[...] ** 0.5
-            )
-            hist_down = h.copy()
-            hist_down.values()[...] = (
-                hist_down.values()[...] - hist_down.variances()[...] ** 0.5
-            )
+                hist_up = h.copy()
+                hist_up.values()[...] = (
+                    hist_up.values()[...] + hist_up.variances()[...] ** 0.5
+                )
+                hist_down = h.copy()
+                hist_down.values()[...] = (
+                    hist_down.values()[...] - hist_down.variances()[...] ** 0.5
+                )
 
-            hists_down.append(hist_down)
-            hists_up.append(hist_up)
+                hists_down.append(hist_down)
+                hists_up.append(hist_up)
 
         # take the next variations from the nominal input file
-        if len(varNames) > len(varResults):
+        if varNames is not None and len(varNames) > len(varResults):
             # variations from the nominal input file
             hist_var = result[
                 f"hist_{fittype}_inclusive_variations{'_correlated' if args.correlatedVariations else ''}"
@@ -1259,6 +1396,32 @@ def make_plots(
                     for n in varNames[len(varResults) :]
                 ]
             )
+
+        if len(args.varGroups):
+            print(result.keys())
+            key = f"hist_{fittype}_inclusive_global_impacts_grouped"
+            if key not in result.keys():
+                raise ValueError(
+                    f"Grouped histogram impacts '{key}' not found. Make sure the fit was produced with --computeHistImpacts."
+                )
+            hist_grouped = result[key].get()
+            available_groups = np.array(hist_grouped.axes["impacts"], dtype=str)
+            missing_groups = [g for g in args.varGroups if g not in available_groups]
+            if missing_groups:
+                raise ValueError(
+                    f"Requested grouped variations {missing_groups} not found. Available groups include {available_groups.tolist()}"
+                )
+
+            for group in args.varGroups:
+                impact = hist_grouped[{"impacts": group}].project(
+                    *[a.name for a in axes]
+                )
+                hist_up = hist_inclusive.copy()
+                hist_down = hist_inclusive.copy()
+                hist_up.values()[...] = hist_inclusive.values() + impact.values()
+                hist_down.values()[...] = hist_inclusive.values() - impact.values()
+                hists_up.append(hist_up)
+                hists_down.append(hist_down)
     else:
         hists_down = None
         hists_up = None
@@ -1418,22 +1581,34 @@ def main():
 
     varFiles = args.varFiles
     varNames = args.varNames
+    varGroups = args.varGroups
+    variation_names = []
+    if varNames is not None:
+        variation_names.extend(varNames)
+    variation_names.extend(varGroups)
+
     varLabels = args.varLabels
     varColors = args.varColors
-    if varNames is not None:
+    if variation_names:
         if varLabels is None:
             syst_labels = getattr(config, "systematics_labels", {})
-            varLabels = [syst_labels.get(x, x) for x in varNames]
-        elif len(varLabels) != len(varNames):
+            varLabels = [syst_labels.get(x, x) for x in variation_names]
+        elif len(varLabels) != len(variation_names):
             raise ValueError(
-                "Must specify the same number of args for --varNames, and --varLabels"
-                f" found varNames={len(varNames)} and varLabels={len(varLabels)}"
+                f"Must specify the same number of args for variation names and --varLabels. Found variations={len(variation_names)} and varLabels={len(varLabels)}"
             )
         if varColors is None:
             varColors = [
-                colormaps["tab10" if len(varNames) < 10 else "tab20"](i)
-                for i in range(len(varNames))
+                colormaps["tab10" if len(variation_names) < 10 else "tab20"](i)
+                for i in range(len(variation_names))
             ]
+
+    if len(args.fillVariationsAlphas) == 1 and len(variation_names) > 1:
+        args.fillVariationsAlphas = args.fillVariationsAlphas * len(variation_names)
+    elif len(args.fillVariationsAlphas) not in [0, len(variation_names)]:
+        raise ValueError(
+            f"Must specify either zero, one, or exactly one alpha per variation with --fillVariationsAlphas. Found {len(args.fillVariationsAlphas)} alphas for {len(variation_names)} variations."
+        )
 
     fittype = "prefit" if args.prefit else "postfit"
 
