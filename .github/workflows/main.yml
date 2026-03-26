@@ -348,10 +348,10 @@ jobs:
         run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s
 
       - name: print global impacts
-        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s --globalImpacts
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s --impactType global
 
       - name: print global impacts of observable
-        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 --globalImpacts -m Project ch0_masked --ungroup --sort
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 --impactType global -m Project ch0_masked --ungroup --sort
 
       - name: plot impacts
         run: >-
@@ -362,14 +362,14 @@ jobs:
         run: >-
           rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
           -r $RABBIT_OUTDIR/fitresults_pseudodata.hdf5 --refResult original --refName "Pseudo data" -s absimpact
-          --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --globalImpacts --diffPullAsym --showNumbers
+          --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --impactType global --diffPullAsym --showNumbers
           --grouping max --subtitle Preliminary --postfix data_vs_pseudodata
 
       - name: plot global impacts on observable
         run: >-
           rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
           -s absimpact -m Project ch0_masked
-          --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --globalImpacts --showNumbers
+          --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --impactType global --showNumbers
           --grouping max --subtitle Preliminary --postfix ch0_masked
 
       - name: plot prefit distributions
