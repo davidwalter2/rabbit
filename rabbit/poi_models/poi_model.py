@@ -247,7 +247,10 @@ class SaturatedProjectModel(POIModel):
         self.channel_info_mapping = channel_info
 
         self.npoi = np.sum(
-            [np.prod([a.size for a in v["axes"]]) for v in channel_info.values()]
+            [
+                np.prod([a.size for a in v["axes"]]) if len(v["axes"]) else 1
+                for v in channel_info.values()
+            ]
         )
 
         names = []

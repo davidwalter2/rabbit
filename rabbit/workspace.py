@@ -185,8 +185,10 @@ class Workspace:
     def add_value(self, value, name, *args, **kwargs):
         self.dump_obj(value, name, *args, **kwargs)
 
-    def add_chi2(self, chi2, ndf, prefit, mapping):
+    def add_chi2(self, chi2, ndf, prefit, mapping, saturated=False):
         postfix = "_prefit" if prefit else ""
+        if saturated:
+            postfix += "_saturated"
         self.add_value(int(ndf), "ndf" + postfix, mapping.key)
         self.add_value(float(chi2), "chi2" + postfix, mapping.key)
 

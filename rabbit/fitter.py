@@ -353,6 +353,25 @@ class Fitter:
                     tf.function(val.python_function.__get__(self, type(self))),
                 )
 
+    def __deepcopy__(self, memo):
+        import copy
+
+        # Instance-level tf.function overrides (set by init_fit_parms to force retracing)
+        # contain FuncGraph objects that cannot be deepcopied. Strip them before copying
+        # so the copy falls back to the class-level @tf.function methods and retraces.
+        jit_overrides = {
+            name
+            for name in self.__dict__
+            if hasattr(getattr(type(self), name, None), "python_function")
+        }
+        state = {k: v for k, v in self.__dict__.items() if k not in jit_overrides}
+        cls = type(self)
+        obj = cls.__new__(cls)
+        memo[id(self)] = obj
+        for k, v in state.items():
+            setattr(obj, k, copy.deepcopy(v, memo))
+        return obj
+
     def load_fitresult(self, fitresult_file, fitresult_key):
         # load results from external fit and set postfit value and covariance elements for common parameters
         cov_ext = None

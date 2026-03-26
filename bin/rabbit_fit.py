@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import copy
+
 import tensorflow as tf
 
 tf.config.experimental.enable_op_determinism()
@@ -254,7 +256,7 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 ndf = int(aux[-1])
                 p_val = chi2.sf(chi2val, ndf)
 
-                logger.info("Traditional chi2:")
+                logger.info("Linear chi2:")
                 logger.info(f"    ndof: {ndf}")
                 logger.info(f"    chi2/ndf = {round(chi2val)}")
                 logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
@@ -271,23 +273,26 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                     [fitter.poi_model, saturated_model]
                 )
 
-                fitter.init_fit_parms(
+                fitter_saturated = copy.deepcopy(fitter)
+                fitter_saturated.init_fit_parms(
                     composite_model,
                     args.setConstraintMinimum,
                     unblind=args.unblind,
                     freeze_parameters=args.freezeParameters,
                 )
-                cb = fitter.minimize()
-                nllvalreduced = fitter.reduced_nll().numpy()
+                cb = fitter_saturated.minimize()
+                nllvalreduced = fitter_saturated.reduced_nll().numpy()
 
-                ndfsat = saturated_model.npoi
-                chi2_val = 2.0 * (ws.results["nllvalreduced"] - nllvalreduced)
-                p_val = chi2.sf(chi2_val, ndfsat)
+                ndf = saturated_model.npoi
+                chi2val = 2.0 * (ws.results["nllvalreduced"] - nllvalreduced)
+                p_val = chi2.sf(chi2val, ndf)
 
                 logger.info("Saturated chi2:")
-                logger.info(f"    ndof: {ndfsat}")
-                logger.info(f"    2*deltaNLL: {round(chi2_val, 2)}")
+                logger.info(f"    ndof: {ndf}")
+                logger.info(f"    2*deltaNLL: {round(chi2val, 2)}")
                 logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
+
+                ws.add_chi2(chi2val, ndf, prefit, mapping, saturated=True)
 
         if args.saveHistsPerProcess and not mapping.skip_per_process:
             logger.info(f"Save processes histogram for {mapping.key}")
