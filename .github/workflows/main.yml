@@ -311,11 +311,12 @@ jobs:
       - name: lcurve scan
         run: >-
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix lcurve_scan
-          -t 0 --unblind -r SVD Select 'ch0_masked' -r SVD Select 'ch0_masked'--earlyStopping 15
+          -t 0 --unblind -r SVD Select 'ch0_masked' -r SVD Select 'ch0_masked' --earlyStopping 15
 
       - name: plot lcurve
         run: >-
-          python tests/plot_epoch_loss_time.py results/fitresults_lcurve_scan.hdf5 -o $WEB_DIR/$PLOT_DIR --types lcurve --title Experiment --subtitle 'Work in progress'
+          python tests/plot_epoch_loss_time.py $RABBIT_OUTDIR/fitresults_lcurve_scan.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          --types lcurve --title Experiment --subtitle 'Work in progress'
 
   bsm:
     runs-on: [self-hosted, linux, x64]
