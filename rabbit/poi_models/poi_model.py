@@ -52,6 +52,36 @@ class POIModel:
             self.xpoidefault = tf.sqrt(poidefault)
 
 
+class CompositePOIModel(POIModel):
+    """
+    multiply different POI models together
+    """
+
+    def __init__(
+        self,
+        poi_models,
+        allowNegativePOI=False,
+    ):
+
+        self.poi_models = poi_models
+
+        self.npoi = sum([m.npoi for m in poi_models])
+
+        self.pois = np.concatenate([m.pois for m in poi_models])
+
+        self.allowNegativePOI = allowNegativePOI
+
+        self.is_linear = self.npoi == 0 or self.allowNegativePOI
+
+    def compute(self, poi, full=False):
+        start = 0
+        results = []
+        for m in self.poi_models:
+            results.append(m.compute(poi[start : start + m.npoi], full))
+            start += m.npoi
+        return tf.math.reduce_prod(tf.stack(results, axis=0), axis=0)
+
+
 class Ones(POIModel):
     """
     multiply all processes with ones
