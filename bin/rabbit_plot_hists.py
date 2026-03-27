@@ -1558,18 +1558,45 @@ def make_plots(
         )
 
 
-def get_chi2(result, no_chi2=True, fittype="postfit"):
-    chi2_key = f"chi2_prefit" if fittype == "prefit" else "chi2"
-    ndf_key = f"ndf_prefit" if fittype == "prefit" else "ndf"
-    if not no_chi2 and fittype == "postfit" and result.get("postfit_profile", False):
-        # use saturated likelihood test if relevant
-        chi2 = 2.0 * result["nllvalreduced"]
-        ndf = result["ndfsat"]
-        return chi2, ndf, True
-    elif not no_chi2 and chi2_key in result:
-        return result[chi2_key], result[ndf_key], False
-    else:
+def get_chi2(result, no_chi2=True, fittype="postfit", chi2type="automatic"):
+    if no_chi2:
         return None, None, False
+
+    if fittype == "prefit":
+        if chi2type in [
+            "saturated",
+        ]:
+            raise RuntimeError("No saturated test statistic in prefit")
+        elif chi2type in ["automatic", "linear"]:
+            chi2type = "linear"
+        chi2_key = "chi2_prefit"
+        ndf_key = "ndf_prefit"
+    else:
+        chi2_key = "chi2"
+        ndf_key = "ndf"
+
+        if chi2type in ["automatic", "saturated"]:
+            if (
+                result.get("postfit_profile", False)
+                and "nllvalreduced" in result.keys()
+            ):
+                # use saturated likelihood test from actual fit
+                chi2 = 2.0 * result["nllvalreduced"]
+                ndf = result["ndfsat"]
+                return chi2, ndf, True
+            elif f"{chi2_key}_saturated" in result.keys():
+                # use saturated likelihood test from mapping
+                chi2_key += "_saturated"
+                ndf_key += "_saturated"
+                saturated = True
+            elif chi2type == "automatic":
+                saturated = False
+            else:
+                raise ValueError("No saturated test statistic in postfit results found")
+        else:
+            saturated = False
+
+    return result.get(chi2_key, None), result.get(ndf_key, None), saturated
 
 
 def main():
@@ -1675,13 +1702,17 @@ def main():
                     fitresult
                     if fittype == "postfit"
                     and (
-                        (instance_key == "BaseMapping" and args.chisq != "linear")
-                        or args.chisq == "saturated"
+                        instance_key
+                        in [
+                            "BaseMapping",
+                        ]
+                        and args.chisq != "linear"
                     )
                     else instance
                 ),
                 args.chisq in [" ", "none", None],
                 fittype,
+                args.chisq,
             )
 
             for channel, result in instance["channels"].items():

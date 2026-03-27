@@ -142,6 +142,12 @@ def make_parser():
         help="save postfit histograms with each noi varied up to down",
     )
     parser.add_argument(
+        "--computeSaturatedProjectionTests",
+        default=False,
+        action="store_true",
+        help="Compute the saturated likelihood test for Project mappings",
+    )
+    parser.add_argument(
         "--noChi2",
         default=False,
         action="store_true",
@@ -263,7 +269,11 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
 
                 ws.add_chi2(chi2val, ndf, prefit, mapping)
 
-            if not prefit and type(mapping) == project.Project:
+            if (
+                not prefit
+                and type(mapping) == project.Project
+                and args.computeSaturatedProjectionTests
+            ):
                 # saturated likelihood test
 
                 saturated_model = poi_model.SaturatedProjectModel(
