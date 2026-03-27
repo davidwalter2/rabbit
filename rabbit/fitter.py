@@ -486,7 +486,10 @@ class Fitter:
 
     def prefit_covariance(self, unconstrained_err=0.0):
         # free parameters are taken to have zero uncertainty for the purposes of prefit uncertainties
-        var_poi = tf.zeros([self.poi_model.npoi], dtype=self.indata.dtype)
+        var_poi = (
+            tf.ones([self.poi_model.npoi], dtype=self.indata.dtype)
+            * unconstrained_err**2
+        )
 
         # nuisances have their uncertainty taken from the constraint term, but unconstrained nuisances
         # are set to a placeholder uncertainty (zero by default) for the purposes of prefit uncertainties
