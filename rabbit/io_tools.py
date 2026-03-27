@@ -24,6 +24,7 @@ def get_fitresult(fitresult_filename, result=None, meta=False):
         return h5results, meta
     return h5results
 
+
 def get_poi_names(meta):
     return np.concatenate((meta.get("pois", meta.get("signals")), meta["nois"])).astype(
         str
@@ -52,6 +53,8 @@ def read_impacts_poi(
         impact_name = "impacts"
         if impact_type != "traditional":
             impact_name = f"{impact_type}_{impact_name}"
+        if asym:
+            impact_name += "_asym"
         if grouped:
             impact_name += "_grouped"
 
@@ -76,6 +79,7 @@ def read_impacts_poi(
         pulls_labels, pulls_prefit, constraints_prefit = get_pulls_and_constraints(
             fitresult, asym=asym and impact_type == "traditional", prefit=True
         )
+
         if len(pulls_labels) != len(labels):
             mask = [l in labels for l in pulls_labels]
             pulls = pulls[mask]

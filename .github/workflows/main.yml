@@ -26,7 +26,7 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: run isort
         run: |
@@ -63,7 +63,7 @@ jobs:
       PATH: ${{steps.export.outputs.PATH}}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: setup kerberos
         run: |
@@ -122,7 +122,7 @@ jobs:
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
           echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
     
       - name: symmetrizations
         run: >- 
@@ -150,7 +150,7 @@ jobs:
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
           echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: make tensor
         run: >-
@@ -203,7 +203,7 @@ jobs:
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: nominal fit
         run: >- 
@@ -236,17 +236,34 @@ jobs:
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/
           -t 0 --postfix blinded --setConstraintMinimum bkg_2_norm 0.5 --doImpacts --globalImpacts
 
+      - name: pseudodata fit
+        run: >- 
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix pseudodata
+          -t 0 --pseudoData original --doImpacts --globalImpacts --unblind ^sig$
+
+
+  alternative-fits:
+    runs-on: [self-hosted, linux, x64]
+    needs: [setenv, make-tensor]
+
+    steps:
+      - env:
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
+          PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
+          PATH: ${{ needs.setenv.outputs.PATH }}
+        run: |
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
+          echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
+          echo "PATH=${PATH}" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v5
+
       - name: sparse tensor fit 
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_sparse.hdf5 -o $RABBIT_OUTDIR/ --postfix sparse
           -t 0 --noBinByBinStat --doImpacts --globalImpacts --computeVariations
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
-
-      - name: pseudodata fit
-        run: >- 
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix pseudodata
-          -t 0 --pseudoData original --doImpacts --globalImpacts --unblind ^sig$
 
       - name: covariance fit
         run: >- 
@@ -262,10 +279,18 @@ jobs:
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistImpacts --computeHistCov -m Project ch1 a -m Project ch1 b 
 
-      - name: chi2 fit with Barlow--Beeston full
+      - name: Barlow--Beeston full (gamma)
+        run: >- 
+          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix nonlinear
+          -t 0 --doImpacts --globalImpacts --globalImpactsDisableJVP --binByBinStatType gamma --binByBinStatMode full
+          --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
+          --computeHistImpacts --computeHistCov -m Project ch1 a -m Project ch1 b 
+
+      - name: chi2 fit with Barlow--Beeston full (normal-multiplicative)
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix bb_full
           -t 0 --globalImpacts --binByBinStatType normal-multiplicative --binByBinStatMode full
+
 
   bsm:
     runs-on: [self-hosted, linux, x64]
@@ -281,7 +306,7 @@ jobs:
           echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
           echo "PATH=${PATH}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: bsm limits
         run: >-
@@ -311,7 +336,7 @@ jobs:
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
           echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: print pulls & constraints blinded
         run: rabbit_print_pulls_and_constraints.py $RABBIT_OUTDIR/fitresults_blinded.hdf5 
@@ -323,10 +348,10 @@ jobs:
         run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s
 
       - name: print global impacts
-        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s --globalImpacts
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -s --impactType global
 
       - name: print global impacts of observable
-        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 --globalImpacts -m Project ch0_masked --ungroup --sort
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 --impactType global -m Project ch0_masked --ungroup --sort
 
       - name: plot impacts
         run: >-
@@ -337,14 +362,14 @@ jobs:
         run: >-
           rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
           -r $RABBIT_OUTDIR/fitresults_pseudodata.hdf5 --refResult original --refName "Pseudo data" -s absimpact
-          --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --globalImpacts --diffPullAsym --showNumbers
+          --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --impactType global --diffPullAsym --showNumbers
           --grouping max --subtitle Preliminary --postfix data_vs_pseudodata
 
       - name: plot global impacts on observable
         run: >-
           rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR
           -s absimpact -m Project ch0_masked
-          --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --globalImpacts --showNumbers
+          --otherExtensions pdf png -n 50  --config tests/style_config.py --oneSidedImpacts --impactType global --showNumbers
           --grouping max --subtitle Preliminary --postfix ch0_masked
 
       - name: plot prefit distributions
@@ -408,7 +433,7 @@ jobs:
           echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
           echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: nominal fit with scans
         run: >- 
@@ -431,7 +456,7 @@ jobs:
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
-    needs: [setenv, symmerizations, bsm, plotting, likelihoodscans]
+    needs: [setenv, symmerizations, alternative-fits, bsm, plotting, likelihoodscans]
     if: always() 
     steps:
       - env:

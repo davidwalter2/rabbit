@@ -15,7 +15,6 @@ import rabbit.io_tools
 from wums import boostHistHelpers as hh  # isort: skip
 from wums import logging, output_tools, plot_tools  # isort: skip
 
-
 hep.style.use(hep.style.ROOT)
 
 
@@ -126,6 +125,7 @@ def parseArgs():
     parser.add_argument(
         "--selectionAxes",
         type=str,
+        nargs="*",
         default=["charge", "passIso", "passMT", "cosThetaStarll", "qGen"],
         help="List of axes where for each bin a separate plot is created",
     )
