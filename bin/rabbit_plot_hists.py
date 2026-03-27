@@ -1567,10 +1567,10 @@ def get_chi2(result, no_chi2=True, fittype="postfit", chi2type="automatic"):
             "saturated",
         ]:
             raise RuntimeError("No saturated test statistic in prefit")
-        elif chi2type in ["automatic", "linear"]:
-            chi2type = "linear"
+
         chi2_key = "chi2_prefit"
         ndf_key = "ndf_prefit"
+        saturated = False
     else:
         chi2_key = "chi2"
         ndf_key = "ndf"
