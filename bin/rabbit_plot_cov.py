@@ -57,6 +57,11 @@ def make_parser():
         default=["charge", "passIso", "passMT", "cosThetaStarll", "qGen"],
         help="List of axes where for each bin a separate plot is created",
     )
+    parser.add_argument(
+        "--dataCovariance",
+        action="store_true",
+        help="Use covariance information to plot the data uncertainty",
+    )
     return parser
 
 
@@ -65,7 +70,7 @@ def plot_matrix(
     matrix,
     args,
     channel=None,
-    axes=None,
+    axes_names=None,
     cmap="coolwarm",
     config={},
     meta=None,
@@ -107,8 +112,8 @@ def plot_matrix(
         **opts,
     )
     if ticklabels is None:
-        xlabel = plot_tools.get_axis_label(config, axes, args.xlabel, is_bin=True)
-        ylabel = plot_tools.get_axis_label(config, axes, args.ylabel, is_bin=True)
+        xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel, is_bin=True)
+        ylabel = plot_tools.get_axis_label(config, axes_names, args.ylabel, is_bin=True)
 
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
@@ -124,11 +129,14 @@ def plot_matrix(
     )
 
     to_join = [f"hist_{'corr' if args.correlation else 'cov'}"]
-    to_join.append("prefit" if args.prefit else "postfit")
+    if args.dataCovariance:
+        to_join.append("data")
+    else:
+        to_join.append("prefit" if args.prefit else "postfit")
     if channel is not None:
         to_join.append(channel)
-    if axes is not None:
-        to_join.append("_".join(axes))
+    if axes_names is not None:
+        to_join.append("_".join(axes_names))
     if suffix is not None:
         to_join.append(suffix)
     to_join = [*to_join, args.postfix]
@@ -177,7 +185,7 @@ def main():
 
     if args.params is not None:
         h_cov = fitresult["cov"].get()
-        axes = h_cov.axes.name
+        axes_names = h_cov.axes.name
 
         if len(args.params) > 0:
             h_param = fitresult["parms"].get()
@@ -203,17 +211,21 @@ def main():
             outdir,
             h_cov,
             args,
-            axes=axes,
+            axes_names=axes_names,
             config=config,
             meta=meta,
             suffix="params",
             ticklabels=ticklabels,
         )
 
-    hist_cov_key = f"hist_{'prefit' if args.prefit else 'postfit'}_inclusive_cov"
+    if args.dataCovariance:
+        hist_cov_key = "cov_data_obs"
+    else:
+        hist_cov_key = f"hist_{'prefit' if args.prefit else 'postfit'}_inclusive_cov"
 
     results = fitresult.get("mappings", fitresult.get("physics_models"))
     for margs in args.mapping:
+
         if margs == []:
             instance_keys = results.keys()
         else:
@@ -221,13 +233,11 @@ def main():
             instance_keys = [k for k in results.keys() if k.startswith(mapping_key)]
             if len(instance_keys) == 0:
                 raise ValueError(
-                    f"No mapping found under {mapping_key}, available mappings are {results.keys()}"
+                    f"No mapping found under {mapping_key}; available mappings are {results.keys()}"
                 )
 
         for instance_key in instance_keys:
             instance = results[instance_key]
-
-            h_cov = instance[hist_cov_key].get()
 
             suffix = (
                 instance_key.replace(" ", "_")
@@ -238,20 +248,43 @@ def main():
                 .replace(")", "")
             )
 
-            plot_matrix(
-                outdir,
-                h_cov,
-                args,
-                config=config,
-                meta=meta,
-                suffix=suffix,
-            )
+            if hist_cov_key in instance.keys():
+                h_cov = instance[hist_cov_key].get()
+                plot_matrix(
+                    outdir,
+                    h_cov,
+                    args,
+                    config=config,
+                    meta=meta,
+                    suffix=suffix,
+                )
+            else:
+                h_cov = None
 
             start = 0
             for channel, info in instance["channels"].items():
-                channel_hist = info[f"hist_postfit_inclusive"].get()
+                channel_hist = info["hist_postfit_inclusive"].get()
                 axes = [a for a in channel_hist.axes]
-                if len(instance.get("channels", {}).keys()) > 1:
+                axes_names = channel_hist.axes.name
+
+                if h_cov is None:
+                    if hist_cov_key not in info.keys():
+                        raise ValueError(
+                            f"No key {hist_cov_key}; available; keys are {info.keys()}"
+                        )
+                    h_cov = info[hist_cov_key].get()
+
+                    plot_matrix(
+                        outdir,
+                        h_cov,
+                        args,
+                        channel=channel,
+                        config=config,
+                        meta=meta,
+                        suffix=suffix,
+                        axes_names=axes_names,
+                    )
+                elif len(instance.get("channels", {}).keys()) > 1:
                     # plot covariance matrix in each channel
                     nbins = np.prod(channel_hist.shape)
                     stop = int(start + nbins)
@@ -268,6 +301,7 @@ def main():
                         config=config,
                         meta=meta,
                         suffix=suffix,
+                        axes_names=axes_names,
                     )
                 else:
                     h_cov_channel = h_cov
