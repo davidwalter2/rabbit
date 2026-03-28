@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 
 import h5py
 import hist
@@ -175,9 +176,16 @@ class Workspace:
         if not isinstance(axes, (list, tuple, np.ndarray)):
             axes = [axes]
         if start is not None or stop is not None:
-            values = values[start:stop]
+            if values.ndim == 1:
+                values = values[start:stop]
+            elif values.ndim == 2:
+                values = values[start:stop, start:stop]
+
             if variances is not None:
-                variances = variances[start:stop]
+                if values.ndim == 1:
+                    variances = variances[start:stop]
+                elif values.ndim == 2:
+                    variances = variances[start:stop, start:stop]
 
         h = self.hist(name, axes, values, variances, label, flow=flow)
         self.dump_hist(h, mapping_key, channel)
@@ -249,6 +257,35 @@ class Workspace:
                 label="observed number of events for fit",
                 **opts,
             )
+
+            if data_cov_inv is not None:
+                axes_x = deepcopy(axes)
+                axes_y = deepcopy(axes)
+                for ax, ay in zip(axes_x, axes_y):
+                    ax.__dict__["name"] = f"{ax.name}_x"
+                    ay.__dict__["name"] = f"{ay.name}_y"
+
+                self.add_hist(
+                    "cov_data_obs",
+                    [*axes_x, *axes_y],
+                    cov_data_obs,
+                    label="covariance of observed number of events in data",
+                    **opts,
+                )
+            if nobs_cov_inv is not None:
+                axes_x = deepcopy(axes)
+                axes_y = deepcopy(axes)
+                for ax, ay in zip(axes_x, axes_y):
+                    ax.__dict__["name"] = f"{ax.name}_x"
+                    ay.__dict__["name"] = f"{ay.name}_y"
+
+                self.add_hist(
+                    "cov_nobs_obs",
+                    [*axes_x, *axes_y],
+                    cov_nobs,
+                    label="covariance of observed number of events in data",
+                    **opts,
+                )
 
             start = stop
 
