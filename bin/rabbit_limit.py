@@ -47,7 +47,7 @@ def make_parser():
         help="Confidence level for asymptotic upper limit, multiple are possible",
     )
 
-    return parser.parse_args()
+    return parser
 
 
 def do_asymptotic_limits(args, fitter, ws, data_values, mapping=None, fit_data=False):
@@ -246,7 +246,7 @@ def do_asymptotic_limits(args, fitter, ws, data_values, mapping=None, fit_data=F
 
 def main():
     start_time = time.time()
-    args = make_parser()
+    args = make_parser().parse_args()
 
     if args.eager:
         tf.config.run_functions_eagerly(True)
@@ -287,7 +287,7 @@ def main():
     }
 
     with workspace.Workspace(
-        args.output,
+        args.outpath,
         args.outname,
         postfix=args.postfix,
         fitter=ifitter,

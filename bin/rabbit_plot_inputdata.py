@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse
 import itertools
-import os
 
 import hist
 import matplotlib.pyplot as plt
@@ -11,22 +9,14 @@ import numpy as np
 from wums import boostHistHelpers as hh
 from wums import logging, output_tools, plot_tools
 
-from rabbit import debugdata, inputdata
+from rabbit import debugdata, inputdata, parsing
 
 
-def parseArgs():
-
-    # choices for legend padding
-    choices_padding = ["auto", "lower left", "lower right", "upper left", "upper right"]
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("infile", help="Output h5py input data file")
+def make_parser():
+    parser = parsing.plot_parser()
+    parsing.add_style_args(parser)
     parser.add_argument(
         "--logx", action="store_true", help="Enable log scale for x axis"
-    )
-    parser.add_argument(
-        "--logy", action="store_true", help="Enable log scale for y axis"
     )
     parser.add_argument(
         "--invertAxes",
@@ -83,12 +73,6 @@ def parseArgs():
         "--dataName", type=str, default="Data", help="Data name for plot labeling"
     )
     parser.add_argument(
-        "--xlabel", type=str, default=None, help="x-axis label for plot labeling"
-    )
-    parser.add_argument(
-        "--ylabel", type=str, default=None, help="y-axis label for plot labeling"
-    )
-    parser.add_argument(
         "--processGrouping", type=str, default=None, help="key for grouping processes"
     )
     parser.add_argument(
@@ -117,132 +101,7 @@ def parseArgs():
         action="store_true",
         help="Plot variations one sided",
     )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "-o",
-        "--outpath",
-        type=str,
-        default=os.path.expanduser("./test"),
-        help="Base path for output",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config file for style formatting",
-    )
-    parser.add_argument(
-        "--eoscp",
-        action="store_true",
-        help="Override use of xrdcp and use the mount instead",
-    )
-    parser.add_argument(
-        "-p", "--postfix", type=str, help="Postfix for output file name"
-    )
-    parser.add_argument(
-        "--lumi",
-        type=float,
-        default=16.8,
-        help="Luminosity used in the fit, needed to get the absolute cross section",
-    )
-    parser.add_argument(
-        "--title",
-        default="Rabbit",
-        type=str,
-        help="Title to be printed in upper left",
-    )
-    parser.add_argument(
-        "--subtitle",
-        default="",
-        type=str,
-        help="Subtitle to be printed after title",
-    )
-    parser.add_argument("--titlePos", type=int, default=2, help="title position")
-    parser.add_argument(
-        "--legPos", type=str, default="upper right", help="Set legend position"
-    )
-    parser.add_argument(
-        "--legSize",
-        type=str,
-        default="small",
-        help="Legend text size (small: axis ticks size, large: axis label size, number)",
-    )
-    parser.add_argument(
-        "--legCols", type=int, default=2, help="Number of columns in legend"
-    )
-    parser.add_argument(
-        "--legPadding",
-        type=str,
-        default="auto",
-        choices=choices_padding,
-        help="Where to put empty entries in legend",
-    )
-    parser.add_argument(
-        "--lowerLegPos",
-        type=str,
-        default="upper left",
-        help="Set lower legend position",
-    )
-    parser.add_argument(
-        "--lowerLegCols", type=int, default=2, help="Number of columns in lower legend"
-    )
-    parser.add_argument(
-        "--lowerLegPadding",
-        type=str,
-        default="auto",
-        choices=choices_padding,
-        help="Where to put empty entries in lower legend",
-    )
-    parser.add_argument(
-        "--noSciy",
-        action="store_true",
-        help="Don't allow scientific notation for y axis",
-    )
-    parser.add_argument(
-        "--yscale",
-        type=float,
-        help="Scale the upper y axis by this factor (useful when auto scaling cuts off legend)",
-    )
-    parser.add_argument(
-        "--ylim",
-        type=float,
-        nargs=2,
-        help="Min and max values for y axis (if not specified, range set automatically)",
-    )
-    parser.add_argument("--xlim", type=float, nargs=2, help="min and max for x axis")
-    parser.add_argument(
-        "--rrange",
-        type=float,
-        nargs=2,
-        default=[0.9, 1.1],
-        help="y range for ratio plot",
-    )
-    parser.add_argument(
-        "--scaleTextSize",
-        type=float,
-        default=1.0,
-        help="Scale all text sizes by this number",
-    )
-    parser.add_argument(
-        "--customFigureWidth",
-        type=float,
-        default=None,
-        help="Use a custom figure width, otherwise chosen automatic",
-    )
-
-    args = parser.parse_args()
-
-    return args
+    return parser
 
 
 def make_plots(
@@ -571,6 +430,7 @@ def make_plot(
             lumi=args.lumi,  # if args.dataName == "Data" and not args.noData else None,
             loc=args.titlePos,
             text_size=args.legSize,
+            no_energy=args.noEnergy,
         )
 
         plot_tools.addLegend(
@@ -599,7 +459,7 @@ def make_plot(
 
 
 def main():
-    args = parseArgs()
+    args = make_parser().parse_args()
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 

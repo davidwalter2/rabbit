@@ -60,7 +60,7 @@ source env/bin/activate
 pip install wums[pickling,plotting] tensorflow tensorflow-probability tf_keras numpy h5py hist scipy matplotlib mplhep seaborn pandas plotly kaleido
 ```
 The packages `matplotlib`, `mplhep`, `seaborn`, `pandas`, `plotly`, and `kaleido` are only needed for the plotting scripts. 
-For the `text2hdf5.py` conversion also the `uproot` package is needed.
+For the `rabbit_text2hdf5.py` conversion also the `uproot` package is needed.
 In case you want to contribute to the development, please also install the linters `isort`, `flake8`, `autoflake`, `black`, and `pylint` used in the pre-commit hooks and the github CI
 Deactivate the environment with `deactivate`.
 
@@ -110,7 +110,7 @@ This is done by defining `masked=True` in the `tensorwriter` `add_channel` funct
 This is useful for example to compute unfolded (differential) cross sections and their uncertainties, including global impacts, taking into account all nuisance parameters that affect these channels.
 
 ### text2hdf5
-The input tensor can also be generated from the input used for the [Combine tool](https://link.springer.com/article/10.1007/s41781-024-00121-4)  using the `text2hdf5.py` command.
+The input tensor can also be generated from the input used for the [Combine tool](https://link.springer.com/article/10.1007/s41781-024-00121-4)  using the `rabbit_text2hdf5.py` command.
 This script is mainly intended for users that have these inputs already and want to perform some cross checks.
 Only basic functionality is supported and for complex models the conversion can take long, it is thus recommended to directly produce the input tensor using the provided interface as explained above. 
 
@@ -118,7 +118,7 @@ Only basic functionality is supported and for complex models the conversion can 
 Scripts for diagnosing the input tensor are available:
 Running some checks for empty bins etc.
 ```bash
-debug_inputdata.py test_tensor.hdf5
+rabbit_debug_inputdata.py test_tensor.hdf5
 ```
 Plotting the histograms that are actually used in the fit, supporting adding of systematic variations in the plot:
 ```bash

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse
 import itertools
-import os
 
 import hist
 import matplotlib.pyplot as plt
@@ -11,6 +9,7 @@ import numpy as np
 import seaborn as sns
 
 import rabbit.io_tools
+from rabbit import parsing
 
 from wums import boostHistHelpers as hh  # isort: skip
 from wums import logging, output_tools, plot_tools  # isort: skip
@@ -18,80 +17,9 @@ from wums import logging, output_tools, plot_tools  # isort: skip
 hep.style.use(hep.style.ROOT)
 
 
-def parseArgs():
-
-    # choices for legend padding
-    choices_padding = ["auto", "lower left", "lower right", "upper left", "upper right"]
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "-o",
-        "--outpath",
-        type=str,
-        default=os.path.expanduser("./test"),
-        help="Base path for output",
-    )
-    parser.add_argument(
-        "--eoscp",
-        action="store_true",
-        help="Override use of xrdcp and use the mount instead",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config file for style formatting",
-    )
-    parser.add_argument(
-        "-p", "--postfix", type=str, help="Postfix for output file name"
-    )
-    parser.add_argument(
-        "--lumi",
-        type=float,
-        default=16.8,
-        help="Luminosity used in the fit, needed to get the absolute cross section",
-    )
-    parser.add_argument(
-        "--title",
-        default="Rabbit",
-        type=str,
-        help="Title to be printed in upper left",
-    )
-    parser.add_argument(
-        "--subtitle",
-        default="",
-        type=str,
-        help="Subtitle to be printed after title",
-    )
-    parser.add_argument("--titlePos", type=int, default=2, help="title position")
-    parser.add_argument(
-        "--scaleTextSize",
-        type=float,
-        default=1.0,
-        help="Scale all text sizes by this number",
-    )
-    parser.add_argument(
-        "infile",
-        type=str,
-        help="hdf5 file from rabbit or root file from combinetf",
-    )
-    parser.add_argument(
-        "--result",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
+def make_parser():
+    parser = parsing.plot_parser()
+    parsing.add_style_args(parser)
     parser.add_argument(
         "--correlation",
         action="store_true",
@@ -129,15 +57,7 @@ def parseArgs():
         default=["charge", "passIso", "passMT", "cosThetaStarll", "qGen"],
         help="List of axes where for each bin a separate plot is created",
     )
-    parser.add_argument(
-        "--xlabel", type=str, default=None, help="x-axis label for plot labeling"
-    )
-    parser.add_argument(
-        "--ylabel", type=str, default=None, help="y-axis label for plot labeling"
-    )
-    args = parser.parse_args()
-
-    return args
+    return parser
 
 
 def plot_matrix(
@@ -200,6 +120,7 @@ def plot_matrix(
         data=True,
         lumi=None,
         loc=args.titlePos,
+        no_energy=args.noEnergy,
     )
 
     to_join = [f"hist_{'corr' if args.correlation else 'cov'}"]
@@ -241,7 +162,7 @@ def main():
     Plot the covariance matrix of the histogram bins
     """
 
-    args = parseArgs()
+    args = make_parser().parse_args()
 
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
@@ -249,7 +170,7 @@ def main():
 
     outdir = output_tools.make_plot_dir(args.outpath, eoscp=args.eoscp)
 
-    # load .hdf5 file first, must exist in combinetf and rabbit
+    # load .hdf5 file
     fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
 
     plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize

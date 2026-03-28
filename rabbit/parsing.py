@@ -11,8 +11,8 @@ class OptionalListAction(argparse.Action):
             setattr(namespace, self.dest, values)
 
 
-def common_parser():
-    parser = argparse.ArgumentParser()
+def _add_base_args(parser):
+    """Add verbosity and logging arguments shared by all rabbit scripts."""
     parser.add_argument(
         "-v",
         "--verbose",
@@ -24,14 +24,152 @@ def common_parser():
     parser.add_argument(
         "--noColorLogger", action="store_true", help="Do not use logging with colors"
     )
-    parser.add_argument("filename", help="filename of the main hdf5 input")
-    parser.add_argument("-o", "--output", default="./", help="output directory")
+
+
+def _add_output_args(parser):
+    """Add output path and postfix arguments shared by fitting and plotting scripts."""
     parser.add_argument(
+        "-o",
+        "--outpath",
+        type=str,
+        default="./",
+        help="Base path for output",
+    )
+    parser.add_argument(
+        "-p",
         "--postfix",
         default=None,
         type=str,
         help="Postfix to append on output file name",
     )
+
+
+def add_impact_args(parser):
+    """Add common impact arguments shared by impact print and plot scripts."""
+    parser.add_argument(
+        "--impactType",
+        type=str,
+        default="traditional",
+        choices=[
+            None,
+            "none",
+            "traditional",
+            "global",
+            "gaussian_global",
+            "nonprofiled",
+        ],
+        help="Impact definition",
+    )
+    parser.add_argument(
+        "--asymImpacts",
+        action="store_true",
+        help="Use asymmetric impacts from likelihood, otherwise symmetric from hessian",
+    )
+    parser.add_argument(
+        "-m",
+        "--mapping",
+        default=None,
+        type=str,
+        nargs="+",
+        help="Impacts on observables, use '-m <mapping> channel axes' for mapping results.",
+    )
+    parser.add_argument(
+        "--relative",
+        action="store_true",
+        help="Use relative uncertainties",
+    )
+
+
+def add_style_args(parser):
+    """Add common style arguments for histogram plot scripts."""
+    choices_padding = ["auto", "lower left", "lower right", "upper left", "upper right"]
+    parser.add_argument(
+        "--noEnergy",
+        action="store_true",
+        help="Don't include the energy in the upper right corner of the plot",
+    )
+    parser.add_argument(
+        "--legPos", type=str, default="upper right", help="Set legend position"
+    )
+    parser.add_argument(
+        "--legSize",
+        type=str,
+        default="small",
+        help="Legend text size (small: axis ticks size, large: axis label size, number)",
+    )
+    parser.add_argument(
+        "--legCols", type=int, default=2, help="Number of columns in legend"
+    )
+    parser.add_argument(
+        "--legPadding",
+        type=str,
+        default="auto",
+        choices=choices_padding,
+        help="Where to put empty entries in legend",
+    )
+    parser.add_argument(
+        "--lowerLegPos",
+        type=str,
+        default="upper left",
+        help="Set lower legend position",
+    )
+    parser.add_argument(
+        "--lowerLegCols", type=int, default=2, help="Number of columns in lower legend"
+    )
+    parser.add_argument(
+        "--lowerLegPadding",
+        type=str,
+        default="auto",
+        choices=choices_padding,
+        help="Where to put empty entries in lower legend",
+    )
+    parser.add_argument(
+        "--noSciy",
+        action="store_true",
+        help="Don't allow scientific notation for y axis",
+    )
+    parser.add_argument(
+        "--yscale",
+        type=float,
+        help="Scale the upper y axis by this factor (useful when auto scaling cuts off legend)",
+    )
+    parser.add_argument(
+        "--ylim",
+        type=float,
+        nargs=2,
+        help="Min and max values for y axis (if not specified, range set automatically)",
+    )
+    parser.add_argument("--xlim", type=float, nargs=2, help="min and max for x axis")
+    parser.add_argument(
+        "--rrange",
+        type=float,
+        nargs=2,
+        default=[0.9, 1.1],
+        help="y range for ratio plot",
+    )
+    parser.add_argument(
+        "--logy", action="store_true", help="Make the yscale logarithmic"
+    )
+    parser.add_argument(
+        "--customFigureWidth",
+        type=float,
+        default=None,
+        help="Use a custom figure width, otherwise chosen automatic",
+    )
+    parser.add_argument(
+        "--xlabel", type=str, default=None, help="x-axis label for plot labeling"
+    )
+    parser.add_argument(
+        "--ylabel", type=str, default=None, help="y-axis label for plot labeling"
+    )
+
+
+def common_parser():
+    """Return a parser with common arguments for fitting scripts (rabbit_fit, rabbit_limit)."""
+    parser = argparse.ArgumentParser()
+    _add_base_args(parser)
+    _add_output_args(parser)
+    parser.add_argument("filename", help="filename of the main hdf5 input")
     parser.add_argument(
         "--eager",
         action="store_true",
@@ -95,7 +233,7 @@ def common_parser():
         nargs="*",
         action=OptionalListAction,
         help="""
-        Specify list of regex to unblind matching parameters of interest. 
+        Specify list of regex to unblind matching parameters of interest.
         E.g. use '--unblind ^signal$' to unblind a parameter named signal or '--unblind' to unblind all.
         """,
     )
@@ -112,7 +250,7 @@ def common_parser():
         default=[],
         nargs="+",
         help="""
-        Specify list of regex to freeze matching parameters of interest. 
+        Specify list of regex to freeze matching parameters of interest.
         """,
     )
     parser.add_argument(
@@ -135,8 +273,8 @@ def common_parser():
         default="frequentist",
         choices=["frequentist", "bayesian", "none"],
         help="""
-        Type of randomization for systematic uncertainties (including binByBinStat if present).  
-        Options are 'frequentist' which randomizes the contraint minima a.k.a global observables 
+        Type of randomization for systematic uncertainties (including binByBinStat if present).
+        Options are 'frequentist' which randomizes the contraint minima a.k.a global observables
         and 'bayesian' which randomizes the actual nuisance parameters used in the pseudodata generation
         """,
     )
@@ -205,9 +343,9 @@ def common_parser():
         action="append",
         default=[],
         help="""
-        perform mappings on observables or parameters for the prefit and postfit histograms, 
-        specifying the mapping defined in rabbit/mappings/ followed by arguments passed in the mapping __init__, 
-        e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.  
+        perform mappings on observables or parameters for the prefit and postfit histograms,
+        specifying the mapping defined in rabbit/mappings/ followed by arguments passed in the mapping __init__,
+        e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.
         This argument can be called multiple times.
         Custom mappings can be specified with the full path to the custom mapping e.g. '-m custom_mappings.MyCustomMapping'.
         """,
@@ -218,4 +356,85 @@ def common_parser():
         help="Make a composite mapping and compute the covariance matrix across all mappings.",
     )
 
+    return parser
+
+
+def plot_parser():
+    """Return a parser with common arguments for plotting scripts.
+
+    Scripts extend this parser by calling plot_parser() and adding their
+    own arguments, mirroring how fitting scripts use common_parser().
+    """
+    parser = argparse.ArgumentParser()
+    _add_base_args(parser)
+    _add_output_args(parser)
+    parser.add_argument(
+        "infile",
+        type=str,
+        help="hdf5 file from rabbit",
+    )
+    parser.add_argument(
+        "--eoscp",
+        action="store_true",
+        help="Override use of xrdcp and use the mount instead",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to config file for style formatting",
+    )
+    parser.add_argument(
+        "--result",
+        default=None,
+        type=str,
+        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
+    )
+    parser.add_argument(
+        "--title",
+        default="Rabbit",
+        type=str,
+        help="Title to be printed in upper left",
+    )
+    parser.add_argument(
+        "--subtitle",
+        default="",
+        type=str,
+        help="Subtitle to be printed after title",
+    )
+    parser.add_argument("--titlePos", type=int, default=2, help="title position")
+    parser.add_argument(
+        "--scaleTextSize",
+        type=float,
+        default=1.0,
+        help="Scale all text sizes by this number",
+    )
+    parser.add_argument(
+        "--lumi",
+        type=float,
+        default=None,
+        help="Luminosity for plot labeling (in fb-1)",
+    )
+    return parser
+
+
+def print_parser():
+    """Return a parser with common arguments for print scripts.
+
+    Scripts extend this parser by calling print_parser() and adding their
+    own arguments.
+    """
+    parser = argparse.ArgumentParser()
+    _add_base_args(parser)
+    parser.add_argument(
+        "infile",
+        type=str,
+        help="fitresults output",
+    )
+    parser.add_argument(
+        "--result",
+        default=None,
+        type=str,
+        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
+    )
     return parser

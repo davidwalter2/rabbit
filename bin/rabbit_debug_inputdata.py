@@ -1,13 +1,24 @@
 #!/usr/bin/env python
-import argparse
-
 import hist
 import numpy as np
 from wums import logging
 
-from rabbit import debugdata, inputdata
+from rabbit import debugdata, inputdata, parsing
 
 logger = None
+
+
+def make_parser():
+    parser = parsing.print_parser()
+    parser.description = "Debug input data for fitting"
+    parser.add_argument(
+        "--channels",
+        type=str,
+        help="Only check specified channels",
+        default=None,
+        nargs="+",
+    )
+    return parser
 
 
 def debug_input_data(input_file, output_dir=None, verbose=False, channels=None):
@@ -254,32 +265,12 @@ def debug_input_data(input_file, output_dir=None, verbose=False, channels=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Debug input data for fitting")
-    parser.add_argument("inputFile", help="Path to input data file")
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "--channels",
-        type=str,
-        help="Only check specified channels",
-        default=None,
-        nargs="+",
-    )
-    args = parser.parse_args()
+    args = make_parser().parse_args()
 
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
-    debug_input_data(args.inputFile, args.verbose, channels=args.channels)
+    debug_input_data(args.infile, args.verbose, channels=args.channels)
 
 
 if __name__ == "__main__":
