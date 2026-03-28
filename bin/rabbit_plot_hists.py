@@ -412,8 +412,17 @@ def make_plot(
 
     xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel)
 
+    # plot prediction first, the data on top
+    zorder_pred = 0
+    zorder_data = 1
+
+    hatchstyle_pred = None
+    facecolor_pred = "silver"
+    facecolor_alpha_pred = 0.5
+    pred_label = "Prefit model" if args.unfoldedXsec else args.predName
+
     # for uncertaity bands
-    edges = h_data.axes[0].edges
+    edges = h_inclusive.axes[0].edges
 
     # need to divide by bin width
     binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
@@ -630,7 +639,6 @@ def make_plot(
                 )
 
     if data:
-        zorder_data = 1
         if dataCovariance:
             nom_data = h_data.values() / binwidth
             std_data = np.sqrt(h_data.variances()) / binwidth
@@ -706,13 +714,8 @@ def make_plot(
                     zorder=zorder_data,
                     flow="none",
                 )
-    if (args.unfoldedXsec or len(h_stack) == 0) and not args.noPrefit:
-        zorder_pred = 0
-        hatchstyle_pred = None
-        facecolor_pred = "silver"
-        facecolor_alpha_pred = 0.5
-        pred_label = "Prefit model" if args.unfoldedXsec else args.predName
 
+    if (args.unfoldedXsec or len(h_stack) == 0) and not args.noPrefit:
         hep.histplot(
             h_inclusive,
             yerr=False,
