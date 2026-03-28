@@ -171,21 +171,22 @@ class Workspace:
         label=None,
         channel=None,
         mapping_key=None,
+        is_matrix=False,
         flow=False,
     ):
         if not isinstance(axes, (list, tuple, np.ndarray)):
             axes = [axes]
         if start is not None or stop is not None:
-            if values.ndim == 1:
-                values = values[start:stop]
-            elif values.ndim == 2:
+            if is_matrix:
                 values = values[start:stop, start:stop]
+            else:
+                values = values[start:stop]
 
             if variances is not None:
-                if values.ndim == 1:
-                    variances = variances[start:stop]
-                elif values.ndim == 2:
+                if is_matrix:
                     variances = variances[start:stop, start:stop]
+                else:
+                    variances = variances[start:stop]
 
         h = self.hist(name, axes, values, variances, label, flow=flow)
         self.dump_hist(h, mapping_key, channel)
@@ -270,6 +271,7 @@ class Workspace:
                     [*axes_x, *axes_y],
                     cov_data_obs,
                     label="covariance of observed number of events in data",
+                    is_matrix=True,
                     **opts,
                 )
             if nobs_cov_inv is not None:
@@ -283,6 +285,7 @@ class Workspace:
                     "cov_nobs_obs",
                     [*axes_x, *axes_y],
                     cov_nobs,
+                    is_matrix=True,
                     label="covariance of observed number of events in data",
                     **opts,
                 )
