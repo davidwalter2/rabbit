@@ -377,7 +377,7 @@ class Fitter:
         cov_ext = None
         with h5py.File(fitresult_file, "r") as fext:
             if "x" in fext.keys():
-                # fitresult from combinetf
+                # fitresult from rabbit
                 x_ext = fext["x"][...]
                 parms_ext = fext["parms"][...].astype(str)
                 if "cov" in fext.keys():
@@ -868,7 +868,11 @@ class Fitter:
             dxdbeta0,
             self.var_theta0,
             self.nobs if self.varnobs is None else self.varnobs,
-            1.0 if self.binByBinStatType in ["normal-additive"] else 1.0 / self.kstat,
+            (
+                1.0
+                if self.binByBinStatType in ["normal-additive"] or not self.binByBinStat
+                else 1.0 / self.kstat
+            ),
             self.poi_model.npoi,
             self.indata.noiidxs,
             self.binByBinStat,
@@ -1105,6 +1109,7 @@ class Fitter:
                     (
                         1.0
                         if self.binByBinStatType in ["normal-additive"]
+                        or not self.binByBinStat
                         else 1.0 / self.kstat
                     ),
                     self.binByBinStat,

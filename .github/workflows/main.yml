@@ -177,7 +177,7 @@ jobs:
           python tests/make_tensor.py -o $RABBIT_OUTDIR/ --histType boost --postfix boost
 
       - name: debug input
-        run: debug_inputdata.py $RABBIT_OUTDIR//test_tensor.hdf5
+        run: rabbit_debug_inputdata.py $RABBIT_OUTDIR//test_tensor.hdf5
 
       - name: plot input
         run: >-
@@ -241,11 +241,9 @@ jobs:
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix pseudodata
           -t 0 --pseudoData original --doImpacts --globalImpacts --unblind ^sig$
 
-
-  alternative-fits:
+  sparse-fits:
     runs-on: [self-hosted, linux, x64]
     needs: [setenv, make-tensor]
-
     steps:
       - env:
           RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
@@ -265,32 +263,96 @@ jobs:
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
 
-      - name: covariance fit
-        run: >- 
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix covariance
-          -t 0 --unblind --covarianceFit --doImpacts --globalImpacts 
-          --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
-          -m Project ch1 a -m Project ch1 b
+  alternative-fits:
+    runs-on: [self-hosted, linux, x64]
+    needs: [setenv, make-tensor]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:              
+          - name: covariance
+            tensor: test_tensor.hdf5
+            fit_args: >-
+              --covarianceFit
+          - name: linearized
+            tensor: test_tensor_symmetric.hdf5
+            fit_args: >-
+              --binByBinStatType normal-additive --allowNegativePOI
+          - name: bb_full_normal_additive
+            tensor: test_tensor.hdf5
+            fit_args: >-
+              --binByBinStatType normal-additive --binByBinStatMode full
+          - name: bb_full_normal_multiplicative
+            tensor: test_tensor.hdf5
+            fit_args: >-
+              --binByBinStatType normal-multiplicative --binByBinStatMode full
+          - name: bb_full_gamma
+            tensor: test_tensor.hdf5
+            fit_args: >-
+              --binByBinStatType gamma --binByBinStatMode full --globalImpactsDisableJVP
 
-      - name: linearized solution
-        run: >- 
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix linearized
-          -t 0 --chisqFit --doImpacts --globalImpacts --binByBinStatType normal-additive --allowNegativePOI
-          --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
-          --computeHistImpacts --computeHistCov -m Project ch1 a -m Project ch1 b 
+    steps:
+      - env:
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
+          PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
+          PATH: ${{ needs.setenv.outputs.PATH }}
+          WEB_DIR: ${{ needs.setenv.outputs.WEB_DIR }}
+          PLOT_DIR: ${{ needs.setenv.outputs.PLOT_DIR }}
+        run: |
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
+          echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
+          echo "PATH=${PATH}" >> $GITHUB_ENV
+          echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
+          echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
 
-      - name: Barlow--Beeston full (gamma)
-        run: >- 
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix nonlinear
-          -t 0 --doImpacts --globalImpacts --globalImpactsDisableJVP --binByBinStatType gamma --binByBinStatMode full
-          --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
-          --computeHistImpacts --computeHistCov -m Project ch1 a -m Project ch1 b 
+      - uses: actions/checkout@v5
 
-      - name: chi2 fit with Barlow--Beeston full (normal-multiplicative)
-        run: >- 
-          rabbit_fit.py $RABBIT_OUTDIR/test_tensor_symmetric.hdf5 -o $RABBIT_OUTDIR/ --postfix bb_full
-          -t 0 --globalImpacts --binByBinStatType normal-multiplicative --binByBinStatMode full
+      - name: fit ${{ matrix.name }}
+        run: >-
+          rabbit_fit.py $RABBIT_OUTDIR/${{ matrix.tensor }} -o $RABBIT_OUTDIR/ --postfix ${{ matrix.name }}
+          -t -1 0 --doImpacts --globalImpacts --gaussianGlobalImpacts ${{ matrix.fit_args }}
+          -m Project ch1 a -m Project ch1 b --saveHists --saveHistsPerProcess --computeHistErrors 
+          --computeHistErrorsPerProcess --computeHistImpacts --computeHistGaussianImpacts --computeHistCov
 
+      - name: print impacts ${{ matrix.name }}
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults_${{ matrix.name }}.hdf5 -u
+
+      - name: print gaussian global impacts ${{ matrix.name }}
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults_${{ matrix.name }}.hdf5 --impactType gaussian_global
+
+      - name: print global impacts ${{ matrix.name }}
+        run: rabbit_print_impacts.py $RABBIT_OUTDIR/fitresults_${{ matrix.name }}.hdf5 -s --impactType global
+
+      - name: plot impacts ${{ matrix.name }}
+        run: >-
+          rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults_${{ matrix.name }}.hdf5 -o $WEB_DIR/$PLOT_DIR/${{ matrix.name }}
+          --otherExtensions pdf png -n 50 --config tests/style_config.py -s absimpact --subtitle "Work in progress"
+          --grouping max --postfix ${{ matrix.name }}
+
+      - name: plot gaussian global impacts ${{ matrix.name }}
+        run: >-
+          rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults_${{ matrix.name }}.hdf5 -o $WEB_DIR/$PLOT_DIR/${{ matrix.name }}
+          --otherExtensions pdf png -n 50 --config tests/style_config.py -s absimpact --subtitle Preliminary
+          --grouping max --postfix ${{ matrix.name }} --impactType gaussian_global
+          --refResult asimov --refName "asimov" --name "data"
+
+      - name: plot global impacts ${{ matrix.name }}
+        run: >-
+          rabbit_plot_pulls_and_impacts.py $RABBIT_OUTDIR/fitresults_${{ matrix.name }}.hdf5 -o $WEB_DIR/$PLOT_DIR/${{ matrix.name }}
+          --otherExtensions pdf png -n 50 --config tests/style_config.py -s absimpact
+          --grouping max --postfix ${{ matrix.name }} --impactType global --oneSidedImpacts
+
+      - name: plot postfit distributions ${{ matrix.name }}
+        run: >-
+          rabbit_plot_hists.py $RABBIT_OUTDIR/fitresults_${{ matrix.name }}.hdf5 -o $WEB_DIR/$PLOT_DIR/${{ matrix.name }}
+          --extraTextLoc '0.05' '0.7' --legCols 1 -m Project ch1 a -m Project ch1 b --yscale '1.2'
+          --subtitle "Work in progress" --config tests/style_config.py
+
+      - name: plot histogram uncertainties ${{ matrix.name }}
+        run: >-
+          rabbit_plot_hists_uncertainties.py $RABBIT_OUTDIR/fitresults_${{ matrix.name }}.hdf5 -o $WEB_DIR/$PLOT_DIR/${{ matrix.name }}
+          --extraTextLoc '0.05' '0.7' --legCols 1 -m Project ch1 a -m Project ch1 b --yscale '1.2'
+          --subtitle "Work in progress" --config tests/style_config.py
 
   bsm:
     runs-on: [self-hosted, linux, x64]
@@ -411,7 +473,7 @@ jobs:
 
       - name: plot histogram covariance matrices
         run: >-
-          rabbit_plot_hists_cov.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
+          rabbit_plot_cov.py $RABBIT_OUTDIR/fitresults.hdf5 -o $WEB_DIR/$PLOT_DIR 
           --subtitle Preliminary -m Project ch1 a -m Project ch1 b --subtitle Preliminary --config tests/style_config.py
 
 
@@ -456,7 +518,7 @@ jobs:
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
-    needs: [setenv, symmerizations, alternative-fits, bsm, plotting, likelihoodscans]
+    needs: [setenv, symmerizations, sparse-fits, alternative-fits, bsm, plotting, likelihoodscans]
     if: always() 
     steps:
       - env:
