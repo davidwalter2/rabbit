@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 
-import argparse
-
 import mplhep as hep
 import numpy as np
 
-from rabbit import io_tools
+from rabbit import io_tools, parsing
 
 from wums import logging, output_tools, plot_tools  # isort: skip
 
@@ -14,45 +12,8 @@ hep.style.use(hep.style.ROOT)
 logger = None
 
 
-def parseArgs():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "inputFile",
-        type=str,
-        help="fitresults output",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "--result",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
-    parser.add_argument(
-        "-o",
-        "--outpath",
-        type=str,
-        default="./test",
-        help="Folder path for output",
-    )
-    parser.add_argument(
-        "--eoscp",
-        action="store_true",
-        help="Override use of xrdcp and use the mount instead",
-    )
-    parser.add_argument(
-        "-p", "--postfix", type=str, help="Postfix for output file name"
-    )
+def make_parser():
+    parser = parsing.plot_parser()
     parser.add_argument(
         "--params",
         type=str,
@@ -72,18 +33,6 @@ def parseArgs():
         help="Provide a root file with likelihood scan result from combine",
     )
     parser.add_argument(
-        "--title",
-        default="Rabbit",
-        type=str,
-        help="Title to be printed in upper left",
-    )
-    parser.add_argument(
-        "--subtitle",
-        default="",
-        type=str,
-        help="Subtitle to be printed after title",
-    )
-    parser.add_argument(
         "--xlim",
         type=float,
         nargs=2,
@@ -97,14 +46,7 @@ def parseArgs():
         default=None,
         help="y axis limits",
     )
-    parser.add_argument("--titlePos", type=int, default=2, help="title position")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config file for style formatting",
-    )
-    return parser.parse_args()
+    return parser
 
 
 def plot_scan(
@@ -213,13 +155,13 @@ def plot_scan(
 
 
 def main():
-    args = parseArgs()
+    args = make_parser().parse_args()
     outdir = output_tools.make_plot_dir(args.outpath, eoscp=args.eoscp)
 
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
-    fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
+    fitresult, meta = io_tools.get_fitresult(args.infile, args.result, meta=True)
 
     config = plot_tools.load_config(args.config)
 

@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 
 import h5py
 import hist
@@ -170,14 +171,22 @@ class Workspace:
         label=None,
         channel=None,
         mapping_key=None,
+        is_matrix=False,
         flow=False,
     ):
         if not isinstance(axes, (list, tuple, np.ndarray)):
             axes = [axes]
         if start is not None or stop is not None:
-            values = values[start:stop]
+            if is_matrix:
+                values = values[start:stop, start:stop]
+            else:
+                values = values[start:stop]
+
             if variances is not None:
-                variances = variances[start:stop]
+                if is_matrix:
+                    variances = variances[start:stop, start:stop]
+                else:
+                    variances = variances[start:stop]
 
         h = self.hist(name, axes, values, variances, label, flow=flow)
         self.dump_hist(h, mapping_key, channel)
@@ -185,8 +194,10 @@ class Workspace:
     def add_value(self, value, name, *args, **kwargs):
         self.dump_obj(value, name, *args, **kwargs)
 
-    def add_chi2(self, chi2, ndf, prefit, mapping):
+    def add_chi2(self, chi2, ndf, prefit, mapping, saturated=False):
         postfix = "_prefit" if prefit else ""
+        if saturated:
+            postfix += "_saturated"
         self.add_value(int(ndf), "ndf" + postfix, mapping.key)
         self.add_value(float(chi2), "chi2" + postfix, mapping.key)
 
@@ -248,6 +259,37 @@ class Workspace:
                 **opts,
             )
 
+            if data_cov_inv is not None:
+                axes_x = deepcopy(axes)
+                axes_y = deepcopy(axes)
+                for ax, ay in zip(axes_x, axes_y):
+                    ax.__dict__["name"] = f"{ax.name}_x"
+                    ay.__dict__["name"] = f"{ay.name}_y"
+
+                self.add_hist(
+                    "cov_data_obs",
+                    [*axes_x, *axes_y],
+                    cov_data_obs,
+                    label="covariance of observed number of events in data",
+                    is_matrix=True,
+                    **opts,
+                )
+            if nobs_cov_inv is not None:
+                axes_x = deepcopy(axes)
+                axes_y = deepcopy(axes)
+                for ax, ay in zip(axes_x, axes_y):
+                    ax.__dict__["name"] = f"{ax.name}_x"
+                    ay.__dict__["name"] = f"{ay.name}_y"
+
+                self.add_hist(
+                    "cov_nobs_obs",
+                    [*axes_x, *axes_y],
+                    cov_nobs,
+                    is_matrix=True,
+                    label="covariance of observed number of events in data",
+                    **opts,
+                )
+
             start = stop
 
         return hists_data_obs, hists_nobs
@@ -264,33 +306,6 @@ class Workspace:
             list(self.parms.astype(str)), name="parms_y"
         )
         self.add_hist(hist_name, [axis_parms_x, axis_parms_y], cov)
-
-    def add_nonprofiled_impacts_hist(
-        self,
-        parms,
-        impacts,
-        params_grouped,
-        impacts_grouped,
-        base_name="nonprofiled_impacts",
-    ):
-        axis_impacts = hist.axis.StrCategory(parms, name="impacts")
-        axis_parms = hist.axis.StrCategory(
-            np.array(self.parms).astype(str), name="parms"
-        )
-        self.add_hist(
-            base_name,
-            [axis_impacts, axis_downUpVar, axis_parms],
-            impacts,
-            label="Impacts of non profiled parameter variations",
-        )
-
-        axis_impacts_grouped = hist.axis.StrCategory(params_grouped, name="impacts")
-        name = f"{base_name}_grouped"
-        self.add_hist(
-            name,
-            [axis_impacts_grouped, axis_downUpVar, axis_parms],
-            impacts_grouped,
-        )
 
     def add_limits_hist(
         self, limits, params, cls_list, clb_list=None, base_name="asymptoticLimits"
@@ -408,9 +423,31 @@ class Workspace:
             impacts_grouped,
         )
 
-    def add_global_impacts_hists(self, *args, base_name="global_impacts", **kwargs):
-        self.add_impacts_hists(
-            *args, **kwargs, base_name=base_name, global_impacts=True
+    def add_impacts_asym_hist(
+        self,
+        parms,
+        impacts,
+        params_grouped,
+        impacts_grouped,
+        base_name="asym_impacts",
+    ):
+        axis_impacts = hist.axis.StrCategory(parms, name="impacts")
+        axis_parms = hist.axis.StrCategory(
+            np.array(self.parms).astype(str), name="parms"
+        )
+        self.add_hist(
+            base_name,
+            [axis_impacts, axis_downUpVar, axis_parms],
+            impacts,
+            label="Impacts of non profiled parameter variations",
+        )
+
+        axis_impacts_grouped = hist.axis.StrCategory(params_grouped, name="impacts")
+        name = f"{base_name}_grouped"
+        self.add_hist(
+            name,
+            [axis_impacts_grouped, axis_downUpVar, axis_parms],
+            impacts_grouped,
         )
 
     def add_expected_hists(
@@ -421,6 +458,8 @@ class Workspace:
         cov=None,
         impacts=None,
         impacts_grouped=None,
+        gaussian_impacts=None,
+        gaussian_impacts_grouped=None,
         process_axis=False,
         name=None,
         label=None,
@@ -475,20 +514,34 @@ class Workspace:
             )
 
             if impacts is not None:
-                axis_impacts = self.global_impact_axis
                 self.add_hist(
                     f"{name}_global_impacts",
-                    [*hist_axes, axis_impacts],
+                    [*hist_axes, self.global_impact_axis],
                     impacts,
                     **opts,
                 )
 
             if impacts_grouped is not None:
-                axis_impacts_grouped = self.grouped_global_impact_axis
                 self.add_hist(
                     f"{name}_global_impacts_grouped",
-                    [*hist_axes, axis_impacts_grouped],
+                    [*hist_axes, self.grouped_global_impact_axis],
                     impacts_grouped,
+                    **opts,
+                )
+
+            if gaussian_impacts is not None:
+                self.add_hist(
+                    f"{name}_gaussian_global_impacts",
+                    [*hist_axes, self.global_impact_axis],
+                    gaussian_impacts,
+                    **opts,
+                )
+
+            if gaussian_impacts_grouped is not None:
+                self.add_hist(
+                    f"{name}_gaussian_global_impacts_grouped",
+                    [*hist_axes, self.grouped_global_impact_axis],
+                    gaussian_impacts_grouped,
                     **opts,
                 )
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 
-import argparse
 import itertools
 
 import numpy as np
 
-from rabbit import io_tools
+from rabbit import io_tools, parsing
 
 
-def parseArgs():
-    parser = argparse.ArgumentParser()
+def make_parser():
+    parser = parsing.print_parser()
+    parsing.add_impact_args(parser)
     parser.add_argument(
         "-u", "--ungroup", action="store_true", help="Use ungrouped nuisances"
     )
@@ -20,47 +20,12 @@ def parseArgs():
         "-s", "--sort", action="store_true", help="Sort nuisances by impact"
     )
     parser.add_argument(
-        "--globalImpacts", action="store_true", help="Print global impacts"
-    )
-    parser.add_argument(
-        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
-    )
-    parser.add_argument(
-        "--asymImpacts",
-        action="store_true",
-        help="Print asymmetric impacts from likelihood, otherwise symmetric from hessian",
-    )
-    parser.add_argument(
-        "inputFile",
-        type=str,
-        help="fitresults output",
-    )
-    parser.add_argument(
-        "--result",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
-    parser.add_argument(
-        "-m",
-        "--mapping",
-        default=None,
-        type=str,
-        nargs="+",
-        help="Print impacts on observables use '-m <mapping> channel axes' for mapping results.",
-    )
-    parser.add_argument(
-        "--relative",
-        action="store_true",
-        help="Print relative uncertainty, only for '--hist'",
-    )
-    parser.add_argument(
         "--scale",
         default=1,
         type=float,
         help="Scale impacts",
     )
-    return parser.parse_args()
+    return parser
 
 
 def printImpactsHist(args, hist_bin, hist_total_bin, ibin):
@@ -86,20 +51,13 @@ def printImpactsParm(args, fitresult, poi):
     if args.relative:
         raise NotImplementedError("Relative uncertainty for POIs not implemented")
 
-    if args.globalImpacts:
-        impact_type = "global"
-    elif args.nonprofiledImpacts:
-        impact_type = "nonprofiled"
-    else:
-        impact_type = "traditional"
-
     impacts, labels = io_tools.read_impacts_poi(
         fitresult,
         poi,
-        add_total=not args.nonprofiledImpacts,
+        add_total=args.impactType not in ["nonprofiled"],
         asym=args.asymImpacts,
         grouped=not args.ungroup,
-        impact_type=impact_type,
+        impact_type=args.impactType,
     )
     printImpacts(args, impacts, labels, poi)
 
@@ -136,17 +94,17 @@ def printImpacts(args, impacts, labels, poi, scale=1, unit="unit"):
 
 
 def main():
-    args = parseArgs()
-    fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
+    args = make_parser().parse_args()
+    fitresult, meta = io_tools.get_fitresult(args.infile, args.result, meta=True)
 
     if args.mapping is not None:
         if args.asymImpacts:
             raise NotImplementedError(
                 "Asymetric impacts on observables is not yet implemented"
             )
-        if not args.globalImpacts:
+        if args.impactType not in ["global", "gaussian_global"]:
             raise NotImplementedError(
-                "Only global impacts on observables is implemented (use --globalImpacts)"
+                "Only global impacts on observables is implemented (use '--impactType' with 'global' or 'gaussian_global')"
             )
 
         mapping_key = " ".join(args.mapping)

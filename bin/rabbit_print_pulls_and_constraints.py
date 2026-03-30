@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 
-import argparse
-
 import numpy as np
 
-from rabbit import io_tools
+from rabbit import io_tools, parsing
 
 sort_choices = []
 sort_choices_abs = [f"abs {s}" for s in sort_choices]
 
 
-def parseArgs():
-    parser = argparse.ArgumentParser()
+def make_parser():
+    parser = parsing.print_parser()
     parser.add_argument(
         "-s",
         "--sort",
@@ -35,17 +33,6 @@ def parseArgs():
         help="Reverse the sorting",
     )
     parser.add_argument(
-        "inputFile",
-        type=str,
-        help="fitresults output",
-    )
-    parser.add_argument(
-        "--result",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
-    parser.add_argument(
         "--asym",
         default=False,
         action="store_true",
@@ -63,12 +50,12 @@ def parseArgs():
         default=None,
         help="Exclude nuisances by regular expression",
     )
-    return parser.parse_args()
+    return parser
 
 
 def main():
-    args = parseArgs()
-    fitresult = io_tools.get_fitresult(args.inputFile, args.result)
+    args = make_parser().parse_args()
+    fitresult = io_tools.get_fitresult(args.infile, args.result)
 
     labels, pulls, constraints = io_tools.get_pulls_and_constraints(
         fitresult,

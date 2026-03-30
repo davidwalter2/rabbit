@@ -6,32 +6,23 @@ from pprint import pprint
 
 from wums import logging
 
+from rabbit import parsing
 from rabbit.datacard_converter import DatacardConverter
 
 logger = None
 
 
-def main():
+def make_parser():
     parser = argparse.ArgumentParser(
         description="Convert Combine datacard and ROOT files to different formats"
     )
+    parsing._add_base_args(parser)
+    parsing._add_output_args(parser)
     parser.add_argument("datacard", help="Path to the datacard file")
-    parser.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help="output directory, if 'None' same as input datacard",
-    )
     parser.add_argument(
         "--outname",
         default=None,
         help="output file name, if 'None' same as input datacard but with .hdf5 extension",
-    )
-    parser.add_argument(
-        "--postfix",
-        default=None,
-        type=str,
-        help="Postfix to append on output file name",
     )
     parser.add_argument(
         "--sparse",
@@ -57,19 +48,11 @@ def main():
         action="store_true",
         help="Use root to load histograms, otherwise uproot",
     )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
+    return parser
 
-    args = parser.parse_args()
+
+def main():
+    args = make_parser().parse_args()
 
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
@@ -81,11 +64,7 @@ def main():
 
     pprint(converter.parser.get_summary())
 
-    directory = args.output
-    if directory is None:
-        directory = os.path.dirname(args.datacard)
-    if directory == "":
-        directory = "./"
+    directory = args.outpath
     filename = args.outname
     if filename is None:
         filename = os.path.splitext(os.path.basename(args.datacard))[0]

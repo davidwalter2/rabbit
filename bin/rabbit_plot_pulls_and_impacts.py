@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import argparse
 import itertools
 import math
 import os
@@ -11,11 +10,177 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from rabbit import io_tools
+from rabbit import io_tools, parsing
 
 from wums import logging, output_tools, plot_tools  # isort: skip
 
 logger = None
+
+
+def make_parser():
+    sort_choices = ["label", "pull", "abspull", "constraint", "absimpact"]
+    sort_choices += [
+        *[
+            f"{c}_diff" for c in sort_choices
+        ],  # possibility to sort based on largest difference between input and referencefile
+        *[
+            f"{c}_ref" for c in sort_choices
+        ],  # possibility to sort based on reference file
+        *[f"{c}_both" for c in sort_choices],
+    ]  # possibility to sort based on the largest/smallest of both input and reference file
+
+    parser = parsing.plot_parser()
+    parsing.add_impact_args(parser)
+    parser.add_argument(
+        "--channel",
+        default=None,
+        type=str,
+        help="Plot impacts for given channel",
+    )
+    parser.add_argument(
+        "--refMapping",
+        default=None,
+        type=str,
+        nargs="+",
+        help="Plot impacts on observables from mapping results for reference.",
+    )
+    parser.add_argument(
+        "--refChannel",
+        default=None,
+        type=str,
+        help="Plot impacts for given channel",
+    )
+    parser.add_argument(
+        "-r",
+        "--referenceFile",
+        type=str,
+        help="fitresults output hdf5 file from fit for reference",
+    )
+    parser.add_argument(
+        "--refResult",
+        default=None,
+        type=str,
+        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
+    )
+    parser.add_argument(
+        "--refName",
+        type=str,
+        default="ref.",
+        help="Name of reference input for legend",
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Name of input for legend",
+    )
+    parser.add_argument(
+        "-s",
+        "--sort",
+        default="absimpact",
+        type=str,
+        help="Sort mode for nuisances",
+        choices=sort_choices,
+    )
+    parser.add_argument(
+        "--stat",
+        default=0.0,
+        type=float,
+        help="Overwrite stat. uncertainty with this value",
+    )
+    parser.add_argument(
+        "-d",
+        "--sortDescending",
+        dest="ascending",
+        action="store_false",
+        help="Sort mode for nuisances",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["group", "ungrouped", "both"],
+        default="both",
+        help="Impact mode",
+    )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="Normalize impacts on poi, leading to relative uncertainties.",
+    )
+    parser.add_argument("--debug", action="store_true", help="Print debug output")
+    parser.add_argument(
+        "--diffPullAsym",
+        action="store_true",
+        help="Also add the pulls after the diffPullAsym definition",
+    )
+    parser.add_argument(
+        "--oneSidedImpacts", action="store_true", help="Make impacts one-sided"
+    )
+    parser.add_argument(
+        "--filters",
+        nargs="*",
+        type=str,
+        help="Filter regexes to select nuisances by name",
+    )
+    parser.add_argument(
+        "--grouping",
+        type=str,
+        default=None,
+        help="Pre-defined grouping in config to select nuisance groups",
+    )
+    parser.add_argument(
+        "--impactTitle",
+        default="Impacts",
+        type=str,
+        help="Title for impacts",
+    )
+    parser.add_argument(
+        "--showNumbers", action="store_true", help="Show values of impacts"
+    )
+    parser.add_argument(
+        "--poi",
+        type=str,
+        default=None,
+        help="Specify POI to make impacts for, otherwise use all",
+    )
+    parser.add_argument(
+        "--poiType", type=str, default=None, help="POI type to make impacts for"
+    )
+    parser.add_argument(
+        "--pullrange", type=float, default=None, help="POI type to make impacts for"
+    )
+    parser.add_argument(
+        "--otherExtensions",
+        default=[],
+        type=str,
+        nargs="*",
+        help="Additional output file types to write",
+    )
+    parser.add_argument(
+        "-n", "--num", type=int, default=50, help="Number of nuisances to plot"
+    )
+    parser.add_argument(
+        "--noPulls",
+        action="store_true",
+        help="Don't show pulls (not defined for groups)",
+    )
+    parser.add_argument(
+        "--scaleImpacts",
+        type=float,
+        default=1.0,
+        help="Scale impacts by this number",
+    )
+    parser.add_argument(
+        "--scaleImpactsRef",
+        type=float,
+        default=-1.0,
+        help="Scale impacts of reference by this number (default uses same as nominal)",
+    )
+    parser.add_argument(
+        "--pullsNoDiff",
+        action="store_true",
+        help="Plot actual nuisance parameter value, by default nuisance parameter difference w.r.t. prefit value",
+    )
+    return parser
 
 
 def writeOutput(fig, outfile, extensions=[], postfix=None, args=None, meta_info=None):
@@ -455,7 +620,7 @@ def readFitInfoFromFile(
     fitresult,
     poi,
     group=False,
-    impact_type=False,
+    impact_type=None,
     grouping=None,
     asym=False,
     filters=[],
@@ -474,6 +639,7 @@ def readFitInfoFromFile(
             impact_type=impact_type,
             add_total=group and not impact_type == "nonprofiled",
         )
+
         if group:
             impacts, labels = out
             if normalize:
@@ -554,8 +720,12 @@ def readFitInfoFromFile(
         df["abspull"] = np.abs(df["pull"])
 
         if asym:
-            df["constraint_down"] = -constraints[..., 1]
-            df["constraint_up"] = constraints[..., 0]
+            if impact_type == "nonprofiled":
+                df["constraint_down"] = -constraints
+                df["constraint_up"] = constraints
+            else:
+                df["constraint_down"] = -constraints[..., 1]
+                df["constraint_up"] = constraints[..., 0]
         else:
             df["constraint"] = constraints
             valid = (1 - constraints**2) > 0
@@ -563,7 +733,6 @@ def readFitInfoFromFile(
             df.loc[valid, "newpull"] = df.loc[valid]["pull"] / np.sqrt(
                 1 - df.loc[valid]["constraint"] ** 2
             )
-
     if poi:
         df = df.drop(df.loc[df["label"] == poi].index)
 
@@ -682,251 +851,6 @@ def readHistImpacts(
     return df
 
 
-def parseArgs():
-    sort_choices = ["label", "pull", "abspull", "constraint", "absimpact"]
-    sort_choices += [
-        *[
-            f"{c}_diff" for c in sort_choices
-        ],  # possibility to sort based on largest difference between input and referencefile
-        *[
-            f"{c}_ref" for c in sort_choices
-        ],  # possibility to sort based on reference file
-        *[f"{c}_both" for c in sort_choices],
-    ]  # possibility to sort based on the largest/smallest of both input and reference file
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "inputFile",
-        type=str,
-        help="fitresults output hdf5 file from fit",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "--result",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
-    parser.add_argument(
-        "-m",
-        "--mapping",
-        default=None,
-        type=str,
-        nargs="+",
-        help="Plot impacts on observables use '-m <mapping> channel axes' for mapping results.",
-    )
-    parser.add_argument(
-        "--channel",
-        default=None,
-        type=str,
-        help="Plot impacts for given channel",
-    )
-    parser.add_argument(
-        "--refMapping",
-        default=None,
-        type=str,
-        nargs="+",
-        help="Plot impacts on observables from mapping results for reference.",
-    )
-    parser.add_argument(
-        "--refChannel",
-        default=None,
-        type=str,
-        help="Plot impacts for given channel",
-    )
-    parser.add_argument(
-        "-r",
-        "--referenceFile",
-        type=str,
-        help="fitresults output hdf5 file from fit for reference",
-    )
-    parser.add_argument(
-        "--refResult",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
-    parser.add_argument(
-        "--refName",
-        type=str,
-        default="ref.",
-        help="Name of reference input for legend",
-    )
-    parser.add_argument(
-        "--name",
-        type=str,
-        default=None,
-        help="Name of input for legend",
-    )
-    parser.add_argument(
-        "-s",
-        "--sort",
-        default="absimpact",
-        type=str,
-        help="Sort mode for nuisances",
-        choices=sort_choices,
-    )
-    parser.add_argument(
-        "--stat",
-        default=0.0,
-        type=float,
-        help="Overwrite stat. uncertainty with this value",
-    )
-    parser.add_argument(
-        "-d",
-        "--sortDescending",
-        dest="ascending",
-        action="store_false",
-        help="Sort mode for nuisances",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["group", "ungrouped", "both"],
-        default="both",
-        help="Impact mode",
-    )
-    parser.add_argument(
-        "--normalize",
-        action="store_true",
-        help="Normalize impacts on poi, leading to relative uncertainties.",
-    )
-    parser.add_argument(
-        "--relative",
-        action="store_true",
-        help="Relative uncertainty w.r.t. central value of parameter of interest (only for hisograms)",
-    )
-    parser.add_argument("--debug", action="store_true", help="Print debug output")
-    parser.add_argument(
-        "--diffPullAsym",
-        action="store_true",
-        help="Also add the pulls after the diffPullAsym definition",
-    )
-    parser.add_argument(
-        "--oneSidedImpacts", action="store_true", help="Make impacts one-sided"
-    )
-    parser.add_argument(
-        "--filters",
-        nargs="*",
-        type=str,
-        help="Filter regexes to select nuisances by name",
-    )
-    parser.add_argument(
-        "--grouping",
-        type=str,
-        default=None,
-        help="Pre-defined grouping in config to select nuisance groups",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config file for style formatting",
-    )
-    parser.add_argument(
-        "--title",
-        default="Rabbit",
-        type=str,
-        help="Title to be printed in upper left",
-    )
-    parser.add_argument(
-        "--subtitle",
-        default="",
-        type=str,
-        help="Subtitle to be printed after title",
-    )
-    parser.add_argument(
-        "--impactTitle",
-        default="Impacts",
-        type=str,
-        help="Title for impacts",
-    )
-    parser.add_argument("--noImpacts", action="store_true", help="Don't show impacts")
-    parser.add_argument(
-        "--globalImpacts", action="store_true", help="Print global impacts"
-    )
-    parser.add_argument(
-        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
-    )
-    parser.add_argument(
-        "--asymImpacts",
-        action="store_true",
-        help="Print asymmetric impacts from likelihood, otherwise symmetric from hessian",
-    )
-    parser.add_argument(
-        "--showNumbers", action="store_true", help="Show values of impacts"
-    )
-    parser.add_argument(
-        "--poi",
-        type=str,
-        default=None,
-        help="Specify POI to make impacts for, otherwise use all",
-    )
-    parser.add_argument(
-        "--poiType", type=str, default=None, help="POI type to make impacts for"
-    )
-    parser.add_argument(
-        "--pullrange", type=float, default=None, help="POI type to make impacts for"
-    )
-    parser.add_argument(
-        "-o",
-        "--outpath",
-        type=str,
-        default="./test",
-        help="Folder path for output",
-    )
-    parser.add_argument(
-        "-p", "--postfix", type=str, help="Postfix for output file name"
-    )
-    parser.add_argument(
-        "--eoscp",
-        action="store_true",
-        help="Override use of xrdcp and use the mount instead",
-    )
-    parser.add_argument(
-        "--otherExtensions",
-        default=[],
-        type=str,
-        nargs="*",
-        help="Additional output file types to write",
-    )
-    parser.add_argument(
-        "-n", "--num", type=int, default=50, help="Number of nuisances to plot"
-    )
-    parser.add_argument(
-        "--noPulls",
-        action="store_true",
-        help="Don't show pulls (not defined for groups)",
-    )
-    parser.add_argument(
-        "--scaleImpacts",
-        type=float,
-        default=1.0,
-        help="Scale impacts by this number",
-    )
-    parser.add_argument(
-        "--scaleImpactsRef",
-        type=float,
-        default=-1.0,
-        help="Scale impacts of reference by this number (default uses same as nominal)",
-    )
-    parser.add_argument(
-        "--pullsNoDiff",
-        action="store_true",
-        help="Plot actual nuisance parameter value, by default nuisance parameter difference w.r.t. prefit value",
-    )
-    return parser.parse_args()
-
-
 def make_plots(
     df,
     args,
@@ -937,6 +861,7 @@ def make_plots(
     pullrange=None,
     meta=None,
     postfix=None,
+    impacts=False,
     impact_title=None,
 ):
 
@@ -980,16 +905,14 @@ def make_plots(
         pullrange=pullrange,
         title=args.title,
         subtitle=args.subtitle,
-        impacts=not args.noImpacts,
+        impacts=impacts,
         asym=asym,
         asym_pulls=args.diffPullAsym,
         include_ref=include_ref,
         ref_name=args.refName,
         name=args.name,
         show_numbers=args.showNumbers,
-        show_legend=(not group and not args.noImpacts)
-        or include_ref
-        or args.name is not None,
+        show_legend=(not group and impacts) or include_ref or args.name is not None,
         group=group,
         diff_pulls=not args.pullsNoDiff,
     )
@@ -1019,15 +942,9 @@ def load_dataframe_parms(
     normalize=False,
     fitresult_ref=None,
     grouping=None,
+    impact_type=None,
     translate_label={},
 ):
-    if args.globalImpacts:
-        impact_type = "global"
-    elif args.nonprofiledImpacts:
-        impact_type = "nonprofiled"
-    else:
-        impact_type = "traditional"
-
     if not group:
         df = readFitInfoFromFile(
             fitresult,
@@ -1176,6 +1093,7 @@ def produce_plots_parms(
     pullrange=None,
     meta=None,
     postfix=None,
+    impact_type=None,
     impact_title=None,
     grouping=None,
     translate_label={},
@@ -1190,6 +1108,7 @@ def produce_plots_parms(
         normalize=normalize,
         fitresult_ref=fitresult_ref,
         grouping=grouping,
+        impact_type=impact_type,
         translate_label=translate_label,
     )
 
@@ -1206,6 +1125,7 @@ def produce_plots_parms(
         pullrange=pullrange,
         meta=meta,
         postfix=postfix,
+        impacts=impact_type not in [None, "none"],
         impact_title=impact_title,
     )
 
@@ -1260,12 +1180,13 @@ def produce_plots_hist(
         pullrange=pullrange,
         meta=meta,
         postfix=postfix,
+        impacts=hist_impacts is not None,
         impact_title=impact_title,
     )
 
 
 def main():
-    args = parseArgs()
+    args = make_parser().parse_args()
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
@@ -1273,11 +1194,9 @@ def main():
 
     translate_label = getattr(config, "impact_labels", {})
 
-    fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
+    fitresult, meta = io_tools.get_fitresult(args.infile, args.result, meta=True)
     if any(x is not None for x in [args.referenceFile, args.refResult]):
-        ref_file = (
-            args.referenceFile if args.referenceFile is not None else args.inputFile
-        )
+        ref_file = args.referenceFile if args.referenceFile is not None else args.infile
         ref_result = args.refResult if args.refResult is not None else args.result
         fitresult_ref = io_tools.get_fitresult(ref_file, ref_result)
     elif args.refMapping is not None:
@@ -1300,17 +1219,15 @@ def main():
         translate_label=translate_label,
     )
 
-    if args.noImpacts:
+    if args.impactType in [None, "none"]:
         # do one pulls plot, ungrouped
-        produce_plots_parms(args, fitresult, outdir, outfile="pulls.html", **kwargs)
+        produce_plots_parms(
+            args, fitresult, outdir, outfile="pulls.html", impact_type=None, **kwargs
+        )
     else:
         kwargs.update(dict(normalize=args.normalize, impact_title=args.impactTitle))
 
-        impacts_name = "impacts"
-        if args.globalImpacts:
-            impacts_name = f"global_{impacts_name}"
-        elif args.nonprofiledImpacts:
-            impacts_name = f"nonprofiled_{impacts_name}"
+        impacts_name = f"{args.impactType}_impacts"
 
         grouping = None
         if args.grouping is not None:
@@ -1321,9 +1238,9 @@ def main():
                 raise NotImplementedError(
                     "Asymetric impacts on observables is not yet implemented"
                 )
-            if not args.globalImpacts:
+            if args.impactType not in ["global", "gaussian_global"]:
                 raise NotImplementedError(
-                    "Only global impacts on observables is implemented (use --globalImpacts)"
+                    "Only global impacts on observables is implemented (use '--impactType' with 'global' or 'gaussian_global')"
                 )
 
             def get_mapping_key(result, key):
@@ -1369,7 +1286,7 @@ def main():
                 for mode in modes:
                     group = mode == "group"
 
-                    key = "hist_postfit_inclusive_global_impacts"
+                    key = f"hist_postfit_inclusive_{impacts_name}"
                     if group:
                         key += "_grouped"
 
@@ -1436,7 +1353,13 @@ def main():
                     if not args.noPulls:
                         name = f"pulls_and_{name}"
                     produce_plots_parms(
-                        args, fitresult, outdir, outfile=name, poi=poi, **kwargs
+                        args,
+                        fitresult,
+                        outdir,
+                        outfile=name,
+                        poi=poi,
+                        impact_type=args.impactType,
+                        **kwargs,
                     )
                 if args.mode in ["both", "group"]:
                     produce_plots_parms(
@@ -1447,6 +1370,7 @@ def main():
                         poi=poi,
                         group=True,
                         grouping=grouping,
+                        impact_type=args.impactType,
                         **kwargs,
                     )
 

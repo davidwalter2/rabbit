@@ -1,3 +1,6 @@
+import functools
+import itertools
+
 import numpy as np
 import tensorflow as tf
 
@@ -50,6 +53,40 @@ class POIModel:
             self.xpoidefault = poidefault
         else:
             self.xpoidefault = tf.sqrt(poidefault)
+
+
+class CompositePOIModel(POIModel):
+    """
+    multiply different POI models together
+    """
+
+    def __init__(
+        self,
+        poi_models,
+        allowNegativePOI=False,
+    ):
+
+        self.poi_models = poi_models
+
+        self.npoi = sum([m.npoi for m in poi_models])
+
+        self.pois = np.concatenate([m.pois for m in poi_models])
+
+        self.allowNegativePOI = allowNegativePOI
+
+        self.is_linear = self.npoi == 0 or self.allowNegativePOI
+
+        self.xpoidefault = tf.concat([m.xpoidefault for m in poi_models], axis=0)
+
+    def compute(self, poi, full=False):
+        start = 0
+        results = []
+        for m in self.poi_models:
+            results.append(m.compute(poi[start : start + m.npoi], full))
+            start += m.npoi
+
+        rnorm = functools.reduce(lambda a, b: a * b, results)
+        return rnorm
 
 
 class Ones(POIModel):
@@ -194,4 +231,68 @@ class Mixture(POIModel):
         )
 
         rnorm = tf.reshape(rnorm, [1, -1])
+        return rnorm
+
+
+class SaturatedProjectModel(POIModel):
+    """
+    For computing the saturated test statistic of a projection.
+    Add one free parameter for each projected bin
+    """
+
+    def __init__(
+        self, indata, channel_info, expectSignal=None, allowNegativePOI=False, **kwargs
+    ):
+        self.indata = indata
+        self.channel_info_mapping = channel_info
+
+        self.npoi = np.sum(
+            [
+                np.prod([a.size for a in v["axes"]]) if len(v["axes"]) else 1
+                for v in channel_info.values()
+            ]
+        )
+
+        names = []
+        for k, v in self.channel_info_mapping.items():
+            for idxs in itertools.product(*[range(a.size) for a in v["axes"]]):
+                label = "_".join(f"{a.name}{i}" for a, i in zip(v["axes"], idxs))
+                names.append(f"saturated_{k}_{label}".encode())
+
+        self.pois = np.array(names)
+
+        self.allowNegativePOI = allowNegativePOI
+
+        self.is_linear = self.npoi == 0 or self.allowNegativePOI
+
+        self.set_poi_default(expectSignal, allowNegativePOI)
+
+    def compute(self, poi, full=False):
+        start = 0
+        rnorms = []
+        for k, v in self.indata.channel_info.items():
+            if v["masked"] and not full:
+                continue
+            shape_input = [a.size for a in v["axes"]]
+
+            irnorm = tf.ones(shape_input, dtype=self.indata.dtype)
+            if k in self.channel_info_mapping.keys():
+                mapping_axes = self.channel_info_mapping[k]["axes"]
+                shape_mapping = [a.size if a in mapping_axes else 1 for a in v["axes"]]
+                npoi = np.prod([a.size for a in mapping_axes])
+                ipoi = poi[start : start + npoi]
+                irnorm *= tf.reshape(ipoi, shape_mapping)
+                start += npoi
+
+            irnorm = tf.reshape(
+                irnorm,
+                [
+                    -1,
+                ],
+            )
+            rnorms.append(irnorm)
+
+        rnorm = tf.concat(rnorms, axis=0)
+        rnorm = tf.reshape(rnorm, [-1, 1])
+
         return rnorm

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import copy
+
 import tensorflow as tf
 
 tf.config.experimental.enable_op_determinism()
@@ -12,7 +14,9 @@ from scipy.stats import chi2
 from rabbit import fitter, inputdata, parsing, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
+from rabbit.mappings import project
 from rabbit.poi_models import helpers as ph
+from rabbit.poi_models import poi_model
 from rabbit.regularization import helpers as rh
 from rabbit.regularization.lcurve import l_curve_optimize_tau, l_curve_scan_tau
 from rabbit.tfhelpers import edmval_cov
@@ -23,7 +27,7 @@ logger = None
 
 
 def make_parser():
-    parser = parsing.common_parser("Perform binned profilme maximum likelihood fits")
+    parser = parsing.common_parser()
     parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
     parser.add_argument(
         "--fullNll",
@@ -128,10 +132,22 @@ def make_parser():
         help="propagate global impacts on histogram bins (inclusive in processes)",
     )
     parser.add_argument(
+        "--computeHistGaussianImpacts",
+        default=False,
+        action="store_true",
+        help="propagate gaussian global impacts on histogram bins (inclusive in processes)",
+    )
+    parser.add_argument(
         "--computeVariations",
         default=False,
         action="store_true",
         help="save postfit histograms with each noi varied up to down",
+    )
+    parser.add_argument(
+        "--computeSaturatedProjectionTests",
+        default=False,
+        action="store_true",
+        help="Compute the saturated likelihood test for Project mappings",
     )
     parser.add_argument(
         "--noChi2",
@@ -173,7 +189,13 @@ def make_parser():
         "--globalImpacts",
         default=False,
         action="store_true",
-        help="compute impacts in terms of variations of global observables (as opposed to nuisance parameters directly)",
+        help="compute impacts in terms of variations from the likelihood of global observables (as opposed to nuisance parameters directly)",
+    )
+    parser.add_argument(
+        "--gaussianGlobalImpacts",
+        default=False,
+        action="store_true",
+        help="compute impacts in terms of variations of global observables in the fully gaussian approximation (as opposed to nuisance parameters directly)",
     )
     parser.add_argument(
         "--globalImpactsDisableJVP",
@@ -208,7 +230,8 @@ def make_parser():
         type=float,
         help="For use with regularization, set the regularization strength (tau)",
     )
-    return parser.parse_args()
+
+    return parser
 
 
 def save_observed_hists(args, mappings, fitter, ws):
@@ -244,6 +267,7 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 compute_cov=args.computeHistCov,
                 compute_chi2=not args.noChi2 and mapping.has_data,
                 compute_global_impacts=args.computeHistImpacts,
+                compute_gaussian_global_impacts=args.computeHistGaussianImpacts,
                 profile=profile,
             )
 
@@ -254,11 +278,57 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 cov=aux[1],
                 impacts=aux[2],
                 impacts_grouped=aux[3],
+                gaussian_impacts=aux[4],
+                gaussian_impacts_grouped=aux[5],
                 prefit=prefit,
             )
 
-            if aux[4] is not None:
-                ws.add_chi2(aux[4], aux[5], prefit, mapping)
+            if aux[-2] is not None:
+                chi2val = float(aux[-2])
+                ndf = int(aux[-1])
+                p_val = chi2.sf(chi2val, ndf)
+
+                logger.info("Linear chi2:")
+                logger.info(f"    ndof: {ndf}")
+                logger.info(f"    chi2/ndf = {round(chi2val)}")
+                logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
+
+                ws.add_chi2(chi2val, ndf, prefit, mapping)
+
+            if (
+                not prefit
+                and type(mapping) == project.Project
+                and args.computeSaturatedProjectionTests
+            ):
+                # saturated likelihood test
+
+                saturated_model = poi_model.SaturatedProjectModel(
+                    fitter.indata, mapping.channel_info
+                )
+                composite_model = poi_model.CompositePOIModel(
+                    [fitter.poi_model, saturated_model]
+                )
+
+                fitter_saturated = copy.deepcopy(fitter)
+                fitter_saturated.init_fit_parms(
+                    composite_model,
+                    args.setConstraintMinimum,
+                    unblind=args.unblind,
+                    freeze_parameters=args.freezeParameters,
+                )
+                cb = fitter_saturated.minimize()
+                nllvalreduced = fitter_saturated.reduced_nll().numpy()
+
+                ndf = saturated_model.npoi
+                chi2val = 2.0 * (ws.results["nllvalreduced"] - nllvalreduced)
+                p_val = chi2.sf(chi2val, ndf)
+
+                logger.info("Saturated chi2:")
+                logger.info(f"    ndof: {ndf}")
+                logger.info(f"    2*deltaNLL: {round(chi2val, 2)}")
+                logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
+
+                ws.add_chi2(chi2val, ndf, prefit, mapping, saturated=True)
 
         if args.saveHistsPerProcess and not mapping.skip_per_process:
             logger.info(f"Save processes histogram for {mapping.key}")
@@ -339,13 +409,13 @@ def fit(args, fitter, ws, dofit=True):
 
     if not args.noHessian:
         # compute the covariance matrix and estimated distance to minimum
-
-        val, grad, hess = fitter.loss_val_grad_hess()
-        edmval, cov = edmval_cov(grad, hess)
+        _, grad, hess = fitter.loss_val_grad_hess()
+        edmval, cov = fitter.edmval_cov(grad, hess)
         logger.info(f"edmval: {edmval}")
 
-        fitter.cov.assign(cov)
+        ws.add_cov_hist(cov)
 
+        fitter.cov.assign(cov)
         del cov
 
         if fitter.binByBinStat and fitter.diagnostics:
@@ -354,7 +424,7 @@ def fit(args, fitter, ws, dofit=True):
             # It should be near-zero by construction as long as the analytic profiling is
             # correct
             _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
-            edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
+            edmvalbeta = edmval_cov(gradbeta, hessbeta)
             logger.info(f"edmvalbeta: {edmvalbeta}")
 
         if args.doImpacts:
@@ -363,7 +433,18 @@ def fit(args, fitter, ws, dofit=True):
         del hess
 
         if args.globalImpacts:
-            ws.add_global_impacts_hists(*fitter.global_impacts_parms())
+            ws.add_impacts_hists(
+                *fitter.global_impacts_parms(),
+                base_name="global_impacts",
+                global_impacts=True,
+            )
+
+        if args.gaussianGlobalImpacts:
+            ws.add_impacts_hists(
+                *fitter.gaussian_global_impacts_parms(),
+                base_name="gaussian_global_impacts",
+                global_impacts=True,
+            )
 
     nllvalreduced = fitter.reduced_nll().numpy()
 
@@ -399,12 +480,11 @@ def fit(args, fitter, ws, dofit=True):
         hist_name="parms",
     )
 
-    if not args.noHessian:
-        ws.add_cov_hist(fitter.cov)
-
     if args.nonProfiledImpacts:
         # TODO: based on covariance
-        ws.add_nonprofiled_impacts_hist(*fitter.nonprofiled_impacts_parms())
+        ws.add_impacts_asym_hist(
+            *fitter.nonprofiled_impacts_parms(), base_name="nonprofiled_impacts_asym"
+        )
 
     # Likelihood scans
     if args.scan is not None:
@@ -475,7 +555,7 @@ def fit(args, fitter, ws, dofit=True):
 
 def main():
     start_time = time.time()
-    args = make_parser()
+    args = make_parser().parse_args()
 
     if args.eager:
         tf.config.run_functions_eagerly(True)
@@ -540,7 +620,7 @@ def main():
     }
 
     with workspace.Workspace(
-        args.output,
+        args.outpath,
         args.outname,
         postfix=args.postfix,
         fitter=ifitter,

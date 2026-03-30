@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse
 import itertools
-import os
 
 import hist
 import matplotlib.pyplot as plt
@@ -11,6 +9,7 @@ import numpy as np
 import seaborn as sns
 
 import rabbit.io_tools
+from rabbit import parsing
 
 from wums import boostHistHelpers as hh  # isort: skip
 from wums import logging, output_tools, plot_tools  # isort: skip
@@ -18,80 +17,9 @@ from wums import logging, output_tools, plot_tools  # isort: skip
 hep.style.use(hep.style.ROOT)
 
 
-def parseArgs():
-
-    # choices for legend padding
-    choices_padding = ["auto", "lower left", "lower right", "upper left", "upper right"]
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        type=int,
-        default=3,
-        choices=[0, 1, 2, 3, 4],
-        help="Set verbosity level with logging, the larger the more verbose",
-    )
-    parser.add_argument(
-        "--noColorLogger", action="store_true", help="Do not use logging with colors"
-    )
-    parser.add_argument(
-        "-o",
-        "--outpath",
-        type=str,
-        default=os.path.expanduser("./test"),
-        help="Base path for output",
-    )
-    parser.add_argument(
-        "--eoscp",
-        action="store_true",
-        help="Override use of xrdcp and use the mount instead",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config file for style formatting",
-    )
-    parser.add_argument(
-        "-p", "--postfix", type=str, help="Postfix for output file name"
-    )
-    parser.add_argument(
-        "--lumi",
-        type=float,
-        default=16.8,
-        help="Luminosity used in the fit, needed to get the absolute cross section",
-    )
-    parser.add_argument(
-        "--title",
-        default="Rabbit",
-        type=str,
-        help="Title to be printed in upper left",
-    )
-    parser.add_argument(
-        "--subtitle",
-        default="",
-        type=str,
-        help="Subtitle to be printed after title",
-    )
-    parser.add_argument("--titlePos", type=int, default=2, help="title position")
-    parser.add_argument(
-        "--scaleTextSize",
-        type=float,
-        default=1.0,
-        help="Scale all text sizes by this number",
-    )
-    parser.add_argument(
-        "infile",
-        type=str,
-        help="hdf5 file from rabbit or root file from combinetf",
-    )
-    parser.add_argument(
-        "--result",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
+def make_parser():
+    parser = parsing.plot_parser()
+    parsing.add_style_args(parser)
     parser.add_argument(
         "--correlation",
         action="store_true",
@@ -130,14 +58,11 @@ def parseArgs():
         help="List of axes where for each bin a separate plot is created",
     )
     parser.add_argument(
-        "--xlabel", type=str, default=None, help="x-axis label for plot labeling"
+        "--dataCovariance",
+        action="store_true",
+        help="Use covariance information to plot the data uncertainty",
     )
-    parser.add_argument(
-        "--ylabel", type=str, default=None, help="y-axis label for plot labeling"
-    )
-    args = parser.parse_args()
-
-    return args
+    return parser
 
 
 def plot_matrix(
@@ -145,7 +70,7 @@ def plot_matrix(
     matrix,
     args,
     channel=None,
-    axes=None,
+    axes_names=None,
     cmap="coolwarm",
     config={},
     meta=None,
@@ -187,8 +112,8 @@ def plot_matrix(
         **opts,
     )
     if ticklabels is None:
-        xlabel = plot_tools.get_axis_label(config, axes, args.xlabel, is_bin=True)
-        ylabel = plot_tools.get_axis_label(config, axes, args.ylabel, is_bin=True)
+        xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel, is_bin=True)
+        ylabel = plot_tools.get_axis_label(config, axes_names, args.ylabel, is_bin=True)
 
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
@@ -200,14 +125,18 @@ def plot_matrix(
         data=True,
         lumi=None,
         loc=args.titlePos,
+        no_energy=args.noEnergy,
     )
 
     to_join = [f"hist_{'corr' if args.correlation else 'cov'}"]
-    to_join.append("prefit" if args.prefit else "postfit")
+    if args.dataCovariance:
+        to_join.append("data")
+    else:
+        to_join.append("prefit" if args.prefit else "postfit")
     if channel is not None:
         to_join.append(channel)
-    if axes is not None:
-        to_join.append("_".join(axes))
+    if axes_names is not None:
+        to_join.append("_".join(axes_names))
     if suffix is not None:
         to_join.append(suffix)
     to_join = [*to_join, args.postfix]
@@ -241,7 +170,7 @@ def main():
     Plot the covariance matrix of the histogram bins
     """
 
-    args = parseArgs()
+    args = make_parser().parse_args()
 
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
@@ -249,14 +178,14 @@ def main():
 
     outdir = output_tools.make_plot_dir(args.outpath, eoscp=args.eoscp)
 
-    # load .hdf5 file first, must exist in combinetf and rabbit
+    # load .hdf5 file
     fitresult, meta = rabbit.io_tools.get_fitresult(args.infile, args.result, meta=True)
 
     plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
 
     if args.params is not None:
         h_cov = fitresult["cov"].get()
-        axes = h_cov.axes.name
+        axes_names = h_cov.axes.name
 
         if len(args.params) > 0:
             h_param = fitresult["parms"].get()
@@ -282,17 +211,21 @@ def main():
             outdir,
             h_cov,
             args,
-            axes=axes,
+            axes_names=axes_names,
             config=config,
             meta=meta,
             suffix="params",
             ticklabels=ticklabels,
         )
 
-    hist_cov_key = f"hist_{'prefit' if args.prefit else 'postfit'}_inclusive_cov"
+    if args.dataCovariance:
+        hist_cov_key = "cov_data_obs"
+    else:
+        hist_cov_key = f"hist_{'prefit' if args.prefit else 'postfit'}_inclusive_cov"
 
     results = fitresult.get("mappings", fitresult.get("physics_models"))
     for margs in args.mapping:
+
         if margs == []:
             instance_keys = results.keys()
         else:
@@ -300,13 +233,11 @@ def main():
             instance_keys = [k for k in results.keys() if k.startswith(mapping_key)]
             if len(instance_keys) == 0:
                 raise ValueError(
-                    f"No mapping found under {mapping_key}, available mappings are {results.keys()}"
+                    f"No mapping found under {mapping_key}; available mappings are {results.keys()}"
                 )
 
         for instance_key in instance_keys:
             instance = results[instance_key]
-
-            h_cov = instance[hist_cov_key].get()
 
             suffix = (
                 instance_key.replace(" ", "_")
@@ -317,20 +248,43 @@ def main():
                 .replace(")", "")
             )
 
-            plot_matrix(
-                outdir,
-                h_cov,
-                args,
-                config=config,
-                meta=meta,
-                suffix=suffix,
-            )
+            if hist_cov_key in instance.keys():
+                h_cov = instance[hist_cov_key].get()
+                plot_matrix(
+                    outdir,
+                    h_cov,
+                    args,
+                    config=config,
+                    meta=meta,
+                    suffix=suffix,
+                )
+            else:
+                h_cov = None
 
             start = 0
             for channel, info in instance["channels"].items():
-                channel_hist = info[f"hist_postfit_inclusive"].get()
+                channel_hist = info["hist_postfit_inclusive"].get()
                 axes = [a for a in channel_hist.axes]
-                if len(instance.get("channels", {}).keys()) > 1:
+                axes_names = channel_hist.axes.name
+
+                if h_cov is None:
+                    if hist_cov_key not in info.keys():
+                        raise ValueError(
+                            f"No key {hist_cov_key}; available; keys are {info.keys()}"
+                        )
+                    h_cov = info[hist_cov_key].get()
+
+                    plot_matrix(
+                        outdir,
+                        h_cov,
+                        args,
+                        channel=channel,
+                        config=config,
+                        meta=meta,
+                        suffix=suffix,
+                        axes_names=axes_names,
+                    )
+                elif len(instance.get("channels", {}).keys()) > 1:
                     # plot covariance matrix in each channel
                     nbins = np.prod(channel_hist.shape)
                     stop = int(start + nbins)
@@ -347,6 +301,7 @@ def main():
                         config=config,
                         meta=meta,
                         suffix=suffix,
+                        axes_names=axes_names,
                     )
                 else:
                     h_cov_channel = h_cov

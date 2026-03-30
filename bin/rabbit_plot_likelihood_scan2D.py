@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import argparse
 import os
 
 import matplotlib.pyplot as plt
@@ -8,62 +7,15 @@ import mplhep as hep
 import numpy as np
 from scipy.stats import chi2
 
-from rabbit import io_tools
+from rabbit import io_tools, parsing
 
 from wums import output_tools, plot_tools  # isort: skip
 
 hep.style.use(hep.style.ROOT)
 
 
-def writeOutput(fig, outfile, extensions=[], postfix=None, args=None, meta_info=None):
-    name, _ = os.path.splitext(outfile)
-
-    if postfix:
-        name += f"_{postfix}"
-
-    for ext in extensions:
-        if ext[0] != ".":
-            ext = "." + ext
-        output = name + ext
-        print(f"Write output file {output}")
-        plt.savefig(output)
-
-        output = name.rsplit("/", 1)
-        output[1] = os.path.splitext(output[1])[0]
-        if len(output) == 1:
-            output = (None, *output)
-    if args is None and meta_info is None:
-        return
-    output_tools.write_logfile(
-        *output,
-        args=args,
-        meta_info=meta_info,
-    )
-
-
-def parseArgs():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "inputFile",
-        type=str,
-        help="fitresults output",
-    )
-    parser.add_argument(
-        "--result",
-        default=None,
-        type=str,
-        help="fitresults key in file (e.g. 'asimov'). Leave empty for data fit result.",
-    )
-    parser.add_argument(
-        "-o",
-        "--outpath",
-        type=str,
-        default="./test",
-        help="Folder path for output",
-    )
-    parser.add_argument(
-        "-p", "--postfix", type=str, help="Postfix for output file name"
-    )
+def make_parser():
+    parser = parsing.plot_parser()
     parser.add_argument(
         "--params",
         type=str,
@@ -71,19 +23,6 @@ def parseArgs():
         action="append",
         help="Parameters to plot the likelihood scan",
     )
-    parser.add_argument(
-        "--title",
-        default="Rabbit",
-        type=str,
-        help="Title to be printed in upper left",
-    )
-    parser.add_argument(
-        "--subtitle",
-        default="",
-        type=str,
-        help="Subtitle to be printed after title",
-    )
-    parser.add_argument("--titlePos", type=int, default=2, help="title position")
     parser.add_argument(
         "--legPos", type=str, default="upper right", help="Set legend position"
     )
@@ -104,12 +43,6 @@ def parseArgs():
         type=str,
         default=None,
         help="y axis label",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config file for style formatting",
     )
     parser.add_argument(
         "--noHessian",
@@ -136,7 +69,33 @@ def parseArgs():
         action="store_true",
         help="Plot spiral scan illustration",
     )
-    return parser.parse_args()
+    return parser
+
+
+def writeOutput(fig, outfile, extensions=[], postfix=None, args=None, meta_info=None):
+    name, _ = os.path.splitext(outfile)
+
+    if postfix:
+        name += f"_{postfix}"
+
+    for ext in extensions:
+        if ext[0] != ".":
+            ext = "." + ext
+        output = name + ext
+        print(f"Write output file {output}")
+        plt.savefig(output)
+
+        output = name.rsplit("/", 1)
+        output[1] = os.path.splitext(output[1])[0]
+        if len(output) == 1:
+            output = (None, *output)
+    if args is None and meta_info is None:
+        return
+    output_tools.write_logfile(
+        *output,
+        args=args,
+        meta_info=meta_info,
+    )
 
 
 def ellipse(cov, mu0, mu1, cl, cartesian_angle=False):
@@ -345,8 +304,8 @@ def plot_scan(
 
 
 def main():
-    args = parseArgs()
-    fitresult, meta = io_tools.get_fitresult(args.inputFile, args.result, meta=True)
+    args = make_parser().parse_args()
+    fitresult, meta = io_tools.get_fitresult(args.infile, args.result, meta=True)
     config = plot_tools.load_config(args.config)
 
     meta = {
