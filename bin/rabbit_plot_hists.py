@@ -267,6 +267,11 @@ def make_parser():
         default=None,
         help="Label for uncertainty shown in the (ratio) plot",
     )
+    parser.add_argument(
+        "--dataCovariance",
+        action="store_true",
+        help="Use covariance information to plot the data uncertainty",
+    )
     return parser
 
 
@@ -298,6 +303,7 @@ def make_plot(
     is_normalized=False,
     binwnorm=1.0,
     counts=True,
+    dataCovariance=False,
 ):
     ratio = not args.noLowerPanel and h_data is not None
     diff = not args.noLowerPanel and args.diff and h_data is not None
@@ -405,6 +411,25 @@ def make_plot(
         h_inclusive = hh.scaleHist(h_inclusive, scale)
 
     xlabel = plot_tools.get_axis_label(config, axes_names, args.xlabel)
+
+    # plot prediction first, the data on top
+    zorder_pred = 0
+    zorder_data = 1
+
+    hatchstyle_pred = None
+    facecolor_pred = "silver"
+    facecolor_alpha_pred = 0.5
+    pred_label = "Prefit model" if args.unfoldedXsec else args.predName
+
+    # for uncertaity bands
+    edges = h_inclusive.axes[0].edges
+
+    # need to divide by bin width
+    binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
+    if h_inclusive.storage_type != hist.storage.Weight:
+        raise ValueError(
+            f"Did not find uncertainties in {fittype} hist. Make sure you run rabbit_fit with --computeHistErrors!"
+        )
 
     if ratio or diff:
         if args.ratioToData:
@@ -614,49 +639,122 @@ def make_plot(
                 )
 
     if data:
-        hep.histplot(
-            h_data,
-            yerr=True if counts else h_data.variances() ** 0.5,
-            histtype=histtype_data,
-            color="black",
-            label=args.dataName,
-            binwnorm=binwnorm,
-            ax=ax1,
-            alpha=1.0,
-            zorder=2,
-            flow="none",
-        )
+        if dataCovariance:
+            nom_data = h_data.values() / binwidth
+            std_data = np.sqrt(h_data.variances()) / binwidth
+            hatchstyle_data = None
+            linecolor_data = "red"  # "black"
+            facecolor_data = "red"  # silver"
+            facecolor_alpha_data = 0.5
 
-        if h_data_stat is not None:
-            var_stat = h_data_stat.values() ** 2
-            h_data_stat = h_data.copy()
-            h_data_stat.variances()[...] = var_stat
+            ax1.fill_between(
+                edges,
+                np.append((nom_data + std_data), ((nom_data + std_data))[-1]),
+                np.append((nom_data - std_data), ((nom_data - std_data))[-1]),
+                step="post",
+                facecolor=facecolor_data,
+                alpha=facecolor_alpha_data,
+                hatch=hatchstyle_data,
+                edgecolor="k",
+                zorder=zorder_data,
+                linewidth=0.0,
+            )
 
             hep.histplot(
-                h_data_stat,
-                yerr=True if counts else h_data_stat.variances() ** 0.5,
-                histtype=histtype_data,
-                color="black",
+                h_data,
+                histtype="step",
+                color=linecolor_data,
                 binwnorm=binwnorm,
-                capsize=2,
+                yerr=False,
                 ax=ax1,
-                alpha=1.0,
-                zorder=2,
+                linestyle="--",
+                zorder=zorder_data,
                 flow="none",
             )
+
+            extra_handles_upper.append(
+                plot_tools.LineBandPolygon(
+                    [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    closed=True,
+                    facecolor=facecolor_data,
+                    edgecolor=linecolor_data,
+                    linestyle="--",
+                    alpha=facecolor_alpha_data,
+                )
+            )
+            extra_labels_upper.append(args.dataName)
+        else:
+            hep.histplot(
+                h_data,
+                yerr=True if counts else h_data.variances() ** 0.5,
+                histtype=histtype_data,
+                color="black",
+                label=args.dataName,
+                binwnorm=binwnorm,
+                ax=ax1,
+                alpha=1.0,
+                zorder=zorder_data,
+                flow="none",
+            )
+
+            if h_data_stat is not None:
+                var_stat = h_data_stat.values() ** 2
+                h_data_stat = h_data.copy()
+                h_data_stat.variances()[...] = var_stat
+
+                hep.histplot(
+                    h_data_stat,
+                    yerr=True if counts else h_data_stat.variances() ** 0.5,
+                    histtype=histtype_data,
+                    color="black",
+                    binwnorm=binwnorm,
+                    capsize=2,
+                    ax=ax1,
+                    alpha=1.0,
+                    zorder=zorder_data,
+                    flow="none",
+                )
+
     if (args.unfoldedXsec or len(h_stack) == 0) and not args.noPrefit:
         hep.histplot(
             h_inclusive,
             yerr=False,
             histtype="step",
             color="black",
-            label="Prefit model" if args.unfoldedXsec else args.predName,
             binwnorm=binwnorm,
             ax=ax1,
             alpha=1.0,
-            zorder=2,
+            zorder=zorder_pred,
+            label=pred_label if not args.upperPanelUncertaintyBand else None,
             flow="none",
         )
+
+        if args.upperPanelUncertaintyBand:
+            nom = h_inclusive.values() / binwidth
+            std = np.sqrt(h_inclusive.variances()) / binwidth
+
+            ax1.fill_between(
+                edges,
+                np.append((nom + std), ((nom + std))[-1]),
+                np.append((nom - std), ((nom - std))[-1]),
+                step="post",
+                facecolor=facecolor_pred,
+                alpha=facecolor_alpha_pred,
+                zorder=zorder_pred,
+                hatch=hatchstyle_pred,
+                edgecolor="k",
+                linewidth=0.0,
+            )
+
+            extra_handles_upper.append(
+                plot_tools.LineBandPolygon(
+                    [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    closed=True,
+                    facecolor=facecolor_pred,
+                    edgecolor="black",
+                )
+            )
+            extra_labels_upper.append(pred_label)
 
     if args.ylim is None and binwnorm is None:
         max_y = np.max(h_inclusive.values() + h_inclusive.variances() ** 0.5)
@@ -729,88 +827,103 @@ def make_plot(
         else:
             cutoff = 0.01
 
-        if args.ratioToData:
-            h_num = h_inclusive
-            h_den = h_data
-        else:
-            h_num = h_data
-            h_den = h_inclusive
-
         if diff:
-            h0 = hh.addHists(h_num, h_num, scale2=-1)
-            h2 = hh.addHists(h_num, h_den, scale2=-1)
-            if h_data_stat is not None:
-                if args.ratioToData:
-                    h2_stat = hh.addHists(h_num, h_data_stat, scale2=-1)
-                else:
-                    h2_stat = hh.addHists(h_data_stat, h_den, scale2=-1)
+            r_data = lambda x, y: hh.addHists(x, y, scale2=-1)
+            r_pred = lambda x, y: hh.addHists(x, y, scale2=-1)
+            r_stat = lambda x, y: hh.addHists(x, y, scale2=-1)
         else:
-            h0 = hh.divideHists(
-                h_num,
-                h_num,
+            r_data = lambda x, y: hh.divideHists(
+                x,
+                y,
                 cutoff=1e-8,
                 rel_unc=True,
                 flow=False,
                 by_ax_name=False,
             )
-            h2 = hh.divideHists(h_data, h_den, cutoff=cutoff, rel_unc=True)
-            if h_data_stat is not None:
-                h2_stat = hh.divideHists(
-                    h_data_stat, h_den, cutoff=cutoff, rel_unc=True
-                )
+            r_pred = lambda x, y: hh.divideHists(x, y, cutoff=cutoff, rel_unc=True)
+            r_stat = lambda x, y: hh.divideHists(x, y, cutoff=cutoff, rel_unc=True)
 
+        h_den = h_data if args.ratioToData else h_inclusive
+
+        if not dataCovariance:
+            ax2.axhline(0 if diff else 1, linestyle="--", color="black")
+
+        # prediction
         hep.histplot(
-            h0,
+            r_pred(h_inclusive, h_den),
             histtype="step",
-            color="grey",
-            alpha=0.5,
+            color="black",
             yerr=False,
             ax=ax2,
-            linewidth=2,
+            zorder=zorder_pred,
             flow="none",
         )
 
         if data:
-            hep.histplot(
-                h2,
-                histtype="errorbar",
-                color="black",
-                yerr=True if counts else h2.variances() ** 0.5,
-                linewidth=2,
-                ax=ax2,
-                zorder=2,
-                flow="none",
-            )
-            if h_data_stat is not None:
+            h2 = r_data(h_data, h_den)
+            if dataCovariance:
+                den_data = 1 if diff else h_den.values() / binwidth
+
                 hep.histplot(
-                    h2_stat,
-                    histtype="errorbar",
-                    color="black",
-                    yerr=True if counts else h2_stat.variances() ** 0.5,
-                    linewidth=2,
-                    capsize=2,
+                    r_pred(h_data, h_den),
+                    histtype="step",
+                    color=linecolor_data,
+                    yerr=False,
                     ax=ax2,
-                    zorder=2,
+                    linestyle="--",
+                    zorder=zorder_data,
                     flow="none",
                 )
 
-        # for uncertaity bands
-        edges = h_den.axes[0].edges
+                ax2.fill_between(
+                    edges,
+                    np.append(
+                        (nom_data + std_data) / den_data,
+                        ((nom_data + std_data) / den_data)[-1],
+                    ),
+                    np.append(
+                        (nom_data - std_data) / den_data,
+                        ((nom_data - std_data) / den_data)[-1],
+                    ),
+                    step="post",
+                    facecolor=facecolor_data,
+                    alpha=facecolor_alpha_data,
+                    zorder=zorder_data,
+                    hatch=hatchstyle_data,
+                    edgecolor="k",
+                    linewidth=0.0,
+                )
 
-        # need to divide by bin width
-        binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
-        if h_den.storage_type != hist.storage.Weight:
-            raise ValueError(
-                f"Did not find uncertainties in {fittype} hist. Make sure you run rabbit_fit with --computeHistErrors!"
-            )
+            else:
+                hep.histplot(
+                    h2,
+                    histtype="errorbar",
+                    color="black",
+                    yerr=True if counts else h2.variances() ** 0.5,
+                    linewidth=2,
+                    ax=ax2,
+                    zorder=zorder_data,
+                    flow="none",
+                )
+                if h_data_stat is not None:
+                    h2_stat = r_stat(h_data_stat, h_den)
+                    hep.histplot(
+                        h2_stat,
+                        histtype="errorbar",
+                        color="black",
+                        yerr=True if counts else h2_stat.variances() ** 0.5,
+                        linewidth=2,
+                        capsize=2,
+                        ax=ax2,
+                        zorder=zorder_data,
+                        flow="none",
+                    )
 
         if not args.noUncertainty:
             nom = h_inclusive.values() / binwidth
             std = np.sqrt(h_inclusive.variances()) / binwidth
+            den = 1 if diff else h_den.values() / binwidth
 
-            hatchstyle = None
-            facecolor = "silver"
-            # label_unc = "Pred. unc."
             default_unc_label = (
                 "Normalized model unc." if is_normalized else f"{args.predName} unc."
             )
@@ -818,62 +931,19 @@ def make_plot(
             if args.uncertaintyLabel:
                 label_unc = args.uncertaintyLabel
 
-            if diff:
-                # The difference panel is centered at zero; only the upper-panel
-                # uncertainty band is centered on the nominal prediction.
-                lower_hi = std
-                lower_lo = -std
-                ax2.fill_between(
-                    edges,
-                    np.append(lower_hi, lower_hi[-1]),
-                    np.append(lower_lo, lower_lo[-1]),
-                    step="post",
-                    facecolor=facecolor,
-                    zorder=0,
-                    hatch=hatchstyle,
-                    edgecolor="k",
-                    linewidth=0.0,
-                    label=label_unc if not args.upperPanelUncertaintyBand else None,
-                )
-                if args.upperPanelUncertaintyBand:
-                    ax1.fill_between(
-                        edges,
-                        np.append((nom + std), ((nom + std))[-1]),
-                        np.append((nom - std), ((nom - std))[-1]),
-                        step="post",
-                        facecolor=facecolor,
-                        zorder=0,
-                        hatch=hatchstyle,
-                        edgecolor="k",
-                        linewidth=0.0,
-                        label=label_unc,
-                    )
-            else:
-                ax2.fill_between(
-                    edges,
-                    np.append((nom + std) / nom, ((nom + std) / nom)[-1]),
-                    np.append((nom - std) / nom, ((nom - std) / nom)[-1]),
-                    step="post",
-                    facecolor=facecolor,
-                    zorder=0,
-                    hatch=hatchstyle,
-                    edgecolor="k",
-                    linewidth=0.0,
-                    label=label_unc if not args.upperPanelUncertaintyBand else None,
-                )
-                if args.upperPanelUncertaintyBand:
-                    ax1.fill_between(
-                        edges,
-                        np.append((nom + std), ((nom + std))[-1]),
-                        np.append((nom - std), ((nom - std))[-1]),
-                        step="post",
-                        facecolor=facecolor,
-                        zorder=0,
-                        hatch=hatchstyle,
-                        edgecolor="k",
-                        linewidth=0.0,
-                        label=label_unc,
-                    )
+            ax2.fill_between(
+                edges,
+                np.append((nom + std) / den, ((nom + std) / den)[-1]),
+                np.append((nom - std) / den, ((nom - std) / den)[-1]),
+                step="post",
+                facecolor=facecolor_pred,
+                alpha=facecolor_alpha_pred,
+                zorder=zorder_pred,
+                hatch=hatchstyle_pred,
+                edgecolor="k",
+                linewidth=0.0,
+                label=label_unc if not args.upperPanelUncertaintyBand else None,
+            )
 
         if (
             args.showVariations in ["lower", "both"]
@@ -1086,9 +1156,9 @@ def make_plot(
             extra_handles=extra_handles_upper,
             extra_labels=extra_labels_upper,
             custom_handlers=(
-                ["bandfilled"]
+                ["bandfilled", "lineband"]
                 if any(alpha > 0 for alpha in args.fillVariationsAlphas)
-                else []
+                else ["lineband"]
             ),
             extra_text=text_pieces if not args.noExtraText else None,
             extra_text_loc=None if args.extraTextLoc is None else args.extraTextLoc[:2],
@@ -1185,6 +1255,15 @@ def make_plots(
             hist_stack = [hist_stack[{"processes": p}] for p in procs]
         else:
             hist_stack = []
+
+    if args.dataCovariance:
+        hist_data_cov = result[f"cov_data_obs"].get()
+
+        # from sklearn.decomposition import FactorAnalysis
+        # fa = FactorAnalysis(n_components=1)
+        # fa.fit(hist_data_cov)
+        # D_elements = fa.noise_variance_
+        # D = np.diag(D_elements)
 
     axes = [a for a in hist_inclusive.axes]
 
@@ -1405,18 +1484,45 @@ def make_plots(
         )
 
 
-def get_chi2(result, no_chi2=True, fittype="postfit"):
-    chi2_key = f"chi2_prefit" if fittype == "prefit" else "chi2"
-    ndf_key = f"ndf_prefit" if fittype == "prefit" else "ndf"
-    if not no_chi2 and fittype == "postfit" and result.get("postfit_profile", False):
-        # use saturated likelihood test if relevant
-        chi2 = 2.0 * result["nllvalreduced"]
-        ndf = result["ndfsat"]
-        return chi2, ndf, True
-    elif not no_chi2 and chi2_key in result:
-        return result[chi2_key], result[ndf_key], False
-    else:
+def get_chi2(result, no_chi2=True, fittype="postfit", chi2type="automatic"):
+    if no_chi2:
         return None, None, False
+
+    if fittype == "prefit":
+        if chi2type in [
+            "saturated",
+        ]:
+            raise RuntimeError("No saturated test statistic in prefit")
+
+        chi2_key = "chi2_prefit"
+        ndf_key = "ndf_prefit"
+        saturated = False
+    else:
+        chi2_key = "chi2"
+        ndf_key = "ndf"
+
+        if chi2type in ["automatic", "saturated"]:
+            if (
+                result.get("postfit_profile", False)
+                and "nllvalreduced" in result.keys()
+            ):
+                # use saturated likelihood test from actual fit
+                chi2 = 2.0 * result["nllvalreduced"]
+                ndf = result["ndfsat"]
+                return chi2, ndf, True
+            elif f"{chi2_key}_saturated" in result.keys():
+                # use saturated likelihood test from mapping
+                chi2_key += "_saturated"
+                ndf_key += "_saturated"
+                saturated = True
+            elif chi2type == "automatic":
+                saturated = False
+            else:
+                raise ValueError("No saturated test statistic in postfit results found")
+        else:
+            saturated = False
+
+    return result.get(chi2_key, None), result.get(ndf_key, None), saturated
 
 
 def main():
@@ -1495,6 +1601,7 @@ def main():
         varLabels=varLabels,
         varColors=varColors,
         varMarkers=args.varMarkers,
+        dataCovariance=args.dataCovariance,
     )
 
     results = fitresult.get("mappings", fitresult.get("physics_models"))
@@ -1522,13 +1629,17 @@ def main():
                     fitresult
                     if fittype == "postfit"
                     and (
-                        (instance_key == "BaseMapping" and args.chisq != "linear")
-                        or args.chisq == "saturated"
+                        instance_key
+                        in [
+                            "BaseMapping",
+                        ]
+                        and args.chisq != "linear"
                     )
                     else instance
                 ),
                 args.chisq in [" ", "none", None],
                 fittype,
+                args.chisq,
             )
 
             for channel, result in instance["channels"].items():

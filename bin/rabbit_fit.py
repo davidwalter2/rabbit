@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import copy
+
 import tensorflow as tf
 
 tf.config.experimental.enable_op_determinism()
@@ -12,7 +14,9 @@ from scipy.stats import chi2
 from rabbit import fitter, inputdata, parsing, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
+from rabbit.mappings import project
 from rabbit.poi_models import helpers as ph
+from rabbit.poi_models import poi_model
 from rabbit.tfhelpers import edmval_cov
 
 from wums import output_tools, logging  # isort: skip
@@ -138,6 +142,12 @@ def make_parser():
         help="save postfit histograms with each noi varied up to down",
     )
     parser.add_argument(
+        "--computeSaturatedProjectionTests",
+        default=False,
+        action="store_true",
+        help="Compute the saturated likelihood test for Project mappings",
+    )
+    parser.add_argument(
         "--noChi2",
         default=False,
         action="store_true",
@@ -248,7 +258,51 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
             )
 
             if aux[-2] is not None:
-                ws.add_chi2(aux[-2], aux[-1], prefit, mapping)
+                chi2val = float(aux[-2])
+                ndf = int(aux[-1])
+                p_val = chi2.sf(chi2val, ndf)
+
+                logger.info("Linear chi2:")
+                logger.info(f"    ndof: {ndf}")
+                logger.info(f"    chi2/ndf = {round(chi2val)}")
+                logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
+
+                ws.add_chi2(chi2val, ndf, prefit, mapping)
+
+            if (
+                not prefit
+                and type(mapping) == project.Project
+                and args.computeSaturatedProjectionTests
+            ):
+                # saturated likelihood test
+
+                saturated_model = poi_model.SaturatedProjectModel(
+                    fitter.indata, mapping.channel_info
+                )
+                composite_model = poi_model.CompositePOIModel(
+                    [fitter.poi_model, saturated_model]
+                )
+
+                fitter_saturated = copy.deepcopy(fitter)
+                fitter_saturated.init_fit_parms(
+                    composite_model,
+                    args.setConstraintMinimum,
+                    unblind=args.unblind,
+                    freeze_parameters=args.freezeParameters,
+                )
+                cb = fitter_saturated.minimize()
+                nllvalreduced = fitter_saturated.reduced_nll().numpy()
+
+                ndf = saturated_model.npoi
+                chi2val = 2.0 * (ws.results["nllvalreduced"] - nllvalreduced)
+                p_val = chi2.sf(chi2val, ndf)
+
+                logger.info("Saturated chi2:")
+                logger.info(f"    ndof: {ndf}")
+                logger.info(f"    2*deltaNLL: {round(chi2val, 2)}")
+                logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
+
+                ws.add_chi2(chi2val, ndf, prefit, mapping, saturated=True)
 
         if args.saveHistsPerProcess and not mapping.skip_per_process:
             logger.info(f"Save processes histogram for {mapping.key}")

@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 
 import h5py
 import hist
@@ -170,14 +171,22 @@ class Workspace:
         label=None,
         channel=None,
         mapping_key=None,
+        is_matrix=False,
         flow=False,
     ):
         if not isinstance(axes, (list, tuple, np.ndarray)):
             axes = [axes]
         if start is not None or stop is not None:
-            values = values[start:stop]
+            if is_matrix:
+                values = values[start:stop, start:stop]
+            else:
+                values = values[start:stop]
+
             if variances is not None:
-                variances = variances[start:stop]
+                if is_matrix:
+                    variances = variances[start:stop, start:stop]
+                else:
+                    variances = variances[start:stop]
 
         h = self.hist(name, axes, values, variances, label, flow=flow)
         self.dump_hist(h, mapping_key, channel)
@@ -185,8 +194,10 @@ class Workspace:
     def add_value(self, value, name, *args, **kwargs):
         self.dump_obj(value, name, *args, **kwargs)
 
-    def add_chi2(self, chi2, ndf, prefit, mapping):
+    def add_chi2(self, chi2, ndf, prefit, mapping, saturated=False):
         postfix = "_prefit" if prefit else ""
+        if saturated:
+            postfix += "_saturated"
         self.add_value(int(ndf), "ndf" + postfix, mapping.key)
         self.add_value(float(chi2), "chi2" + postfix, mapping.key)
 
@@ -247,6 +258,37 @@ class Workspace:
                 label="observed number of events for fit",
                 **opts,
             )
+
+            if data_cov_inv is not None:
+                axes_x = deepcopy(axes)
+                axes_y = deepcopy(axes)
+                for ax, ay in zip(axes_x, axes_y):
+                    ax.__dict__["name"] = f"{ax.name}_x"
+                    ay.__dict__["name"] = f"{ay.name}_y"
+
+                self.add_hist(
+                    "cov_data_obs",
+                    [*axes_x, *axes_y],
+                    cov_data_obs,
+                    label="covariance of observed number of events in data",
+                    is_matrix=True,
+                    **opts,
+                )
+            if nobs_cov_inv is not None:
+                axes_x = deepcopy(axes)
+                axes_y = deepcopy(axes)
+                for ax, ay in zip(axes_x, axes_y):
+                    ax.__dict__["name"] = f"{ax.name}_x"
+                    ay.__dict__["name"] = f"{ay.name}_y"
+
+                self.add_hist(
+                    "cov_nobs_obs",
+                    [*axes_x, *axes_y],
+                    cov_nobs,
+                    is_matrix=True,
+                    label="covariance of observed number of events in data",
+                    **opts,
+                )
 
             start = stop
 

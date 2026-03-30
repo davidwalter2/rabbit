@@ -129,62 +129,21 @@ class Fitter:
 
         self.chisqFit = options.chisqFit
         self.covarianceFit = options.covarianceFit
-        self.prefitUnconstrainedNuisanceUncertainty = (
+
+        self.do_blinding = do_blinding
+        self.prefit_unconstrained_nuisance_uncertainty = (
             options.prefitUnconstrainedNuisanceUncertainty
         )
 
-        self.poi_model = poi_model
-
-        self.do_blinding = do_blinding
-        if self.do_blinding:
-            self._blinding_offsets_poi = tf.Variable(
-                tf.ones([self.poi_model.npoi], dtype=self.indata.dtype),
-                trainable=False,
-                name="offset_poi",
-            )
-            self._blinding_offsets_theta = tf.Variable(
-                tf.zeros([self.indata.nsyst], dtype=self.indata.dtype),
-                trainable=False,
-                name="offset_theta",
-            )
-            self.init_blinding_values(options.unblind)
-
-        self.parms = np.concatenate([self.poi_model.pois, self.indata.systs])
-
-        # tf tensor containing default constraint minima
-        theta0default = np.zeros(self.indata.nsyst)
-        for parm, val in options.setConstraintMinimum:
-            idx = np.where(self.indata.systs.astype(str) == parm)[0]
-            if len(idx) != 1:
-                raise RuntimeError(
-                    f"Expect to find exactly one match for {parm} to set constraint minimum, but found {len(idx)}"
-                )
-            theta0default[idx[0]] = val
-
-        self.theta0default = tf.convert_to_tensor(
-            theta0default, dtype=self.indata.dtype
+        # --- fit params
+        self.init_fit_parms(
+            poi_model,
+            options.setConstraintMinimum,
+            unblind=options.unblind,
+            freeze_parameters=options.freezeParameters,
         )
 
-        # tf variable containing all fit parameters
-        if self.poi_model.npoi > 0:
-            xdefault = tf.concat(
-                [self.poi_model.xpoidefault, self.theta0default], axis=0
-            )
-        else:
-            xdefault = self.theta0default
-
-        self.x = tf.Variable(xdefault, trainable=True, name="x")
-
-        # for freezing parameters
-        self.frozen_params = []
-        self.frozen_params_mask = tf.Variable(
-            tf.zeros_like(self.x, dtype=tf.bool), trainable=False, dtype=tf.bool
-        )
-
-        self.frozen_indices = np.array([])
-        self.freeze_params(options.freezeParameters)
-
-        # observed number of events per bin
+        # --- observed number of events per bin
         self.nobs = tf.Variable(
             tf.zeros_like(self.indata.data_obs), trainable=False, name="nobs"
         )
@@ -211,21 +170,10 @@ class Fitter:
                 # provided covariance
                 self.data_cov_inv = self.indata.data_cov_inv
 
-        # constraint minima for nuisance parameters
-        self.theta0 = tf.Variable(
-            self.theta0default,
-            trainable=False,
-            name="theta0",
-        )
-        self.var_theta0 = tf.where(
-            self.indata.constraintweights == 0.0,
-            tf.zeros_like(self.indata.constraintweights),
-            tf.math.reciprocal(self.indata.constraintweights),
-        )
-
         # FIXME for now this is needed even if binByBinStat is off because of how it is used in the global impacts
         #  and uncertainty band computations (gradient is allowed to be zero or None and then propagated or skipped only later)
 
+        # --- MC stat
         # global observables for mc stat uncertainty
         if self.binByBinStatMode == "full":
             self.beta_shape = self.indata.sumw.shape
@@ -308,14 +256,83 @@ class Fitter:
             self.expected_yield(), trainable=False, name="nexpnom"
         )
 
+    def init_fit_parms(
+        self,
+        poi_model,
+        set_constraint_minimum=[],
+        unblind=False,
+        freeze_parameters=[],
+    ):
+        self.poi_model = poi_model
+
+        if self.do_blinding:
+            self._blinding_offsets_poi = tf.Variable(
+                tf.ones([self.poi_model.npoi], dtype=self.indata.dtype),
+                trainable=False,
+                name="offset_poi",
+            )
+            self._blinding_offsets_theta = tf.Variable(
+                tf.zeros([self.indata.nsyst], dtype=self.indata.dtype),
+                trainable=False,
+                name="offset_theta",
+            )
+            self.init_blinding_values(unblind)
+
+        self.parms = np.concatenate([self.poi_model.pois, self.indata.systs])
+
+        # tf tensor containing default constraint minima
+        theta0default = np.zeros(self.indata.nsyst)
+        for parm, val in set_constraint_minimum:
+            idx = np.where(self.indata.systs.astype(str) == parm)[0]
+            if len(idx) != 1:
+                raise RuntimeError(
+                    f"Expect to find exactly one match for {parm} to set constraint minimum, but found {len(idx)}"
+                )
+            theta0default[idx[0]] = val
+
+        self.theta0default = tf.convert_to_tensor(
+            theta0default, dtype=self.indata.dtype
+        )
+
+        # tf variable containing all fit parameters
+        if self.poi_model.npoi > 0:
+            xdefault = tf.concat(
+                [self.poi_model.xpoidefault, self.theta0default], axis=0
+            )
+        else:
+            xdefault = self.theta0default
+
+        self.x = tf.Variable(xdefault, trainable=True, name="x")
+
         # parameter covariance matrix
         self.cov = tf.Variable(
             self.prefit_covariance(
-                unconstrained_err=self.prefitUnconstrainedNuisanceUncertainty
+                unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
             ),
             trainable=False,
             name="cov",
         )
+
+        # constraint minima for nuisance parameters
+        self.theta0 = tf.Variable(
+            self.theta0default,
+            trainable=False,
+            name="theta0",
+        )
+        self.var_theta0 = tf.where(
+            self.indata.constraintweights == 0.0,
+            tf.zeros_like(self.indata.constraintweights),
+            tf.math.reciprocal(self.indata.constraintweights),
+        )
+
+        # for freezing parameters
+        self.frozen_params = []
+        self.frozen_params_mask = tf.Variable(
+            tf.zeros_like(self.x, dtype=tf.bool), trainable=False, dtype=tf.bool
+        )
+
+        self.frozen_indices = np.array([])
+        self.freeze_params(freeze_parameters)
 
         # determine if problem is linear (ie likelihood is purely quadratic)
         self.is_linear = (
@@ -325,6 +342,35 @@ class Fitter:
             and self.indata.systematic_type == "normal"
             and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
         )
+
+        # force retrace of @tf.function methods since self.x shape may have changed
+        for name in dir(type(self)):
+            val = getattr(type(self), name, None)
+            if hasattr(val, "python_function"):
+                setattr(
+                    self,
+                    name,
+                    tf.function(val.python_function.__get__(self, type(self))),
+                )
+
+    def __deepcopy__(self, memo):
+        import copy
+
+        # Instance-level tf.function overrides (set by init_fit_parms to force retracing)
+        # contain FuncGraph objects that cannot be deepcopied. Strip them before copying
+        # so the copy falls back to the class-level @tf.function methods and retraces.
+        jit_overrides = {
+            name
+            for name in self.__dict__
+            if hasattr(getattr(type(self), name, None), "python_function")
+        }
+        state = {k: v for k, v in self.__dict__.items() if k not in jit_overrides}
+        cls = type(self)
+        obj = cls.__new__(cls)
+        memo[id(self)] = obj
+        for k, v in state.items():
+            setattr(obj, k, copy.deepcopy(v, memo))
+        return obj
 
     def load_fitresult(self, fitresult_file, fitresult_key):
         # load results from external fit and set postfit value and covariance elements for common parameters
@@ -486,7 +532,10 @@ class Fitter:
 
     def prefit_covariance(self, unconstrained_err=0.0):
         # free parameters are taken to have zero uncertainty for the purposes of prefit uncertainties
-        var_poi = tf.zeros([self.poi_model.npoi], dtype=self.indata.dtype)
+        var_poi = (
+            tf.ones([self.poi_model.npoi], dtype=self.indata.dtype)
+            * unconstrained_err**2
+        )
 
         # nuisances have their uncertainty taken from the constraint term, but unconstrained nuisances
         # are set to a placeholder uncertainty (zero by default) for the purposes of prefit uncertainties
@@ -549,7 +598,7 @@ class Fitter:
     def defaultassign(self):
         self.cov.assign(
             self.prefit_covariance(
-                unconstrained_err=self.prefitUnconstrainedNuisanceUncertainty
+                unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
             )
         )
         self.theta0defaultassign()
@@ -1032,7 +1081,7 @@ class Fitter:
                 profile,
                 pdexpdbeta,
                 pd2ldbeta2_pdexpdbeta if pdexpdbeta is not None else None,
-                self.prefitUnconstrainedNuisanceUncertainty,
+                self.prefit_unconstrained_nuisance_uncertainty,
             )
         else:
             impacts = None
@@ -1831,7 +1880,7 @@ class Fitter:
 
         fun = mapping.compute_flat if inclusive else mapping.compute_flat_per_process
 
-        aux = [None] * 4
+        aux = [None] * 6
         if (
             compute_cov
             or compute_variance
@@ -1871,8 +1920,6 @@ class Fitter:
                 mapping.ndf_reduction,
                 profile=profile,
             )
-            logger.info(f"chi2/ndf = {chi2val.numpy()}/{ndf.numpy()}")
-
             aux.append(chi2val)
             aux.append(ndf)
         else:
@@ -2096,6 +2143,7 @@ class Fitter:
         return val, grad, hess
 
     def fit(self):
+        logger.info("Perform iterative fit")
 
         def scipy_loss(xval):
             self.x.assign(xval)
