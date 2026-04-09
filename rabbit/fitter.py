@@ -386,41 +386,11 @@ class Fitter:
                 # H @ p_sub, each a single sm.matmul call. NOTE:
                 # SparseMatrixMatMul has no XLA kernel, so any tf.function
                 # that calls sm.matmul must be built with jit_compile=False.
-                rows, cols, vals = term["hess_sparse"]
-                rows_np = np.asarray(rows, dtype=np.int64)
-                cols_np = np.asarray(cols, dtype=np.int64)
-                vals_np = np.asarray(vals)
-                n_sub = int(len(params))
-                # tf.sparse.SparseTensor / sparse_tensor_to_csr_sparse_matrix
-                # requires canonical row-major lexicographic ordering of the
-                # (row, col) indices. The TensorWriter does not guarantee
-                # this for sparse-Hessian external terms, but in practice
-                # the data is often already sorted (e.g. when it comes from
-                # a SparseHist whose underlying flat indices are in
-                # row-major order). Detect that fast path with an O(nnz)
-                # check and skip the much slower np.lexsort -- on a 329M-nnz
-                # input the lexsort alone takes ~50 s.
-                if rows_np.size > 1 and bool(
-                    np.all(
-                        (rows_np[:-1] < rows_np[1:])
-                        | (
-                            (rows_np[:-1] == rows_np[1:])
-                            & (cols_np[:-1] <= cols_np[1:])
-                        )
-                    )
-                ):
-                    indices_sorted = np.stack([rows_np, cols_np], axis=1)
-                    vals_sorted = vals_np
-                else:
-                    order = np.lexsort((cols_np, rows_np))
-                    indices_sorted = np.stack([rows_np[order], cols_np[order]], axis=1)
-                    vals_sorted = vals_np[order]
-                hess_st = tf.SparseTensor(
-                    indices=tf.constant(indices_sorted, dtype=tf.int64),
-                    values=tf.constant(vals_sorted, dtype=self.indata.dtype),
-                    dense_shape=tf.constant([n_sub, n_sub], dtype=tf.int64),
-                )
-                tf_hess_csr = tf_sparse_csr.CSRSparseMatrix(hess_st)
+                # The TensorWriter sorts the indices into canonical
+                # row-major order at write time, so we can feed the
+                # SparseTensor straight to the CSR builder without an
+                # additional reorder step.
+                tf_hess_csr = tf_sparse_csr.CSRSparseMatrix(term["hess_sparse"])
 
             self.external_terms.append(
                 {

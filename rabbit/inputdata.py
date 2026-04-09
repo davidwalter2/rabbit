@@ -82,14 +82,11 @@ class FitInputData:
             self.sparse = not "hnorm" in f
 
             if self.sparse:
+                # The TensorWriter sorts the sparse norm/logk indices into
+                # canonical row-major order at write time, so consumers can
+                # rely on that without an extra tf.sparse.reorder call.
                 self.norm = makesparsetensor(f["hnorm_sparse"])
                 self.logk = makesparsetensor(f["hlogk_sparse"])
-                # Canonicalize index ordering once at load time. The fitter's
-                # sparse fast path reduces nonzero entries via row-keyed
-                # reductions; sorted row-major indices give coalesced memory
-                # access. tf.sparse.reorder sorts into row-major order.
-                self.norm = tf.sparse.reorder(self.norm)
-                self.logk = tf.sparse.reorder(self.logk)
                 # Pre-build a CSRSparseMatrix view of logk for use in the
                 # fitter's sparse matvec path via sm.matmul, which dispatches
                 # to a multi-threaded CSR kernel and is much faster per call
@@ -202,7 +199,9 @@ class FitInputData:
             #   params: 1D ndarray of parameter name strings
             #   grad_values: 1D float ndarray or None
             #   hess_dense: 2D float ndarray or None
-            #   hess_sparse: tuple (rows, cols, values) or None
+            #   hess_sparse: tf.sparse.SparseTensor or None
+            #     (sparsity pattern of the [npar_sub, npar_sub] Hessian;
+            #      same on-disk layout as hlogk_sparse / hnorm_sparse)
             self.external_terms = []
             if "external_terms" in f.keys():
                 names = [
@@ -226,19 +225,11 @@ class FitInputData:
                         if "hess_dense" in tg.keys()
                         else None
                     )
-                    hess_sparse = None
-                    if "hess_sparse" in tg.keys():
-                        hg = tg["hess_sparse"]
-                        idx_dset = hg["indices"]
-                        if "original_shape" in idx_dset.attrs:
-                            idx_shape = tuple(idx_dset.attrs["original_shape"])
-                            indices = np.asarray(idx_dset).reshape(idx_shape)
-                        else:
-                            indices = np.asarray(idx_dset)
-                        rows = indices[:, 0]
-                        cols = indices[:, 1]
-                        vals = np.asarray(hg["values"])
-                        hess_sparse = (rows, cols, vals)
+                    hess_sparse = (
+                        makesparsetensor(tg["hess_sparse"])
+                        if "hess_sparse" in tg.keys()
+                        else None
+                    )
                     self.external_terms.append(
                         {
                             "name": tname,

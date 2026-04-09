@@ -2187,10 +2187,38 @@ class TensorWriter:
                 elif term["hess_sparse"] is not None:
                     rows, cols, vals = term["hess_sparse"]
                     n = len(term["params"])
-                    indices = np.stack([rows, cols], axis=-1).astype(self.idxdtype)
+                    rows = np.asarray(rows, dtype=self.idxdtype)
+                    cols = np.asarray(cols, dtype=self.idxdtype)
+                    vals = np.asarray(vals, dtype=self.dtype)
+                    # Sort into canonical row-major order so the reader
+                    # (and downstream tf.sparse / CSR consumers) can skip
+                    # the reorder step. The fast path: if the input is
+                    # already canonical (typical when the source is a
+                    # SparseHist whose flat indices come in flat-index
+                    # order), skip the O(nnz log nnz) argsort entirely.
+                    # The check is a single vectorized O(nnz) pass and
+                    # is essentially free compared to the sort it avoids
+                    # (~50-150 s on 329M nnz).
+                    if rows.size > 1:
+                        drows = np.diff(rows)
+                        dcols = np.diff(cols)
+                        already_sorted = bool(
+                            np.all((drows > 0) | ((drows == 0) & (dcols >= 0)))
+                        )
+                        del drows, dcols
+                    else:
+                        already_sorted = True
+                    if not already_sorted:
+                        flat = np.ravel_multi_index((rows, cols), (n, n))
+                        sort_order = np.argsort(flat)
+                        del flat
+                        rows = rows[sort_order]
+                        cols = cols[sort_order]
+                        vals = vals[sort_order]
+                    indices = np.stack([rows, cols], axis=-1)
                     nbytes += h5pyutils_write.writeSparse(
                         indices,
-                        vals.astype(self.dtype),
+                        vals,
                         (n, n),
                         term_group,
                         "hess_sparse",
