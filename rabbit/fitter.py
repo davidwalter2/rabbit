@@ -2480,28 +2480,64 @@ class Fitter:
 
     def minimize(self):
         if self.is_linear:
-            logger.info(
-                "Likelihood is purely quadratic, solving by Cholesky decomposition instead of iterative fit"
-            )
-
-            # no need to do a minimization, simple matrix solve is sufficient
-            val, grad, hess = self.loss_val_grad_hess()
-
-            # use a Cholesky decomposition to easily detect the non-positive-definite case
-            chol = tf.linalg.cholesky(hess)
-
-            # FIXME catch this exception to mark failed toys and continue
-            if tf.reduce_any(tf.math.is_nan(chol)).numpy():
-                raise ValueError(
-                    "Cholesky decomposition failed, Hessian is not positive-definite"
+            if self.compute_cov:
+                logger.info(
+                    "Likelihood is purely quadratic, solving by Cholesky decomposition instead of iterative fit"
                 )
 
-            del hess
-            gradv = grad[..., None]
-            dx = tf.linalg.cholesky_solve(chol, -gradv)[:, 0]
-            del chol
+                # no need to do a minimization, simple matrix solve is sufficient
+                val, grad, hess = self.loss_val_grad_hess()
 
-            self.x.assign_add(dx)
+                # use a Cholesky decomposition to easily detect the non-positive-definite case
+                chol = tf.linalg.cholesky(hess)
+
+                # FIXME catch this exception to mark failed toys and continue
+                if tf.reduce_any(tf.math.is_nan(chol)).numpy():
+                    raise ValueError(
+                        "Cholesky decomposition failed, Hessian is not positive-definite"
+                    )
+
+                del hess
+                gradv = grad[..., None]
+                dx = tf.linalg.cholesky_solve(chol, -gradv)[:, 0]
+                del chol
+
+                self.x.assign_add(dx)
+            else:
+                # --noHessian: we must not allocate the dense [npar, npar]
+                # Hessian that the Cholesky path above builds. Solve the
+                # normal equation H @ dx = -grad iteratively via conjugate
+                # gradient using only Hessian-vector products, which is
+                # already exposed as self.loss_val_grad_hessp. For a
+                # purely quadratic NLL the Hessian is positive-definite
+                # and CG converges to machine precision in at most npar
+                # steps (typically far fewer for well-conditioned
+                # problems).
+                import scipy.sparse.linalg as _spla
+
+                logger.info(
+                    "Likelihood is purely quadratic, solving with "
+                    "Hessian-free conjugate gradient (--noHessian)"
+                )
+                val, grad = self.loss_val_grad()
+                grad_np = grad.numpy()
+                n = int(grad_np.shape[0])
+                dtype = grad_np.dtype
+
+                def _hvp_np(p_np):
+                    p_tf = tf.constant(p_np, dtype=self.x.dtype)
+                    _, _, hessp = self.loss_val_grad_hessp(p_tf)
+                    return hessp.numpy()
+
+                op = _spla.LinearOperator((n, n), matvec=_hvp_np, dtype=dtype)
+                dx_np, info = _spla.cg(op, -grad_np, rtol=1e-10, atol=0.0)
+                if info != 0:
+                    raise ValueError(
+                        f"CG solver did not converge (info={info}); the "
+                        "Hessian may not be positive-definite or the "
+                        "problem may be ill-conditioned"
+                    )
+                self.x.assign_add(tf.constant(dx_np, dtype=self.x.dtype))
 
             callback = None
         else:
