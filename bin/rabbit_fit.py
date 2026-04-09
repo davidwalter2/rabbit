@@ -363,9 +363,16 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
             )
 
         if args.computeVariations:
+            if fitter.cov is None:
+                raise RuntimeError(
+                    "--computeVariations requires the parameter covariance "
+                    "matrix and so is incompatible with --noHessian."
+                )
             if prefit:
                 cov_prefit = fitter.cov.numpy()
-                fitter.cov.assign(fitter.prefit_covariance(unconstrained_err=1.0))
+                fitter.cov.assign(
+                    fitter.prefit_covariance(unconstrained_err=1.0).to_dense()
+                )
 
             exp, aux = fitter.expected_events(
                 mapping,
@@ -574,8 +581,31 @@ def main():
     if args.eager:
         tf.config.run_functions_eagerly(True)
 
-    if args.noHessian and args.doImpacts:
-        raise Exception('option "--noHessian" only works without "--doImpacts"')
+    # --noHessian skips computing the postfit Hessian, so the dense
+    # parameter covariance matrix is never available. Any feature that
+    # needs the covariance is incompatible.
+    if args.noHessian:
+        _incompat = []
+        if args.doImpacts:
+            _incompat.append("--doImpacts")
+        if args.computeVariations:
+            _incompat.append("--computeVariations")
+        if args.saveHists and not args.noChi2:
+            _incompat.append("--saveHists (without --noChi2)")
+        if args.computeHistErrors:
+            _incompat.append("--computeHistErrors")
+        if args.computeHistErrorsPerProcess:
+            _incompat.append("--computeHistErrorsPerProcess")
+        if args.computeHistCov:
+            _incompat.append("--computeHistCov")
+        if args.computeHistImpacts:
+            _incompat.append("--computeHistImpacts")
+        if args.computeHistGaussianImpacts:
+            _incompat.append("--computeHistGaussianImpacts")
+        if args.externalPostfit is not None:
+            _incompat.append("--externalPostfit")
+        if _incompat:
+            raise Exception("--noHessian is incompatible with: " + ", ".join(_incompat))
 
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
@@ -693,7 +723,7 @@ def main():
 
                 ws.add_parms_hist(
                     values=ifitter.x,
-                    variances=tf.linalg.diag_part(ifitter.cov),
+                    variances=ifitter.var_prefit,
                     hist_name="parms_prefit",
                 )
 

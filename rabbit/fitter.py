@@ -124,6 +124,12 @@ class Fitter:
         self.minimizer_method = options.minimizerMethod
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
         self.jit_compile = getattr(options, "jitCompile", True)
+        # When --noHessian is requested the postfit Hessian is never
+        # computed, so the dense [npar, npar] covariance matrix should
+        # not be allocated. self.cov is set to None in that case and
+        # callers must use self.var_prefit (the diagonal vector form)
+        # for prefit uncertainties instead.
+        self.compute_cov = not getattr(options, "noHessian", False)
 
         if options.covarianceFit and options.chisqFit:
             raise Exception(
@@ -307,14 +313,28 @@ class Fitter:
 
         self.x = tf.Variable(xdefault, trainable=True, name="x")
 
-        # parameter covariance matrix
-        self.cov = tf.Variable(
-            self.prefit_covariance(
+        # Per-parameter prefit variance vector. Always allocated; the
+        # prefit covariance is intrinsically diagonal so this is the
+        # only form needed for prefit uncertainties.
+        self.var_prefit = tf.Variable(
+            self.prefit_variance(
                 unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
             ),
             trainable=False,
-            name="cov",
+            name="var_prefit",
         )
+
+        # Full parameter covariance matrix. Allocated only when the
+        # postfit Hessian will actually be computed; otherwise None to
+        # avoid the O(npar^2) allocation (94 GB for 108k parameters).
+        if self.compute_cov:
+            self.cov = tf.Variable(
+                tf.linalg.diag(self.var_prefit),
+                trainable=False,
+                name="cov",
+            )
+        else:
+            self.cov = None
 
         # regularization
         self.regularizers = []
@@ -488,6 +508,13 @@ class Fitter:
         self.x.assign(xvals)
 
         if cov_ext is not None:
+            if self.cov is None:
+                raise RuntimeError(
+                    "load_fitresult: external covariance was provided but "
+                    "the fitter was constructed with --noHessian (no full "
+                    "covariance is allocated). Construct the fitter without "
+                    "--noHessian to load an external covariance."
+                )
             covval = self.cov.numpy()
             covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
             self.cov.assign(tf.constant(covval))
@@ -623,23 +650,38 @@ class Fitter:
         elif self.binByBinStatType == "normal-additive":
             return tf.zeros(self.beta_shape, dtype=self.indata.dtype)
 
-    def prefit_covariance(self, unconstrained_err=0.0):
-        # free parameters are taken to have zero uncertainty for the purposes of prefit uncertainties
+    def prefit_variance(self, unconstrained_err=0.0):
+        """Per-parameter prefit variance vector of length npar.
+
+        Free parameters (POIs and unconstrained nuisances) are assigned a
+        placeholder variance of unconstrained_err**2 (zero by default).
+        Constrained nuisances take their variance from the constraint
+        term (1 / constraintweight).
+        """
         var_poi = (
             tf.ones([self.poi_model.npoi], dtype=self.indata.dtype)
             * unconstrained_err**2
         )
-
-        # nuisances have their uncertainty taken from the constraint term, but unconstrained nuisances
-        # are set to a placeholder uncertainty (zero by default) for the purposes of prefit uncertainties
         var_theta = tf.where(
             self.indata.constraintweights == 0.0,
             unconstrained_err**2,
             tf.math.reciprocal(self.indata.constraintweights),
         )
+        return tf.concat([var_poi, var_theta], axis=0)
 
-        invhessianprefit = tf.linalg.diag(tf.concat([var_poi, var_theta], axis=0))
-        return invhessianprefit
+    def prefit_covariance(self, unconstrained_err=0.0):
+        """Full prefit covariance as a tf.linalg.LinearOperatorDiag.
+
+        The prefit covariance is intrinsically diagonal, so we return a
+        LinearOperator that exposes a matrix-like interface (matvec, etc.)
+        without ever allocating the dense [npar, npar] form. Callers that
+        actually need a dense tensor can call .to_dense() explicitly.
+        """
+        return tf.linalg.LinearOperatorDiag(
+            self.prefit_variance(unconstrained_err=unconstrained_err),
+            is_self_adjoint=True,
+            is_positive_definite=True,
+        )
 
     @tf.function
     def val_jac(self, fun, *args, **kwargs):
@@ -689,11 +731,12 @@ class Fitter:
         self.beta.assign(self.beta0)
 
     def defaultassign(self):
-        self.cov.assign(
-            self.prefit_covariance(
-                unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
-            )
+        var_pre = self.prefit_variance(
+            unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
         )
+        self.var_prefit.assign(var_pre)
+        if self.cov is not None:
+            self.cov.assign(tf.linalg.diag(var_pre))
         self.theta0defaultassign()
         if self.binByBinStat:
             self.beta0defaultassign()
@@ -862,13 +905,23 @@ class Fitter:
             # the special handling of the diagonal case here speeds things up, but is also required
             # in case the prefit covariance has zero for some uncertainties (which is the default
             # for unconstrained nuisances for example) since the multivariate normal distribution
-            # requires a positive-definite covariance matrix
-            if tfh.is_diag(self.cov):
+            # requires a positive-definite covariance matrix.
+            # Under --noHessian self.cov is None and only the diagonal
+            # prefit variance vector is available, so we always take the
+            # diagonal branch in that case (sourcing the variances from
+            # var_prefit directly).
+            cov_is_diag = self.cov is None or tfh.is_diag(self.cov)
+            if cov_is_diag:
+                stddev = (
+                    tf.sqrt(self.var_prefit)
+                    if self.cov is None
+                    else tf.sqrt(tf.linalg.diag_part(self.cov))
+                )
                 self.x.assign(
                     tf.random.normal(
                         shape=[],
                         mean=self.x,
-                        stddev=tf.sqrt(tf.linalg.diag_part(self.cov)),
+                        stddev=stddev,
                         dtype=self.x.dtype,
                     )
                 )
