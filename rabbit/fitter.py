@@ -343,20 +343,29 @@ class Fitter:
 
         # External likelihood terms (additive g^T x + 0.5 x^T H x contributions
         # to the NLL). Resolve parameter name strings against the full fit
-        # parameter list (POIs + systs).
+        # parameter list (POIs + systs). Build a single name->index dict
+        # once so the per-term resolution is O(n) instead of O(n^2) -- the
+        # latter cost ~150 s on a 108k-parameter setup with a 108k-parameter
+        # external term.
         self.external_terms = []
         parms_str = self.parms.astype(str)
+        parms_idx = {name: i for i, name in enumerate(parms_str)}
+        if len(parms_idx) != len(parms_str):
+            raise RuntimeError(
+                "Duplicate parameter names in fitter parameter list; "
+                "external term resolution requires unique names."
+            )
         for term in self.indata.external_terms:
             params = np.asarray(term["params"]).astype(str)
             indices = np.empty(len(params), dtype=np.int64)
             for i, p in enumerate(params):
-                matches = np.where(parms_str == p)[0]
-                if len(matches) != 1:
+                j = parms_idx.get(p, -1)
+                if j < 0:
                     raise RuntimeError(
                         f"External likelihood term '{term['name']}' parameter "
-                        f"'{p}' matched {len(matches)} entries in fit parameters"
+                        f"'{p}' not found in fit parameters"
                     )
-                indices[i] = matches[0]
+                indices[i] = j
             tf_indices = tf.constant(indices, dtype=tf.int64)
 
             tf_grad = (
@@ -382,11 +391,33 @@ class Fitter:
                 cols_np = np.asarray(cols, dtype=np.int64)
                 vals_np = np.asarray(vals)
                 n_sub = int(len(params))
-                order = np.lexsort((cols_np, rows_np))
-                indices_sorted = np.stack([rows_np[order], cols_np[order]], axis=1)
+                # tf.sparse.SparseTensor / sparse_tensor_to_csr_sparse_matrix
+                # requires canonical row-major lexicographic ordering of the
+                # (row, col) indices. The TensorWriter does not guarantee
+                # this for sparse-Hessian external terms, but in practice
+                # the data is often already sorted (e.g. when it comes from
+                # a SparseHist whose underlying flat indices are in
+                # row-major order). Detect that fast path with an O(nnz)
+                # check and skip the much slower np.lexsort -- on a 329M-nnz
+                # input the lexsort alone takes ~50 s.
+                if rows_np.size > 1 and bool(
+                    np.all(
+                        (rows_np[:-1] < rows_np[1:])
+                        | (
+                            (rows_np[:-1] == rows_np[1:])
+                            & (cols_np[:-1] <= cols_np[1:])
+                        )
+                    )
+                ):
+                    indices_sorted = np.stack([rows_np, cols_np], axis=1)
+                    vals_sorted = vals_np
+                else:
+                    order = np.lexsort((cols_np, rows_np))
+                    indices_sorted = np.stack([rows_np[order], cols_np[order]], axis=1)
+                    vals_sorted = vals_np[order]
                 hess_st = tf.SparseTensor(
                     indices=tf.constant(indices_sorted, dtype=tf.int64),
-                    values=tf.constant(vals_np[order], dtype=self.indata.dtype),
+                    values=tf.constant(vals_sorted, dtype=self.indata.dtype),
                     dense_shape=tf.constant([n_sub, n_sub], dtype=tf.int64),
                 )
                 tf_hess_csr = tf_sparse_csr.CSRSparseMatrix(hess_st)
