@@ -965,6 +965,72 @@ class Fitter:
         else:
             return edmval_cov(grad, hess)
 
+    def edmval_cov_rows_hessfree(self, grad, row_indices, rtol=1e-10, maxiter=None):
+        """Hessian-free edmval + selected rows of the covariance matrix.
+
+        Used under --noHessian to avoid allocating the dense [npar, npar]
+        Hessian. Solves the linear systems
+
+            H v = grad        ->  edmval = 0.5 * grad^T v
+            H c_i = e_i       ->  c_i is the i-th column/row of cov
+
+        iteratively via scipy's conjugate gradient, feeding it a
+        LinearOperator backed by self.loss_val_grad_hessp. The Hessian
+        must be positive-definite; that's the case for a converged NLL
+        minimum (including the purely-quadratic --is_linear case).
+
+        Parameters
+        ----------
+        grad : tf.Tensor or array-like, shape [npar]
+            Gradient at the current x, already computed by the caller.
+        row_indices : iterable of int
+            Parameter indices to compute covariance rows for. Typically
+            the POI indices [0, npoi) concatenated with the NOI indices
+            (npoi + noiidxs).
+        rtol : float
+            Relative residual tolerance passed to scipy.sparse.linalg.cg.
+        maxiter : int or None
+            Maximum CG iterations per solve; None lets scipy choose.
+
+        Returns
+        -------
+        edmval : float
+        cov_rows : np.ndarray, shape [len(row_indices), npar]
+            Row i is (H^{-1})[row_indices[i], :]; diag entries give the
+            variances for those parameters.
+        """
+        import scipy.sparse.linalg as _spla
+
+        n = int(self.x.shape[0])
+        dtype = np.float64
+
+        def _hvp_np(p_np):
+            p_tf = tf.constant(p_np, dtype=self.x.dtype)
+            _, _, hessp = self.loss_val_grad_hessp(p_tf)
+            return hessp.numpy()
+
+        op = _spla.LinearOperator((n, n), matvec=_hvp_np, dtype=dtype)
+
+        grad_np = grad.numpy() if hasattr(grad, "numpy") else np.asarray(grad)
+        v, info = _spla.cg(op, grad_np, rtol=rtol, atol=0.0, maxiter=maxiter)
+        if info != 0:
+            raise ValueError(f"CG solver for edmval did not converge (info={info})")
+        edmval = 0.5 * float(np.dot(grad_np, v))
+
+        row_indices = np.asarray(list(row_indices), dtype=np.int64)
+        cov_rows = np.empty((len(row_indices), n), dtype=dtype)
+        for k, i in enumerate(row_indices):
+            e = np.zeros(n, dtype=dtype)
+            e[int(i)] = 1.0
+            c, info = _spla.cg(op, e, rtol=rtol, atol=0.0, maxiter=maxiter)
+            if info != 0:
+                raise ValueError(
+                    f"CG solver for cov row {int(i)} did not converge (info={info})"
+                )
+            cov_rows[k] = c
+
+        return edmval, cov_rows
+
     @tf.function
     def impacts_parms(self, hess):
 

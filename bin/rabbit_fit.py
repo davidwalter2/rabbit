@@ -428,6 +428,9 @@ def fit(args, fitter, ws, dofit=True):
             ws.add_1D_integer_hist(cb.loss_history, "epoch", "loss")
             ws.add_1D_integer_hist(cb.time_history, "epoch", "time")
 
+    # prefit variances as the default fallback for add_parms_hist below
+    parms_variances = None
+
     if not args.noHessian:
         # compute the covariance matrix and estimated distance to minimum
         _, grad, hess = fitter.loss_val_grad_hess()
@@ -467,6 +470,31 @@ def fit(args, fitter, ws, dofit=True):
                 global_impacts=True,
             )
 
+        parms_variances = tf.linalg.diag_part(fitter.cov)
+    else:
+        # --noHessian: avoid the full dense Hessian. Still compute edmval
+        # and the POI+NOI uncertainties via a Hessian-free conjugate
+        # gradient solve of H @ v = grad and H @ c_i = e_i, using only
+        # Hessian-vector products. The CG solves touch O(npar) memory
+        # per call instead of O(npar^2), so this works on problems
+        # where the full covariance would be infeasible.
+        _, grad = fitter.loss_val_grad()
+        npoi = int(fitter.poi_model.npoi)
+        noi_idx_in_x = np.asarray(fitter.indata.noiidxs, dtype=np.int64) + npoi
+        poi_noi_idx = np.concatenate([np.arange(npoi, dtype=np.int64), noi_idx_in_x])
+        edmval, cov_rows = fitter.edmval_cov_rows_hessfree(grad, poi_noi_idx)
+        logger.info(f"edmval: {edmval}")
+
+        # Build a full-length variance vector with the POI+NOI entries
+        # populated from the diagonal of the CG-solved rows and the rest
+        # left as NaN (we did not compute those). add_parms_hist stores
+        # the vector verbatim into the workspace.
+        n = int(fitter.x.shape[0])
+        parms_variances_np = np.full(n, np.nan, dtype=np.float64)
+        for k, i in enumerate(poi_noi_idx):
+            parms_variances_np[int(i)] = cov_rows[k, int(i)]
+        parms_variances = tf.constant(parms_variances_np, dtype=fitter.indata.dtype)
+
     nllvalreduced = fitter.reduced_nll().numpy()
 
     ndfsat = (
@@ -497,7 +525,7 @@ def fit(args, fitter, ws, dofit=True):
 
     ws.add_parms_hist(
         values=fitter.x,
-        variances=tf.linalg.diag_part(fitter.cov) if not args.noHessian else None,
+        variances=parms_variances,
         hist_name="parms",
     )
 
