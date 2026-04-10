@@ -10,7 +10,7 @@ import tensorflow_probability as tfp
 from tensorflow.python.ops.linalg.sparse import sparse_csr_matrix_ops as tf_sparse_csr
 from wums import logging
 
-from rabbit import io_tools
+from rabbit import external_likelihood, io_tools
 from rabbit import tfhelpers as tfh
 from rabbit.impacts import global_impacts, nonprofiled_impacts, traditional_impacts
 from rabbit.tfhelpers import edmval_cov
@@ -123,7 +123,20 @@ class Fitter:
         self.diagnostics = options.diagnostics
         self.minimizer_method = options.minimizerMethod
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
-        self.jit_compile = getattr(options, "jitCompile", True)
+        # jitCompile is tri-state: "auto" (default, enable in dense mode
+        # and disable in sparse mode), "on" (force on, warn-and-fall-back
+        # in sparse mode), or "off" (force off). Backwards compatibility:
+        # accept legacy True / False values from programmatic callers.
+        _jit_opt = getattr(options, "jitCompile", "auto")
+        if _jit_opt is True:
+            _jit_opt = "on"
+        elif _jit_opt is False:
+            _jit_opt = "off"
+        if _jit_opt not in ("auto", "on", "off"):
+            raise ValueError(
+                f"jitCompile must be one of 'auto', 'on', 'off'; got {_jit_opt!r}"
+            )
+        self.jit_compile = _jit_opt
         # When --noHessian is requested the postfit Hessian is never
         # computed, so the dense [npar, npar] covariance matrix should
         # not be allocated. self.cov is set to None in that case and
@@ -341,66 +354,14 @@ class Fitter:
         # one common regularization strength parameter
         self.tau = tf.Variable(1.0, trainable=True, name="tau", dtype=tf.float64)
 
-        # External likelihood terms (additive g^T x + 0.5 x^T H x contributions
-        # to the NLL). Resolve parameter name strings against the full fit
-        # parameter list (POIs + systs). Build a single name->index dict
-        # once so the per-term resolution is O(n) instead of O(n^2) -- the
-        # latter cost ~150 s on a 108k-parameter setup with a 108k-parameter
-        # external term.
-        self.external_terms = []
-        parms_str = self.parms.astype(str)
-        parms_idx = {name: i for i, name in enumerate(parms_str)}
-        if len(parms_idx) != len(parms_str):
-            raise RuntimeError(
-                "Duplicate parameter names in fitter parameter list; "
-                "external term resolution requires unique names."
-            )
-        for term in self.indata.external_terms:
-            params = np.asarray(term["params"]).astype(str)
-            indices = np.empty(len(params), dtype=np.int64)
-            for i, p in enumerate(params):
-                j = parms_idx.get(p, -1)
-                if j < 0:
-                    raise RuntimeError(
-                        f"External likelihood term '{term['name']}' parameter "
-                        f"'{p}' not found in fit parameters"
-                    )
-                indices[i] = j
-            tf_indices = tf.constant(indices, dtype=tf.int64)
-
-            tf_grad = (
-                tf.constant(term["grad_values"], dtype=self.indata.dtype)
-                if term["grad_values"] is not None
-                else None
-            )
-
-            tf_hess_dense = None
-            tf_hess_csr = None
-            if term["hess_dense"] is not None:
-                tf_hess_dense = tf.constant(term["hess_dense"], dtype=self.indata.dtype)
-            elif term["hess_sparse"] is not None:
-                # Build a CSRSparseMatrix view of the stored sparse Hessian
-                # for use in the closed-form external gradient/HVP path via
-                # sm.matmul. The Hessian is assumed symmetric, so the loss
-                # L = 0.5 x_sub^T H x_sub has gradient H @ x_sub and HVP
-                # H @ p_sub, each a single sm.matmul call. NOTE:
-                # SparseMatrixMatMul has no XLA kernel, so any tf.function
-                # that calls sm.matmul must be built with jit_compile=False.
-                # The TensorWriter sorts the indices into canonical
-                # row-major order at write time, so we can feed the
-                # SparseTensor straight to the CSR builder without an
-                # additional reorder step.
-                tf_hess_csr = tf_sparse_csr.CSRSparseMatrix(term["hess_sparse"])
-
-            self.external_terms.append(
-                {
-                    "name": term["name"],
-                    "indices": tf_indices,
-                    "grad": tf_grad,
-                    "hess_dense": tf_hess_dense,
-                    "hess_csr": tf_hess_csr,
-                }
-            )
+        # External likelihood terms (additive g^T x + 0.5 x^T H x
+        # contributions to the NLL). See rabbit.external_likelihood for
+        # the construction helper and the matching scalar evaluator.
+        self.external_terms = external_likelihood.build_tf_external_terms(
+            self.indata.external_terms,
+            self.parms,
+            self.indata.dtype,
+        )
 
         # constraint minima for nuisance parameters
         self.theta0 = tf.Variable(
@@ -2319,37 +2280,10 @@ class Fitter:
         return ln, lc, lbeta, lpenalty, beta
 
     def _compute_external_nll(self):
-        """Sum of external likelihood term contributions: sum_i (g_i^T x_sub + 0.5 x_sub^T H_i x_sub).
-
-        For sparse-Hessian terms this uses tf.linalg.sparse's CSR matmul,
-        which dispatches to a multi-threaded kernel and is much faster
-        per call than the previous element-wise gather-based form. The
-        autodiff gradient and HVP of 0.5 x^T H x via sm.matmul are
-        themselves single sm.matmul calls, so reverse-over-reverse autodiff
-        no longer rematerializes a 2D gather/scatter chain in the second-
-        order tape — that was the dominant cost on large external-Hessian
-        problems before this rewrite (e.g. jpsi: 329M-nnz prefit Hessian).
-        """
-        if not self.external_terms:
-            return None
-        total = tf.zeros([], dtype=self.indata.dtype)
-        for term in self.external_terms:
-            x_sub = tf.gather(self.x, term["indices"])
-            if term["grad"] is not None:
-                total = total + tf.reduce_sum(term["grad"] * x_sub)
-            if term["hess_dense"] is not None:
-                # 0.5 * x_sub^T H x_sub
-                total = total + 0.5 * tf.reduce_sum(
-                    x_sub * tf.linalg.matvec(term["hess_dense"], x_sub)
-                )
-            elif term["hess_csr"] is not None:
-                # Loss = 0.5 * x_sub^T H x_sub via CSR matvec (H symmetric).
-                Hx = tf.squeeze(
-                    tf_sparse_csr.matmul(term["hess_csr"], x_sub[:, None]),
-                    axis=-1,
-                )
-                total = total + 0.5 * tf.reduce_sum(x_sub * Hx)
-        return total
+        """Sum of external likelihood term contributions: sum_i (g_i^T x_sub + 0.5 x_sub^T H_i x_sub)."""
+        return external_likelihood.compute_external_nll(
+            self.external_terms, self.x, self.indata.dtype
+        )
 
     def _compute_nll(self, profile=True, full_nll=False):
         ln, lc, lbeta, lpenalty, beta = self._compute_nll_components(
@@ -2378,9 +2312,29 @@ class Fitter:
         #
         # SparseMatrixMatMul has no XLA kernel, so any tf.function that
         # uses it (via _compute_yields_noBBB in sparse mode) cannot be
-        # jit-compiled. Force jit_compile off in sparse mode regardless
-        # of the user's --jitCompile setting.
-        jit = self.jit_compile and not self.indata.sparse
+        # jit-compiled. Resolve the tri-state self.jit_compile setting:
+        #
+        #   "auto" -> enable jit in dense mode, silently disable in
+        #             sparse mode (the default; sparse mode just can't
+        #             use it).
+        #   "on"   -> enable jit when possible. In sparse mode emit a
+        #             warning and disable, since the user explicitly
+        #             asked for it but it's structurally impossible.
+        #   "off"  -> never enable jit.
+        if self.jit_compile == "off":
+            jit = False
+        elif self.jit_compile == "on":
+            if self.indata.sparse:
+                logger.warning(
+                    "--jitCompile=on requested but input data is sparse; "
+                    "XLA has no kernel for the sparse matmul ops used in "
+                    "sparse mode, so jit_compile will be disabled."
+                )
+                jit = False
+            else:
+                jit = True
+        else:  # "auto"
+            jit = not self.indata.sparse
 
         def _loss_val(self):
             return self._compute_loss()

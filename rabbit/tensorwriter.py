@@ -2152,13 +2152,11 @@ class TensorWriter:
                 )
                 beta_variations = None
 
-        # Write external likelihood terms
+        # Write external likelihood terms. Each term is written as a
+        # subgroup under "external_terms"; the reader iterates the
+        # subgroups directly, so no separate names list is needed.
         if self.external_terms:
             ext_group = f.create_group("external_terms")
-            create_dataset(
-                "external_term_names",
-                [t["name"] for t in self.external_terms],
-            )
             for term in self.external_terms:
                 term_group = ext_group.create_group(term["name"])
                 params_ds = term_group.create_dataset(

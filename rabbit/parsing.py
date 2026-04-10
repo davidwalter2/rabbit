@@ -212,13 +212,15 @@ def common_parser():
         "(forward-over-reverse, via tf.autodiff.ForwardAccumulator) is an alternative.",
     )
     parser.add_argument(
-        "--noJitCompile",
-        dest="jitCompile",
-        default=True,
-        action="store_false",
-        help="Disable XLA jit_compile=True on the loss/gradient/HVP tf.functions. "
-        "jit_compile is enabled by default and substantially speeds up sparse-mode fits "
-        "with very large numbers of parameters.",
+        "--jitCompile",
+        default="auto",
+        type=str,
+        choices=["auto", "on", "off"],
+        help="Control XLA jit_compile=True on the loss/gradient/HVP tf.functions. "
+        "'auto' (default) enables jit_compile in dense mode and disables it in "
+        "sparse mode (where the CSR matmul kernels have no XLA implementation). "
+        "'on' forces jit_compile on (falling back to off with a warning in sparse "
+        "mode). 'off' disables jit_compile unconditionally.",
     )
     parser.add_argument(
         "--chisqFit",
