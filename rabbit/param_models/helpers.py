@@ -14,3 +14,21 @@ def load_model(class_name, indata, *args, **kwargs):
         class_name, baseline_models, base_dir="rabbit.param_models"
     )
     return model.parse_args(indata, *args, **kwargs)
+
+
+def load_models(model_specs, indata, **kwargs):
+    """Load one or more param models and return a single model (or composite).
+
+    Args:
+        model_specs: list of lists, e.g. [["Mu"], ["ABCD", "nonprompt", "ch_A", ...]]
+        indata: FitInputData instance
+        **kwargs: passed to each model's parse_args (e.g. from vars(args))
+    """
+    from rabbit.param_models.param_model import CompositeParamModel
+
+    models = [load_model(spec[0], indata, *spec[1:], **kwargs) for spec in model_specs]
+    if len(models) == 1:
+        return models[0]
+    return CompositeParamModel(
+        models, allowNegativeParam=kwargs.get("allowNegativeParam", False)
+    )

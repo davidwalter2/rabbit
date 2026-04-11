@@ -264,8 +264,8 @@ def main():
 
     indata = inputdata.FitInputData(args.filename, args.pseudoData)
 
-    margs = args.paramModel
-    param_model = ph.load_model(margs[0], indata, *margs[1:], **vars(args))
+    model_specs = args.paramModel or [["Mu"]]
+    param_model = ph.load_models(model_specs, indata, **vars(args))
 
     ifitter = fitter.Fitter(indata, param_model, args, do_blinding=any(blinded_fits))
 

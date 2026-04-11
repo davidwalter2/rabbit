@@ -333,9 +333,12 @@ def common_parser():
     )
     parser.add_argument(
         "--paramModel",
-        default=["Mu"],
+        default=None,
         nargs="+",
-        help="Specify param model to be used to introduce non standard parameterization",
+        action="append",
+        help="Specify param model to be used to introduce non standard parameterization. "
+        "Can be specified multiple times to combine models via CompositeParamModel, "
+        "e.g. '--paramModel Mu --paramModel ABCD nonprompt ch_A ch_B ch_C ch_D'.",
     )
 
     parser.add_argument(
