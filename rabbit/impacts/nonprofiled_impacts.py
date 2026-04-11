@@ -43,7 +43,7 @@ def nonprofiled_impacts_parms(
         constraintweights: constraint weights for each nuisance parameter.
         systgroups: systematic group names.
         systgroupidxs: per-group lists of nuisance parameter indices.
-        nparams: total number of model parameters (nparams + nnui); offset from x index to theta0 index.
+        nparams: total number of model parameters (nparams + npou); offset from x index to theta0 index.
         minimize_fn: callable that runs the fit (no arguments).
         diagnostics: if True, log EDM after each minimization (requires loss_val_grad_hess_fn).
         loss_val_grad_hess_fn: callable returning (val, grad, hess); used only when diagnostics=True.

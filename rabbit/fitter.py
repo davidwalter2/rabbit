@@ -522,8 +522,8 @@ class Fitter:
 
     def get_model_nui(self):
         npoi = self.param_model.npoi
-        nnui = self.param_model.nnui
-        return self.x[npoi : npoi + nnui]
+        npou = self.param_model.npou
+        return self.x[npoi : npoi + npou]
 
     def get_poi(self):
         xpoi = self.x[: self.param_model.npoi]
@@ -845,7 +845,7 @@ class Fitter:
 
         nstat = (
             self.param_model.npoi
-            + self.param_model.nnui
+            + self.param_model.npou
             + self.indata.nsystnoconstraint
         )
         hess_stat = hess[:nstat, :nstat]

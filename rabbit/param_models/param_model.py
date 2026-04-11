@@ -11,9 +11,9 @@ class ParamModel:
         self.indata = indata
 
         # # a param model must set these attributes
-        # self.nparams = # total number of parameters (npoi + nnui)
+        # self.nparams = # total number of parameters (npoi + npou)
         # self.npoi = # number of true parameters of interest (POIs), reported as POIs in outputs
-        # self.nnui = # number of model nuisance parameters (= nparams - npoi)
+        # self.npou = # number of model nuisance parameters (= nparams - npoi)
         # self.params = # list of names for all parameters (POIs first, then model nuisances)
         # self.xparamdefault = # default values for all parameters (length nparams)
         # self.is_linear = # define if the model is linear in the parameters
@@ -35,7 +35,7 @@ class ParamModel:
         """
         Set default parameter values, used by different param models.
         Only the first npoi entries (true POIs) support the squaring transform;
-        model nuisance parameters (nnui entries) are always stored directly.
+        model nuisance parameters (npou entries) are always stored directly.
         """
         paramdefault = tf.ones([self.nparams], dtype=self.indata.dtype)
         if expectSignal is not None:
@@ -80,7 +80,7 @@ class CompositeParamModel(ParamModel):
 
         self.nparams = sum([m.nparams for m in param_models])
         self.npoi = sum([m.npoi for m in param_models])
-        self.nnui = sum([m.nnui for m in param_models])
+        self.npou = sum([m.npou for m in param_models])
 
         self.params = np.concatenate([m.params for m in param_models])
 
@@ -110,7 +110,7 @@ class Ones(ParamModel):
         self.indata = indata
         self.nparams = 0
         self.npoi = 0
-        self.nnui = 0
+        self.npou = 0
         self.params = np.array([])
         self.xparamdefault = tf.zeros([0], dtype=self.indata.dtype)
 
@@ -133,7 +133,7 @@ class Mu(ParamModel):
 
         self.nparams = self.indata.nsignals
         self.npoi = self.nparams
-        self.nnui = 0
+        self.npou = 0
 
         self.params = np.array([s for s in self.indata.signals])
 
@@ -206,7 +206,7 @@ class Mixture(ParamModel):
 
         self.nparams = len(primary_processes)
         self.npoi = self.nparams
-        self.nnui = 0
+        self.npou = 0
         self.params = np.array(
             [
                 f"{p}_{c}_mixing".encode()
@@ -279,7 +279,7 @@ class SaturatedProjectModel(ParamModel):
             ]
         )
         self.npoi = self.nparams
-        self.nnui = 0
+        self.npou = 0
 
         names = []
         for k, v in self.channel_info_mapping.items():

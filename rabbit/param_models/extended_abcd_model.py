@@ -30,7 +30,7 @@ class ExtendedABCD(ParamModel):
     Free parameters a_i, b_i, c_i, ax_i, bx_i for regions A, B, C, Ax, Bx.
     Region D is derived: D = C * Ax * B² / (Bx * A²) * mc_factor_D.
 
-    Parameters are pure model nuisances (npoi=0, nnui=5*n_bins). Positivity
+    Parameters are pure model nuisances (npoi=0, npou=5*n_bins). Positivity
     is enforced inside compute() via tf.square() on the raw fit variables.
 
     CLI syntax:
@@ -162,7 +162,7 @@ class ExtendedABCD(ParamModel):
         # Model attributes
         self.nparams = 5 * n
         self.npoi = 0
-        self.nnui = 5 * n
+        self.npou = 5 * n
         self.params = np.array(names)
         self.is_linear = False
         self.allowNegativeParam = False

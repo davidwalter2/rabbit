@@ -28,7 +28,7 @@ class SmoothABCD(ParamModel):
     Regions A, B, C have free parameters that follow an exponential polynomial
     along the smoothing axis; region D is derived as d = a·c/b · mc_factor_D.
 
-    Parameters are pure model nuisances (npoi=0, nnui=3·n_outer·(order+1)).
+    Parameters are pure model nuisances (npoi=0, npou=3·n_outer·(order+1)).
 
     CLI syntax:
         --paramModel SmoothABCD <axis> [order:N] <process> \\
@@ -216,7 +216,7 @@ class SmoothABCD(ParamModel):
         # Model attributes
         self.nparams = 3 * n_outer * (order + 1)
         self.npoi = 0
-        self.nnui = self.nparams
+        self.npou = self.nparams
         self.params = np.array(names)
         self.is_linear = False
         self.allowNegativeParam = False

@@ -91,7 +91,7 @@ class ABCD(ParamModel):
     where mc_factor_D_i = N_A^MC * N_C^MC / (N_B^MC * N_D^MC) accounts for
     non-unity MC templates.
 
-    Parameters are pure model nuisances (npoi=0, nnui=3*n_bins). Positivity
+    Parameters are pure model nuisances (npoi=0, npou=3*n_bins). Positivity
     is enforced inside compute() via tf.square() on the raw fit variables.
 
     CLI syntax:
@@ -196,7 +196,7 @@ class ABCD(ParamModel):
         # Model attributes
         self.nparams = 3 * n
         self.npoi = 0
-        self.nnui = 3 * n
+        self.npou = 3 * n
         self.params = np.array(names)
         self.is_linear = False
         self.allowNegativeParam = False

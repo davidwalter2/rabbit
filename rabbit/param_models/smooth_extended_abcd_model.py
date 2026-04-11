@@ -36,7 +36,7 @@ class SmoothExtendedABCD(ParamModel):
     polynomial along the smoothing axis; region D is derived:
         D = C * Ax * B² / (Bx * A²) * mc_factor_D.
 
-    Parameters are pure model nuisances (npoi=0, nnui=5·n_outer·(order+1)).
+    Parameters are pure model nuisances (npoi=0, npou=5·n_outer·(order+1)).
 
     CLI syntax:
         --paramModel SmoothExtendedABCD <axis> [order:N] <process> \\
@@ -242,7 +242,7 @@ class SmoothExtendedABCD(ParamModel):
         # Model attributes
         self.nparams = 5 * n_outer * (order + 1)
         self.npoi = 0
-        self.nnui = self.nparams
+        self.npou = self.nparams
         self.params = np.array(names)
         self.is_linear = False
         self.allowNegativeParam = False
