@@ -449,7 +449,9 @@ def fit(args, fitter, ws, dofit=True):
     nllvalreduced = fitter.reduced_nll().numpy()
 
     ndfsat = (
-        tf.size(fitter.nobs) - fitter.param_model.npoi - fitter.indata.nsystnoconstraint
+        tf.size(fitter.nobs)
+        - fitter.param_model.nparams
+        - fitter.indata.nsystnoconstraint
     ).numpy()
 
     chi2_val = 2.0 * nllvalreduced
