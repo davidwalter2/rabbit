@@ -9,6 +9,10 @@ baseline_models = {
     "ExtendedABCD": "extended_abcd_model",
     "SmoothABCD": "smooth_abcd_model",
     "SmoothExtendedABCD": "smooth_extended_abcd_model",
+    "ABCDIsoMT": "abcd_isomtmt_model",
+    "ExtendedABCDIsoMT": "abcd_isomtmt_model",
+    "SmoothABCDIsoMT": "abcd_isomtmt_model",
+    "SmoothExtendedABCDIsoMT": "abcd_isomtmt_model",
 }
 
 
