@@ -160,7 +160,6 @@ class ExtendedABCD(ParamModel):
             )
 
         # Model attributes
-        self.nparams = 5 * n
         self.npoi = 0
         self.npou = 5 * n
         self.params = np.array(names)

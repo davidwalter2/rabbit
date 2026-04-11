@@ -214,9 +214,8 @@ class SmoothABCD(ParamModel):
                     )
 
         # Model attributes
-        self.nparams = 3 * n_outer * (order + 1)
         self.npoi = 0
-        self.npou = self.nparams
+        self.npou = 3 * n_outer * (order + 1)
         self.params = np.array(names)
         self.is_linear = False
         self.allowNegativeParam = False

@@ -194,7 +194,6 @@ class ABCD(ParamModel):
             )
 
         # Model attributes
-        self.nparams = 3 * n
         self.npoi = 0
         self.npou = 3 * n
         self.params = np.array(names)

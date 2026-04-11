@@ -11,13 +11,17 @@ class ParamModel:
         self.indata = indata
 
         # # a param model must set these attributes
-        # self.nparams = # total number of parameters (npoi + npou)
         # self.npoi = # number of true parameters of interest (POIs), reported as POIs in outputs
-        # self.npou = # number of model nuisance parameters (= nparams - npoi)
+        # self.npou = # number of model nuisance parameters (parameters of uninterest)
         # self.params = # list of names for all parameters (POIs first, then model nuisances)
         # self.xparamdefault = # default values for all parameters (length nparams)
         # self.is_linear = # define if the model is linear in the parameters
         # self.allowNegativeParam = # define if the POI parameters can be negative or not
+
+    @property
+    def nparams(self):
+        """Total number of parameters: npoi + npou."""
+        return self.npoi + self.npou
 
     # class function to parse strings as given by the argparse input e.g. --paramModel <Model> <arg[0]> <args[1]> ...
     @classmethod
@@ -78,7 +82,6 @@ class CompositeParamModel(ParamModel):
 
         self.param_models = param_models
 
-        self.nparams = sum([m.nparams for m in param_models])
         self.npoi = sum([m.npoi for m in param_models])
         self.npou = sum([m.npou for m in param_models])
 
@@ -108,7 +111,6 @@ class Ones(ParamModel):
 
     def __init__(self, indata, **kwargs):
         self.indata = indata
-        self.nparams = 0
         self.npoi = 0
         self.npou = 0
         self.params = np.array([])
@@ -131,8 +133,7 @@ class Mu(ParamModel):
     def __init__(self, indata, expectSignal=None, allowNegativeParam=False, **kwargs):
         self.indata = indata
 
-        self.nparams = self.indata.nsignals
-        self.npoi = self.nparams
+        self.npoi = self.indata.nsignals
         self.npou = 0
 
         self.params = np.array([s for s in self.indata.signals])
@@ -204,8 +205,7 @@ class Mixture(ParamModel):
         )[0]
         self.all_idx = np.concatenate([self.primary_idxs, self.complementary_idxs])
 
-        self.nparams = len(primary_processes)
-        self.npoi = self.nparams
+        self.npoi = len(primary_processes)
         self.npou = 0
         self.params = np.array(
             [
@@ -272,13 +272,14 @@ class SaturatedProjectModel(ParamModel):
         self.indata = indata
         self.channel_info_mapping = channel_info
 
-        self.nparams = np.sum(
-            [
-                np.prod([a.size for a in v["axes"]]) if len(v["axes"]) else 1
-                for v in channel_info.values()
-            ]
+        self.npoi = int(
+            np.sum(
+                [
+                    np.prod([a.size for a in v["axes"]]) if len(v["axes"]) else 1
+                    for v in channel_info.values()
+                ]
+            )
         )
-        self.npoi = self.nparams
         self.npou = 0
 
         names = []
