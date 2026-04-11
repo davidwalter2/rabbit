@@ -8,6 +8,7 @@ baseline_models = {
     "ABCD": "abcd_model",
     "ExtendedABCD": "extended_abcd_model",
     "SmoothABCD": "smooth_abcd_model",
+    "SmoothExtendedABCD": "smooth_extended_abcd_model",
 }
 
 
