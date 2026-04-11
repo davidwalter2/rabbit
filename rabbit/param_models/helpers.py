@@ -5,6 +5,7 @@ baseline_models = {
     "Ones": "param_model",
     "Mu": "param_model",
     "Mixture": "param_model",
+    "ABCD": "abcd_model",
 }
 
 

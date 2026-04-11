@@ -76,7 +76,13 @@ Base class `ParamModel` defines `compute(param)` which returns a `[1, nproc]` te
 - `npoi`: true parameters of interest (first `npoi` entries; reported as POIs in outputs)
 - `nnui`: model nuisance parameters (`nparams - npoi`; reported as nuisances in outputs)
 
-Built-in models: `Mu` (default, one POI per signal process), `Ones` (no parameters), `Mixture` (mixing POIs). Custom models are loaded by providing a dotted Python path (e.g. `--paramModel mymod.MyModel`); the module must be on `$PYTHONPATH` with an `__init__.py`. The deprecated `--poiModel` alias is still accepted.
+Built-in models:
+- `Mu` (default): one POI per signal process
+- `Ones`: no parameters (all yields fixed to MC)
+- `Mixture`: mixing POIs between pairs of processes
+- `ABCD`: data-driven background estimation using four regions; `npoi=0`, `nnui=3*n_bins`. CLI: `--paramModel ABCD <process> <ch_A> [ax:val ...] <ch_B> [ax:val ...] <ch_C> [ax:val ...] <ch_D> [ax:val ...]` where `ax:val` pairs optionally select a single bin along a named axis (e.g. `iso:0`). Regions A, B, C have free parameters; D is predicted as `a*c/b` times an MC correction factor.
+
+Custom models are loaded by providing a dotted Python path (e.g. `--paramModel mymod.MyModel`); the module must be on `$PYTHONPATH` with an `__init__.py`.
 
 ### Mappings: `rabbit/mappings/`
 Base class `Mapping` in `mapping.py` defines `compute_flat(params, observables)`, which is a differentiable transformation of the flat bin vector. The framework propagates uncertainties through it via automatic differentiation (`tf.GradientTape`). Built-in mappings (`Select`, `Project`, `Normalize`, `Ratio`, `Normratio`) live in `project.py` and `ratio.py`. Custom mappings follow the same pattern as param models.
