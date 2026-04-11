@@ -277,7 +277,7 @@ jobs:
           - name: linearized
             tensor: test_tensor_symmetric.hdf5
             fit_args: >-
-              --binByBinStatType normal-additive --allowNegativePOI
+              --binByBinStatType normal-additive --allowNegativeParam
           - name: bb_full_normal_additive
             tensor: test_tensor.hdf5
             fit_args: >-
@@ -400,12 +400,12 @@ jobs:
       - name: bsm limits
         run: >-
           rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
-          -t 0 --unblind --expectSignal bsm1 0 --expectSignal bsm2 1 --allowNegativePOI --asymptoticLimits bsm1 --levels 0.05
+          -t 0 --unblind --expectSignal bsm1 0 --expectSignal bsm2 1 --allowNegativeParam --asymptoticLimits bsm1 --levels 0.05
 
       - name: bsm limits on channel 
         run: >-
           rabbit_limit.py $RABBIT_OUTDIR/test_tensor_bsm.hdf5 -o $RABBIT_OUTDIR/ --postfix bsm
-          -t 0 --unblind --poiModel Mixture bsm1 sig --expectSignal bsm1_sig_mixing 0 --asymptoticLimits bsm1_sig_mixing --levels 0.05 --allowNegativePOI
+          -t 0 --unblind --paramModel Mixture bsm1 sig --expectSignal bsm1_sig_mixing 0 --asymptoticLimits bsm1_sig_mixing --levels 0.05 --allowNegativeParam
 
   plotting:
     runs-on: [self-hosted, linux, x64]

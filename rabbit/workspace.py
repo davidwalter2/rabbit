@@ -50,7 +50,7 @@ class Workspace:
         self.results = {}
 
         self.parms = fitter.parms
-        self.npoi = fitter.poi_model.npoi
+        self.npoi = fitter.param_model.npoi
         self.noiidxs = fitter.indata.noiidxs
 
         # some information for the impact histograms

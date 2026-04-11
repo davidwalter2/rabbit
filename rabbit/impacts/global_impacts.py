@@ -16,9 +16,9 @@ Ref. https://arxiv.org/abs/2307.04007
 import tensorflow as tf
 
 
-def _gather_poi_noi_vector(v, noiidxs, npoi=0):
-    v_poi = v[:npoi]
-    v_noi = tf.gather(v[npoi:], noiidxs)
+def _gather_poi_noi_vector(v, noiidxs, nsignal_params=0):
+    v_poi = v[:nsignal_params]
+    v_noi = tf.gather(v[nsignal_params:], noiidxs)
     return tf.concat([v_poi, v_noi], axis=0)
 
 
@@ -231,7 +231,7 @@ def global_impacts_parms(
     compute_yields_with_beta_fn,
     compute_lbeta_fn,
     compute_lc_fn,
-    npoi,
+    nsignal_params,
     noiidxs,
     systgroupidxs,
     bin_by_bin_stat,
@@ -239,8 +239,8 @@ def global_impacts_parms(
     global_impacts_from_jvp,
     cov,
 ):
-    idxs_poi = tf.range(npoi, dtype=tf.int64)
-    idxs_noi = tf.constant(npoi + noiidxs, dtype=tf.int64)
+    idxs_poi = tf.range(nsignal_params, dtype=tf.int64)
+    idxs_noi = tf.constant(nsignal_params + noiidxs, dtype=tf.int64)
     idxsout = tf.concat([idxs_poi, idxs_noi], axis=0)
 
     dexpdx = tf.one_hot(idxsout, depth=cov.shape[0], dtype=cov.dtype)
@@ -265,7 +265,7 @@ def global_impacts_parms(
         )
 
     impacts_x0 = _compute_global_impacts_x0(x, compute_lc_fn, cov_dexpdx)
-    impacts_theta0 = tf.transpose(impacts_x0[npoi:])
+    impacts_theta0 = tf.transpose(impacts_x0[nsignal_params:])
 
     impacts_theta0_sq = tf.square(impacts_theta0)
     var_theta0 = tf.reduce_sum(impacts_theta0_sq, axis=-1)
@@ -293,7 +293,7 @@ def global_impacts_obs(
     compute_yields_with_beta_fn,
     compute_lbeta_fn,
     compute_lc_fn,
-    npoi,
+    nsignal_params,
     systgroupidxs,
     bin_by_bin_stat,
     bin_by_bin_stat_mode,
@@ -353,7 +353,7 @@ def global_impacts_obs(
         )
 
     impacts_x0 = _compute_global_impacts_x0(x, compute_lc_fn, cov_dexpdx)
-    impacts_theta0 = tf.transpose(impacts_x0[npoi:])
+    impacts_theta0 = tf.transpose(impacts_x0[nsignal_params:])
 
     impacts_theta0_sq = tf.square(impacts_theta0)
     var_theta0 = tf.reduce_sum(impacts_theta0_sq, axis=-1)
@@ -444,7 +444,7 @@ def gaussian_global_impacts_parms(
     vartheta0,
     varnobs,
     varbeta0,
-    npoi,
+    nsignal_params,
     noiidxs,
     bin_by_bin_stat,
     bin_by_bin_stat_mode,
@@ -453,9 +453,9 @@ def gaussian_global_impacts_parms(
     data_cov_inv=None,
 ):
     # compute impacts for pois and nois
-    dxdtheta0 = _gather_poi_noi_vector(dxdtheta0, noiidxs, npoi)
-    dxdnobs = _gather_poi_noi_vector(dxdnobs, noiidxs, npoi)
-    dxdbeta0 = _gather_poi_noi_vector(dxdbeta0, noiidxs, npoi)
+    dxdtheta0 = _gather_poi_noi_vector(dxdtheta0, noiidxs, nsignal_params)
+    dxdnobs = _gather_poi_noi_vector(dxdnobs, noiidxs, nsignal_params)
+    dxdbeta0 = _gather_poi_noi_vector(dxdbeta0, noiidxs, nsignal_params)
 
     return _gaussian_global_impacts(
         dxdtheta0,

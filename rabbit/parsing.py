@@ -307,11 +307,12 @@ def common_parser():
         help="Specify tuple with signal name and rate multiplier for signal expectation (used for fit starting values and for toys). E.g. '--expectSignal BSM 0.0 --expectSignal SM 1.0'",
     )
     parser.add_argument(
-        "--allowNegativePOI",
+        "--allowNegativeParam",
         default=False,
         action="store_true",
         help="allow signal strengths to be negative (otherwise constrained to be non-negative)",
     )
+
     parser.add_argument(
         "--noBinByBinStat",
         default=False,
@@ -331,11 +332,12 @@ def common_parser():
         help="Barlow-Beeston mode bin-by-bin statistical uncertainties",
     )
     parser.add_argument(
-        "--poiModel",
+        "--paramModel",
         default=["Mu"],
         nargs="+",
-        help="Specify POI model to be used to introduce non standard parameterization",
+        help="Specify param model to be used to introduce non standard parameterization",
     )
+
     parser.add_argument(
         "-m",
         "--mapping",

@@ -65,26 +65,31 @@ The workflow has three stages: **write input tensor → run fit → post-process
 Supports dense and sparse tensor representations, symmetric/asymmetric systematics, and log-normal or normal systematic types.
 
 ### 2. Fit: `rabbit/fitter.py`
-`Fitter` takes a `FitInputData` object (loaded from HDF5 by `rabbit/inputdata.py`), a `POIModel`, and options. It builds a differentiable negative log-likelihood using TensorFlow and minimizes it via SciPy. Results are written through a `Workspace`.
+`Fitter` takes a `FitInputData` object (loaded from HDF5 by `rabbit/inputdata.py`), a `ParamModel`, and options. It builds a differentiable negative log-likelihood using TensorFlow and minimizes it via SciPy. Results are written through a `Workspace`.
 
 ### 3. Output: `rabbit/workspace.py`
 `Workspace` collects post-fit histograms, covariance matrices, impacts, and likelihood scans into an HDF5 output file using `hist.Hist` objects (via the `wums` library).
 
-### POI Models: `rabbit/poi_models/poi_model.py`
-Base class `POIModel` defines `compute(poi)` which returns a `[1, nproc]` tensor scaling signal processes. Built-in models: `Mu` (default), `Ones`, `Mixture`. Custom models are loaded by providing a dotted Python path (e.g. `--poiModel mymod.MyModel`); the module must be on `$PYTHONPATH` with an `__init__.py`.
+### Param Models: `rabbit/param_models/param_model.py`
+Base class `ParamModel` defines `compute(param)` which returns a `[1, nproc]` tensor scaling process yields. Each model declares:
+- `nparams`: total parameters (POIs + model nuisances)
+- `npoi`: true parameters of interest (first `npoi` entries; reported as POIs in outputs)
+- `nnui`: model nuisance parameters (`nparams - npoi`; reported as nuisances in outputs)
+
+Built-in models: `Mu` (default, one POI per signal process), `Ones` (no parameters), `Mixture` (mixing POIs). Custom models are loaded by providing a dotted Python path (e.g. `--paramModel mymod.MyModel`); the module must be on `$PYTHONPATH` with an `__init__.py`. The deprecated `--poiModel` alias is still accepted.
 
 ### Mappings: `rabbit/mappings/`
-Base class `Mapping` in `mapping.py` defines `compute_flat(params, observables)`, which is a differentiable transformation of the flat bin vector. The framework propagates uncertainties through it via automatic differentiation (`tf.GradientTape`). Built-in mappings (`Select`, `Project`, `Normalize`, `Ratio`, `Normratio`) live in `project.py` and `ratio.py`. Custom mappings follow the same pattern as POI models.
+Base class `Mapping` in `mapping.py` defines `compute_flat(params, observables)`, which is a differentiable transformation of the flat bin vector. The framework propagates uncertainties through it via automatic differentiation (`tf.GradientTape`). Built-in mappings (`Select`, `Project`, `Normalize`, `Ratio`, `Normratio`) live in `project.py` and `ratio.py`. Custom mappings follow the same pattern as param models.
 
 ### Bin scripts: `bin/`
 Entry points registered in `pyproject.toml`. The main one is `rabbit_fit.py`; others are diagnostic/plotting scripts. All use `rabbit/parsing.py` for shared CLI arguments.
 
 ## Custom Extensions
 
-Custom mappings and POI models must:
-1. Subclass `Mapping` or `POIModel` respectively
-2. Implement `compute_flat` (mapping) or `compute` (POI model) as TF-differentiable functions
+Custom mappings and param models must:
+1. Subclass `Mapping` or `ParamModel` respectively
+2. Implement `compute_flat` (mapping) or `compute` (param model) as TF-differentiable functions
 3. Be importable from `$PYTHONPATH` (directory needs `__init__.py`)
-4. Be referenced with dotted module path: `-m my_package.MyMapping` or `--poiModel my_package.MyModel`
+4. Be referenced with dotted module path: `-m my_package.MyMapping` or `--paramModel my_package.MyModel`
 
 See `tests/my_custom_mapping.py` and `tests/my_custom_model.py` for examples.
