@@ -6,6 +6,7 @@ baseline_models = {
     "Mu": "param_model",
     "Mixture": "param_model",
     "ABCD": "abcd_model",
+    "SmoothABCD": "smooth_abcd_model",
 }
 
 

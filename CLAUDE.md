@@ -81,6 +81,7 @@ Built-in models:
 - `Ones`: no parameters (all yields fixed to MC)
 - `Mixture`: mixing POIs between pairs of processes
 - `ABCD`: data-driven background estimation using four regions; `npoi=0`, `nnui=3*n_bins`. CLI: `--paramModel ABCD <process> <ch_A> [ax:val ...] <ch_B> [ax:val ...] <ch_C> [ax:val ...] <ch_D> [ax:val ...]` where `ax:val` pairs optionally select a single bin along a named axis (e.g. `iso:0`). Regions A, B, C have free parameters; D is predicted as `a*c/b` times an MC correction factor.
+- `SmoothABCD`: like ABCD but one axis is parameterised with an exponential polynomial `val(x)=exp(p_0+p_1·x̃+...)` instead of per-bin free parameters. CLI: `--paramModel SmoothABCD <axis> [order:N] <process> <ch_A> ... <ch_D>`. Default order=1 (log-linear). Reduces parameters from `3·n_bins` to `3·n_outer·(order+1)`.
 
 Custom models are loaded by providing a dotted Python path (e.g. `--paramModel mymod.MyModel`); the module must be on `$PYTHONPATH` with an `__init__.py`.
 
