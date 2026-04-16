@@ -4,7 +4,10 @@ SmoothExtendedABCD background estimation param model.
 Like ExtendedABCD, but the per-bin free parameters along one nominated smoothing
 axis are replaced by an exponential polynomial:
 
-    val_X(x) = exp(p_0 + p_1·x̃ + p_2·x̃² + ...)
+    val_X(x) = exp(-(p_0 + p_1·x̃ + p_2·x̃² + ...))
+
+The negative sign means positive parameters correspond to a naturally falling
+function along the smoothing axis.
 
 where x̃ are normalised bin centres of the smoothing axis in [0, 1].
 
@@ -67,6 +70,7 @@ class SmoothExtendedABCD(ParamModel):
         channel_Ax,
         channel_Bx,
         order=1,
+        initial_params=None,
         **kwargs,
     ):
         """
@@ -246,21 +250,33 @@ class SmoothExtendedABCD(ParamModel):
         self.is_linear = False
         self.allowNegativeParam = False
         # Default: all coefficients 0 → exp(0) = 1 (MC template as starting point)
-        self.xparamdefault = tf.zeros([self.nparams], dtype=indata.dtype)
+        if initial_params is not None:
+            init = np.asarray(initial_params, dtype=np.float32)
+            if init.shape != (self.nparams,):
+                raise ValueError(
+                    f"initial_params shape {init.shape} != expected ({self.nparams},) "
+                    f"= 5 * n_outer({n_outer}) * (order+1)({order+1})"
+                )
+            self.xparamdefault = tf.constant(init, dtype=indata.dtype)
+        else:
+            self.xparamdefault = tf.zeros([self.nparams], dtype=indata.dtype)
 
     @classmethod
     def parse_args(cls, indata, *args, **kwargs):
         """Parse CLI arguments for SmoothExtendedABCD.
 
         Syntax:
-            --paramModel SmoothExtendedABCD <axis> [order:N] <process> \\
+            --paramModel SmoothExtendedABCD <axis> [params:file.hdf5] [order:N] <process> \\
                          <ch_Ax> [ax:val ...] <ch_Bx> [ax:val ...] \\
                          <ch_A>  [ax:val ...] <ch_B>  [ax:val ...] \\
                          <ch_C>  [ax:val ...] <ch_D>  [ax:val ...]
+
+        The optional ``params:file.hdf5`` token loads a numpy array as initial
+        parameter values (produced by setupRabbit.py --dumpSmoothingParams).
         """
         if len(args) < 8:
             raise ValueError(
-                "SmoothExtendedABCD expects: axis [order:N] process "
+                "SmoothExtendedABCD expects: axis [params:file.hdf5] [order:N] process "
                 "ch_Ax [ax:val ...] ch_Bx [ax:val ...] "
                 "ch_A [ax:val ...] ch_B [ax:val ...] "
                 "ch_C [ax:val ...] ch_D [ax:val ...]"
@@ -268,13 +284,27 @@ class SmoothExtendedABCD(ParamModel):
         tokens = list(args)
         smoothing_axis = tokens.pop(0)
 
+        # Optional params file (mutually exclusive with order:N)
+        initial_params = None
         order = 1
-        if tokens and tokens[0].startswith("order:"):
+        if tokens and tokens[0].startswith("params:"):
+            params_file = tokens.pop(0).split(":", 1)[1]
+            if params_file.endswith(".hdf5") or params_file.endswith(".h5"):
+                import h5py
+
+                with h5py.File(params_file, mode="r") as f:
+                    initial_params = f["params"][...]
+                    order = int(f["order"][()])
+            else:
+                d = np.load(params_file)
+                initial_params = d["params"]
+                order = int(d["order"])
+        elif tokens and tokens[0].startswith("order:"):
             order = int(tokens.pop(0).split(":", 1)[1])
 
         if not tokens:
             raise ValueError(
-                "SmoothExtendedABCD: expected process name after axis/order"
+                "SmoothExtendedABCD: expected process name after axis/params/order"
             )
         process = tokens.pop(0)
 
@@ -312,6 +342,7 @@ class SmoothExtendedABCD(ParamModel):
             channel_Ax,
             channel_Bx,
             order=order,
+            initial_params=initial_params,
             **kwargs,
         )
 
@@ -339,12 +370,12 @@ class SmoothExtendedABCD(ParamModel):
         )
         params_Bx = tf.reshape(param[4 * n_coeffs :], [self.n_outer, self.order + 1])
 
-        # Evaluate exp(polynomial): [n_outer, n_smooth]
-        a = tf.exp(tf.matmul(params_A, self.vander))
-        b = tf.exp(tf.matmul(params_B, self.vander))
-        c = tf.exp(tf.matmul(params_C, self.vander))
-        ax = tf.exp(tf.matmul(params_Ax, self.vander))
-        bx = tf.exp(tf.matmul(params_Bx, self.vander))
+        # Evaluate exp(-polynomial): [n_outer, n_smooth]
+        a = tf.exp(-tf.matmul(params_A, self.vander))
+        b = tf.exp(-tf.matmul(params_B, self.vander))
+        c = tf.exp(-tf.matmul(params_C, self.vander))
+        ax = tf.exp(-tf.matmul(params_Ax, self.vander))
+        bx = tf.exp(-tf.matmul(params_Bx, self.vander))
 
         # Flatten to [n_outer * n_smooth] = [n_total_bins per region]
         a_flat = tf.reshape(a, [-1])

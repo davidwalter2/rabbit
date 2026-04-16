@@ -4,7 +4,10 @@ SmoothABCD background estimation param model.
 Like ABCD, but the per-bin free parameters along one nominated smoothing axis
 are replaced by an exponential polynomial:
 
-    val_X(x) = exp(p_0 + p_1·x̃ + p_2·x̃² + ...)
+    val_X(x) = exp(-(p_0 + p_1·x̃ + p_2·x̃² + ...))
+
+The negative sign means positive parameters correspond to a naturally falling
+function along the smoothing axis.
 
 where x̃ are normalised bin centres of the smoothing axis in [0, 1].
 
@@ -296,11 +299,11 @@ class SmoothABCD(ParamModel):
         )
         params_C = tf.reshape(param[2 * n_coeffs :], [self.n_outer, self.order + 1])
 
-        # Evaluate exp(polynomial): [n_outer, n_smooth]
+        # Evaluate exp(-polynomial): [n_outer, n_smooth]
         # self.vander is a constant of shape [order+1, n_smooth]
-        a = tf.exp(tf.matmul(params_A, self.vander))
-        b = tf.exp(tf.matmul(params_B, self.vander))
-        c = tf.exp(tf.matmul(params_C, self.vander))
+        a = tf.exp(-tf.matmul(params_A, self.vander))
+        b = tf.exp(-tf.matmul(params_B, self.vander))
+        c = tf.exp(-tf.matmul(params_C, self.vander))
 
         # Flatten to [n_outer * n_smooth] = [n_total_bins per region]
         a_flat = tf.reshape(a, [-1])
