@@ -2,14 +2,14 @@
 SmoothABCD background estimation param model.
 
 Like ABCD, but the per-bin free parameters along one nominated smoothing axis
-are replaced by an exponential polynomial:
+are replaced by an exponential Chebyshev polynomial:
 
-    val_X(x) = exp(-(p_0 + p_1·x̃ + p_2·x̃² + ...))
+    val_X(x) = exp(p_0·T_0(x̃) + p_1·T_1(x̃) + p_2·T_2(x̃) + ...)
 
-The negative sign means positive parameters correspond to a naturally falling
-function along the smoothing axis.
-
-where x̃ are normalised bin centres of the smoothing axis in [0, 1].
+where T_k is the Chebyshev polynomial of the first kind and x̃ is the bin
+centre linearly rescaled so the smoothing axis edges [x_min, x_max] map to
+[-1, +1].  This matches the basis used by the WRemnants spectrum regressor,
+so pre-computed coefficients can be loaded directly as initial values.
 
 This reduces parameters from 3·n_bins to 3·n_outer·(order+1), where
 n_outer is the number of bins along the remaining (non-smooth) axes.
@@ -141,22 +141,28 @@ class SmoothABCD(ParamModel):
                     f"expected {n_outer}"
                 )
 
-        # Vandermonde matrix from normalised bin centres of the smooth axis
+        # Chebyshev basis matrix from bin centres of the smooth axis.
+        # x̃ ∈ [-1, 1] with the axis edges mapped to the interval endpoints,
+        # matching the WRemnants spectrum regressor's transform_chebyshev.
         ch_name_A, axis_sel_A = next(iter(channel_A.items()))
         axes_A = indata.channel_info[ch_name_A]["axes"]
         smooth_ax_A = next(a for a in axes_A if a.name == smoothing_axis)
         x_centers = np.array(smooth_ax_A.centers)
-        x_min, x_max = float(x_centers.min()), float(x_centers.max())
-        x_norm = (
-            (x_centers - x_min) / (x_max - x_min)
+        edges = np.array(smooth_ax_A.edges)
+        x_min, x_max = float(edges[0]), float(edges[-1])
+        x_cheby = (
+            2.0 * (x_centers - x_min) / (x_max - x_min) - 1.0
             if x_max > x_min
             else np.zeros_like(x_centers)
         )
-        # V[k, s] = x_norm[s]^k,  shape [order+1, n_smooth]
-        vander = np.array(
-            [[float(x_norm[s]) ** k for s in range(n_smooth)] for k in range(order + 1)]
-        )
-        self.vander = tf.constant(vander, dtype=indata.dtype)
+        # basis[k, s] = T_k(x_cheby[s]),  shape [order+1, n_smooth]
+        basis = np.zeros((order + 1, n_smooth))
+        basis[0, :] = 1.0
+        if order >= 1:
+            basis[1, :] = x_cheby
+        for k in range(2, order + 1):
+            basis[k, :] = 2.0 * x_cheby * basis[k - 1, :] - basis[k - 2, :]
+        self.basis = tf.constant(basis, dtype=indata.dtype)
 
         # MC correction factor for region D, shape [n_outer * n_smooth]
         norm_dense = tf.sparse.to_dense(indata.norm) if indata.sparse else indata.norm
@@ -299,11 +305,11 @@ class SmoothABCD(ParamModel):
         )
         params_C = tf.reshape(param[2 * n_coeffs :], [self.n_outer, self.order + 1])
 
-        # Evaluate exp(-polynomial): [n_outer, n_smooth]
-        # self.vander is a constant of shape [order+1, n_smooth]
-        a = tf.exp(-tf.matmul(params_A, self.vander))
-        b = tf.exp(-tf.matmul(params_B, self.vander))
-        c = tf.exp(-tf.matmul(params_C, self.vander))
+        # Evaluate exp(polynomial): [n_outer, n_smooth]
+        # self.basis is a constant of shape [order+1, n_smooth] with Chebyshev T_k rows
+        a = tf.exp(tf.matmul(params_A, self.basis))
+        b = tf.exp(tf.matmul(params_B, self.basis))
+        c = tf.exp(tf.matmul(params_C, self.basis))
 
         # Flatten to [n_outer * n_smooth] = [n_total_bins per region]
         a_flat = tf.reshape(a, [-1])
