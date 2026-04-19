@@ -881,6 +881,7 @@ class Fitter:
             self._compute_lbeta,
             self._compute_lc,
             self.param_model.npoi,
+            self.param_model.nparams,
             self.indata.noiidxs,
             self.indata.systgroupidxs,
             self.binByBinStat,
@@ -905,6 +906,7 @@ class Fitter:
                 else 1.0 / self.kstat
             ),
             self.param_model.npoi,
+            self.param_model.nparams,
             self.indata.noiidxs,
             self.binByBinStat,
             self.binByBinStatMode,
@@ -1102,6 +1104,7 @@ class Fitter:
                 self._compute_lbeta,
                 self._compute_lc,
                 self.param_model.npoi,
+                self.param_model.nparams,
                 self.indata.systgroupidxs,
                 self.binByBinStat,
                 self.binByBinStatMode,
