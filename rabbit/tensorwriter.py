@@ -569,12 +569,9 @@ class TensorWriter:
     @staticmethod
     def _bin_label(ax, idx):
         """Return a string label for a hist axis bin, preferring string values."""
-        try:
-            v = ax.value(idx)
-            if isinstance(v, (str, bytes)):
-                return v.decode() if isinstance(v, bytes) else v
-        except Exception:
-            pass
+        v = ax.value(idx)
+        if isinstance(v, (str, bytes)):
+            return v.decode() if isinstance(v, bytes) else v
         return str(idx)
 
     @staticmethod
