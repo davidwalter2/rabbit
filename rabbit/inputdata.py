@@ -94,10 +94,10 @@ class FitInputData:
                 # SparseMatrixMatMul has no XLA kernel, so any tf.function
                 # that calls sm.matmul must be built with jit_compile=False.
                 from tensorflow.python.ops.linalg.sparse import (
-                    sparse_csr_matrix_ops as _tf_sparse_csr,
+                    sparse_csr_matrix_ops as tf_sparse_csr,
                 )
 
-                self.logk_csr = _tf_sparse_csr.CSRSparseMatrix(self.logk)
+                self.logk_csr = tf_sparse_csr.CSRSparseMatrix(self.logk)
             else:
                 self.norm = maketensor(f["hnorm"])
                 self.logk = maketensor(f["hlogk"])
