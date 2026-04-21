@@ -702,39 +702,10 @@ class TensorWriter:
           - list of axis names: use exactly these axes as systematic axes
           - empty list: disable detection entirely
         """
-        if syst_axes is not None and len(syst_axes) == 0:
+        extra_info = self._detect_extra_syst_axes(h, channel, syst_axes)
+        if extra_info is None:
             return None
-
-        if isinstance(h, (list, tuple)):
-            h_ref = h[0]
-            is_pair = True
-        else:
-            h_ref = h
-            is_pair = False
-
-        # only hist-like objects (with .axes) support multi-systematic
-        if not hasattr(h_ref, "axes"):
-            return None
-
-        h_axis_names = [a.name for a in h_ref.axes]
-        channel_axis_names = [a.name for a in self.channels[channel]["axes"]]
-
-        if syst_axes is None:
-            extra_axis_names = [n for n in h_axis_names if n not in channel_axis_names]
-        else:
-            for n in syst_axes:
-                if n not in h_axis_names:
-                    raise RuntimeError(
-                        f"Requested systematic axis '{n}' not found in histogram axes {h_axis_names}"
-                    )
-                if n in channel_axis_names:
-                    raise RuntimeError(
-                        f"Systematic axis '{n}' overlaps with channel axes {channel_axis_names}"
-                    )
-            extra_axis_names = list(syst_axes)
-
-        if not extra_axis_names:
-            return None
+        h_ref, is_pair, extra_axis_names = extra_info
 
         extra_axes = [h_ref.axes[n] for n in extra_axis_names]
         extra_sizes = [len(a) for a in extra_axes]
@@ -826,10 +797,25 @@ class TensorWriter:
         if not hasattr(h_ref, "axes"):
             return None
 
-        h_axis_names = [a.name for a in h_ref.axes]
-        channel_axis_names = [a.name for a in self.channels[channel]["axes"]]
+        channel_axes = self.channels[channel]["axes"]
+
+        # No extra axes possible when the axis count already matches the
+        # channel. Short-circuit before touching ``.name`` so plain
+        # boost_histogram inputs (whose axes have no ``name`` attribute)
+        # still work in the common single-systematic case.
+        if syst_axes is None and len(h_ref.axes) == len(channel_axes):
+            return None
+
+        h_axis_names = [getattr(a, "name", None) for a in h_ref.axes]
+        channel_axis_names = [getattr(a, "name", None) for a in channel_axes]
 
         if syst_axes is None:
+            if any(n is None for n in h_axis_names):
+                raise RuntimeError(
+                    "Cannot auto-detect systematic axes: histogram has more axes "
+                    "than the channel but the extra axes are unnamed. Use named "
+                    "axes (e.g. hist.Hist) or pass syst_axes explicitly."
+                )
             extra_axis_names = [n for n in h_axis_names if n not in channel_axis_names]
         else:
             for n in syst_axes:
