@@ -123,10 +123,14 @@ class Fitter:
         self.diagnostics = options.diagnostics
         self.minimizer_method = options.minimizerMethod
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
-        # jitCompile is tri-state: "auto" (default, enable in dense mode
-        # and disable in sparse mode), "on" (force on, warn-and-fall-back
-        # in sparse mode), or "off" (force off). Backwards compatibility:
-        # accept legacy True / False values from programmatic callers.
+        # jitCompile accepts "auto" (the default), "on", or "off".
+        # True / False from programmatic callers are accepted as
+        # aliases for "on" / "off". The tri-state is resolved to the
+        # final boolean self.jit_compile right here, using the only
+        # runtime condition it can depend on: whether the input is
+        # sparse. Sparse mode uses SparseMatrixMatMul which has no
+        # XLA kernel, so "auto" silently disables jit and "on" warns
+        # and falls back.
         _jit_opt = getattr(options, "jitCompile", "auto")
         if _jit_opt is True:
             _jit_opt = "on"
@@ -136,7 +140,20 @@ class Fitter:
             raise ValueError(
                 f"jitCompile must be one of 'auto', 'on', 'off'; got {_jit_opt!r}"
             )
-        self.jit_compile = _jit_opt
+        if _jit_opt == "off":
+            self.jit_compile = False
+        elif _jit_opt == "on":
+            if self.indata.sparse:
+                logger.warning(
+                    "--jitCompile=on requested but input data is sparse; "
+                    "XLA has no kernel for the sparse matmul ops used in "
+                    "sparse mode, so jit_compile will be disabled."
+                )
+                self.jit_compile = False
+            else:
+                self.jit_compile = True
+        else:  # "auto"
+            self.jit_compile = not self.indata.sparse
         # When --noHessian is requested the postfit Hessian is never
         # computed, so the dense [npar, npar] covariance matrix should
         # not be allocated. self.cov is set to None in that case and
@@ -2308,33 +2325,11 @@ class Fitter:
     def _make_tf_functions(self):
         # Build tf.function wrappers at instance construction time so that
         # jit_compile and the HVP autodiff mode can be controlled via fit
-        # options without redefining the class.
-        #
-        # SparseMatrixMatMul has no XLA kernel, so any tf.function that
-        # uses it (via _compute_yields_noBBB in sparse mode) cannot be
-        # jit-compiled. Resolve the tri-state self.jit_compile setting:
-        #
-        #   "auto" -> enable jit in dense mode, silently disable in
-        #             sparse mode (the default; sparse mode just can't
-        #             use it).
-        #   "on"   -> enable jit when possible. In sparse mode emit a
-        #             warning and disable, since the user explicitly
-        #             asked for it but it's structurally impossible.
-        #   "off"  -> never enable jit.
-        if self.jit_compile == "off":
-            jit = False
-        elif self.jit_compile == "on":
-            if self.indata.sparse:
-                logger.warning(
-                    "--jitCompile=on requested but input data is sparse; "
-                    "XLA has no kernel for the sparse matmul ops used in "
-                    "sparse mode, so jit_compile will be disabled."
-                )
-                jit = False
-            else:
-                jit = True
-        else:  # "auto"
-            jit = not self.indata.sparse
+        # options without redefining the class. self.jit_compile has
+        # already been resolved to a plain bool in __init__ (tri-state
+        # "auto"/"on"/"off" collapsed against self.indata.sparse), so
+        # this body just reads it.
+        jit = self.jit_compile
 
         def _loss_val(self):
             return self._compute_loss()
