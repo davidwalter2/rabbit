@@ -7,9 +7,10 @@ import numpy as np
 import scipy
 import tensorflow as tf
 import tensorflow_probability as tfp
+from tensorflow.python.ops.linalg.sparse import sparse_csr_matrix_ops as tf_sparse_csr
 from wums import logging
 
-from rabbit import io_tools
+from rabbit import external_likelihood, io_tools
 from rabbit import tfhelpers as tfh
 from rabbit.impacts import global_impacts, nonprofiled_impacts, traditional_impacts
 from rabbit.tfhelpers import edmval_cov
@@ -121,6 +122,44 @@ class Fitter:
 
         self.diagnostics = options.diagnostics
         self.minimizer_method = options.minimizerMethod
+        self.hvp_method = getattr(options, "hvpMethod", "revrev")
+        # jitCompile accepts "auto" (the default), "on", or "off".
+        # True / False from programmatic callers are accepted as
+        # aliases for "on" / "off". The tri-state is resolved to the
+        # final boolean self.jit_compile right here, using the only
+        # runtime condition it can depend on: whether the input is
+        # sparse. Sparse mode uses SparseMatrixMatMul which has no
+        # XLA kernel, so "auto" silently disables jit and "on" warns
+        # and falls back.
+        _jit_opt = getattr(options, "jitCompile", "auto")
+        if _jit_opt is True:
+            _jit_opt = "on"
+        elif _jit_opt is False:
+            _jit_opt = "off"
+        if _jit_opt not in ("auto", "on", "off"):
+            raise ValueError(
+                f"jitCompile must be one of 'auto', 'on', 'off'; got {_jit_opt!r}"
+            )
+        if _jit_opt == "off":
+            self.jit_compile = False
+        elif _jit_opt == "on":
+            if self.indata.sparse:
+                logger.warning(
+                    "--jitCompile=on requested but input data is sparse; "
+                    "XLA has no kernel for the sparse matmul ops used in "
+                    "sparse mode, so jit_compile will be disabled."
+                )
+                self.jit_compile = False
+            else:
+                self.jit_compile = True
+        else:  # "auto"
+            self.jit_compile = not self.indata.sparse
+        # When --noHessian is requested the postfit Hessian is never
+        # computed, so the dense [npar, npar] covariance matrix should
+        # not be allocated. self.cov is set to None in that case and
+        # callers must use self.var_prefit (the diagonal vector form)
+        # for prefit uncertainties instead.
+        self.compute_cov = not getattr(options, "noHessian", False)
 
         if options.covarianceFit and options.chisqFit:
             raise Exception(
@@ -304,19 +343,42 @@ class Fitter:
 
         self.x = tf.Variable(xdefault, trainable=True, name="x")
 
-        # parameter covariance matrix
-        self.cov = tf.Variable(
-            self.prefit_covariance(
+        # Per-parameter prefit variance vector. Always allocated; the
+        # prefit covariance is intrinsically diagonal so this is the
+        # only form needed for prefit uncertainties.
+        self.var_prefit = tf.Variable(
+            self.prefit_variance(
                 unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
             ),
             trainable=False,
-            name="cov",
+            name="var_prefit",
         )
+
+        # Full parameter covariance matrix. Allocated only when the
+        # postfit Hessian will actually be computed; otherwise None to
+        # avoid the O(npar^2) allocation (94 GB for 108k parameters).
+        if self.compute_cov:
+            self.cov = tf.Variable(
+                tf.linalg.diag(self.var_prefit),
+                trainable=False,
+                name="cov",
+            )
+        else:
+            self.cov = None
 
         # regularization
         self.regularizers = []
         # one common regularization strength parameter
         self.tau = tf.Variable(1.0, trainable=True, name="tau", dtype=tf.float64)
+
+        # External likelihood terms (additive g^T x + 0.5 x^T H x
+        # contributions to the NLL). See rabbit.external_likelihood for
+        # the construction helper and the matching scalar evaluator.
+        self.external_terms = external_likelihood.build_tf_external_terms(
+            self.indata.external_terms,
+            self.parms,
+            self.indata.dtype,
+        )
 
         # constraint minima for nuisance parameters
         self.theta0 = tf.Variable(
@@ -358,6 +420,11 @@ class Fitter:
                     tf.function(val.python_function.__get__(self, type(self))),
                 )
 
+        # (re)build instance-level tf.function wrappers for loss/grad/HVP, which
+        # are constructed dynamically so that jit_compile and the HVP autodiff
+        # mode can be controlled via fit options.
+        self._make_tf_functions()
+
     def __deepcopy__(self, memo):
         import copy
 
@@ -369,12 +436,23 @@ class Fitter:
             for name in self.__dict__
             if hasattr(getattr(type(self), name, None), "python_function")
         }
-        state = {k: v for k, v in self.__dict__.items() if k not in jit_overrides}
+        # Also strip the dynamically-built loss/grad/HVP tf.function wrappers,
+        # which hold un-copyable FuncGraph state and will be rebuilt below.
+        dynamic_tf_funcs = {
+            "loss_val",
+            "loss_val_grad",
+            "loss_val_grad_hessp",
+            "loss_val_grad_hessp_fwdrev",
+            "loss_val_grad_hessp_revrev",
+        }
+        skip = jit_overrides | dynamic_tf_funcs
+        state = {k: v for k, v in self.__dict__.items() if k not in skip}
         cls = type(self)
         obj = cls.__new__(cls)
         memo[id(self)] = obj
         for k, v in state.items():
             setattr(obj, k, copy.deepcopy(v, memo))
+        obj._make_tf_functions()
         return obj
 
     def load_fitresult(self, fitresult_file, fitresult_key, profile=True):
@@ -409,6 +487,13 @@ class Fitter:
         self.x.assign(xvals)
 
         if cov_ext is not None:
+            if self.cov is None:
+                raise RuntimeError(
+                    "load_fitresult: external covariance was provided but "
+                    "the fitter was constructed with --noHessian (no full "
+                    "covariance is allocated). Construct the fitter without "
+                    "--noHessian to load an external covariance."
+                )
             covval = self.cov.numpy()
             covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
             self.cov.assign(tf.constant(covval))
@@ -544,23 +629,38 @@ class Fitter:
         elif self.binByBinStatType == "normal-additive":
             return tf.zeros(self.beta_shape, dtype=self.indata.dtype)
 
-    def prefit_covariance(self, unconstrained_err=0.0):
-        # free parameters are taken to have zero uncertainty for the purposes of prefit uncertainties
+    def prefit_variance(self, unconstrained_err=0.0):
+        """Per-parameter prefit variance vector of length npar.
+
+        Free parameters (POIs and unconstrained nuisances) are assigned a
+        placeholder variance of unconstrained_err**2 (zero by default).
+        Constrained nuisances take their variance from the constraint
+        term (1 / constraintweight).
+        """
         var_poi = (
             tf.ones([self.poi_model.npoi], dtype=self.indata.dtype)
             * unconstrained_err**2
         )
-
-        # nuisances have their uncertainty taken from the constraint term, but unconstrained nuisances
-        # are set to a placeholder uncertainty (zero by default) for the purposes of prefit uncertainties
         var_theta = tf.where(
             self.indata.constraintweights == 0.0,
             unconstrained_err**2,
             tf.math.reciprocal(self.indata.constraintweights),
         )
+        return tf.concat([var_poi, var_theta], axis=0)
 
-        invhessianprefit = tf.linalg.diag(tf.concat([var_poi, var_theta], axis=0))
-        return invhessianprefit
+    def prefit_covariance(self, unconstrained_err=0.0):
+        """Full prefit covariance as a tf.linalg.LinearOperatorDiag.
+
+        The prefit covariance is intrinsically diagonal, so we return a
+        LinearOperator that exposes a matrix-like interface (matvec, etc.)
+        without ever allocating the dense [npar, npar] form. Callers that
+        actually need a dense tensor can call .to_dense() explicitly.
+        """
+        return tf.linalg.LinearOperatorDiag(
+            self.prefit_variance(unconstrained_err=unconstrained_err),
+            is_self_adjoint=True,
+            is_positive_definite=True,
+        )
 
     @tf.function
     def val_jac(self, fun, *args, **kwargs):
@@ -610,11 +710,12 @@ class Fitter:
         self.beta.assign(self.beta0)
 
     def defaultassign(self):
-        self.cov.assign(
-            self.prefit_covariance(
-                unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
-            )
+        var_pre = self.prefit_variance(
+            unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
         )
+        self.var_prefit.assign(var_pre)
+        if self.cov is not None:
+            self.cov.assign(tf.linalg.diag(var_pre))
         self.theta0defaultassign()
         if self.binByBinStat:
             self.beta0defaultassign()
@@ -783,13 +884,23 @@ class Fitter:
             # the special handling of the diagonal case here speeds things up, but is also required
             # in case the prefit covariance has zero for some uncertainties (which is the default
             # for unconstrained nuisances for example) since the multivariate normal distribution
-            # requires a positive-definite covariance matrix
-            if tfh.is_diag(self.cov):
+            # requires a positive-definite covariance matrix.
+            # Under --noHessian self.cov is None and only the diagonal
+            # prefit variance vector is available, so we always take the
+            # diagonal branch in that case (sourcing the variances from
+            # var_prefit directly).
+            cov_is_diag = self.cov is None or tfh.is_diag(self.cov)
+            if cov_is_diag:
+                stddev = (
+                    tf.sqrt(self.var_prefit)
+                    if self.cov is None
+                    else tf.sqrt(tf.linalg.diag_part(self.cov))
+                )
                 self.x.assign(
                     tf.random.normal(
                         shape=[],
                         mean=self.x,
-                        stddev=tf.sqrt(tf.linalg.diag_part(self.cov)),
+                        stddev=stddev,
                         dtype=self.x.dtype,
                     )
                 )
@@ -831,6 +942,72 @@ class Fitter:
             return edmval, cov
         else:
             return edmval_cov(grad, hess)
+
+    def edmval_cov_rows_hessfree(self, grad, row_indices, rtol=1e-10, maxiter=None):
+        """Hessian-free edmval + selected rows of the covariance matrix.
+
+        Used under --noHessian to avoid allocating the dense [npar, npar]
+        Hessian. Solves the linear systems
+
+            H v = grad        ->  edmval = 0.5 * grad^T v
+            H c_i = e_i       ->  c_i is the i-th column/row of cov
+
+        iteratively via scipy's conjugate gradient, feeding it a
+        LinearOperator backed by self.loss_val_grad_hessp. The Hessian
+        must be positive-definite; that's the case for a converged NLL
+        minimum (including the purely-quadratic --is_linear case).
+
+        Parameters
+        ----------
+        grad : tf.Tensor or array-like, shape [npar]
+            Gradient at the current x, already computed by the caller.
+        row_indices : iterable of int
+            Parameter indices to compute covariance rows for. Typically
+            the POI indices [0, npoi) concatenated with the NOI indices
+            (npoi + noiidxs).
+        rtol : float
+            Relative residual tolerance passed to scipy.sparse.linalg.cg.
+        maxiter : int or None
+            Maximum CG iterations per solve; None lets scipy choose.
+
+        Returns
+        -------
+        edmval : float
+        cov_rows : np.ndarray, shape [len(row_indices), npar]
+            Row i is (H^{-1})[row_indices[i], :]; diag entries give the
+            variances for those parameters.
+        """
+        import scipy.sparse.linalg as _spla
+
+        n = int(self.x.shape[0])
+        dtype = np.float64
+
+        def _hvp_np(p_np):
+            p_tf = tf.constant(p_np, dtype=self.x.dtype)
+            _, _, hessp = self.loss_val_grad_hessp(p_tf)
+            return hessp.numpy()
+
+        op = _spla.LinearOperator((n, n), matvec=_hvp_np, dtype=dtype)
+
+        grad_np = grad.numpy() if hasattr(grad, "numpy") else np.asarray(grad)
+        v, info = _spla.cg(op, grad_np, rtol=rtol, atol=0.0, maxiter=maxiter)
+        if info != 0:
+            raise ValueError(f"CG solver for edmval did not converge (info={info})")
+        edmval = 0.5 * float(np.dot(grad_np, v))
+
+        row_indices = np.asarray(list(row_indices), dtype=np.int64)
+        cov_rows = np.empty((len(row_indices), n), dtype=dtype)
+        for k, i in enumerate(row_indices):
+            e = np.zeros(n, dtype=dtype)
+            e[int(i)] = 1.0
+            c, info = _spla.cg(op, e, rtol=rtol, atol=0.0, maxiter=maxiter)
+            if info != 0:
+                raise ValueError(
+                    f"CG solver for cov row {int(i)} did not converge (info={info})"
+                )
+            cov_rows[k] = c
+
+        return edmval, cov_rows
 
     @tf.function
     def impacts_parms(self, hess):
@@ -1192,8 +1369,13 @@ class Fitter:
 
         return expvars
 
-    def _compute_yields_noBBB(self, full=True):
+    def _compute_yields_noBBB(self, full=True, compute_norm=True):
         # full: compute yields inclduing masked channels
+        # compute_norm: also build the dense [nbins, nproc] normcentral tensor.
+        # In sparse mode this is expensive (forward + backward) and is only
+        # needed when an external caller requests per-process yields, or for
+        # binByBinStat in "full" mode. The default is True for backward
+        # compatibility; the NLL/grad/HVP path passes compute_norm=False.
         poi = self.get_poi()
         theta = self.get_theta()
 
@@ -1217,15 +1399,29 @@ class Fitter:
             mthetaalpha = tf.reshape(mthetaalpha, [2 * self.indata.nsyst, 1])
 
         if self.indata.sparse:
-            logsnorm = tf.sparse.sparse_dense_matmul(self.indata.logk, mthetaalpha)
-            logsnorm = tf.squeeze(logsnorm, -1)
+            # Inner contraction logk · mthetaalpha via tf.linalg.sparse's
+            # CSR matmul. ~8x faster per call than gather + segment_sum
+            # because SparseMatrixMatMul dispatches to a hand-tuned CSR
+            # kernel. NOTE: SparseMatrixMatMul has no XLA kernel, so the
+            # enclosing loss/grad/HVP tf.functions are built with
+            # jit_compile=False in sparse mode (see _make_tf_functions).
+            logsnorm = tf.squeeze(
+                tf_sparse_csr.matmul(self.indata.logk_csr, mthetaalpha),
+                axis=-1,
+            )
 
+            # Build a sparse [nbinsfull, nproc] tensor whose values absorb
+            # the per-entry syst variation and the per-(bin, proc) POI
+            # scaling rnorm. The sparsity pattern is unchanged from
+            # self.indata.norm, so with_values lets us reuse the indices.
             if self.indata.systematic_type == "log_normal":
-                snorm = tf.exp(logsnorm)
+                # values[i] = norm[i] * exp(logsnorm[i]) * rnorm[bin, proc]
                 snormnorm_sparse = self.indata.norm.with_values(
-                    snorm * self.indata.norm.values
+                    tf.exp(logsnorm) * self.indata.norm.values
                 )
-            elif self.indata.systematic_type == "normal":
+                snormnorm_sparse = snormnorm_sparse * rnorm
+            else:  # "normal"
+                # values[i] = norm[i] * rnorm[bin, proc] + logsnorm[i]
                 snormnorm_sparse = self.indata.norm * rnorm
                 snormnorm_sparse = snormnorm_sparse.with_values(
                     snormnorm_sparse.values + logsnorm
@@ -1236,13 +1432,20 @@ class Fitter:
                     snormnorm_sparse, self.indata.nbins
                 )
 
-            if self.indata.systematic_type == "log_normal":
-                snormnorm = tf.sparse.to_dense(snormnorm_sparse)
-                normcentral = rnorm * snormnorm
-            elif self.indata.systematic_type == "normal":
+            # Per-bin yields via unsorted_segment_sum on the sparse values
+            # keyed by bin index. Equivalent to tf.sparse.reduce_sum(...,
+            # axis=-1) but uses the dedicated segment_sum kernel directly,
+            # which has lower per-call overhead. The dense [nbinsfull,
+            # nproc] grid is only materialized when an external caller
+            # requested per-process yields (compute_norm=True).
+            nbinsfull_int = int(snormnorm_sparse.dense_shape[0])
+            nexpcentral = tf.math.unsorted_segment_sum(
+                snormnorm_sparse.values,
+                snormnorm_sparse.indices[:, 0],
+                num_segments=nbinsfull_int,
+            )
+            if compute_norm:
                 normcentral = tf.sparse.to_dense(snormnorm_sparse)
-
-            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull
@@ -1279,7 +1482,13 @@ class Fitter:
         return nexpcentral, normcentral
 
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
-        nexp, norm = self._compute_yields_noBBB(full=full)
+        # Only materialize the dense [nbins, nproc] normcentral when an external
+        # caller requested it, or when binByBinStat "full" mode needs per-process
+        # yields for the analytic beta solution.
+        need_norm = compute_norm or (
+            self.binByBinStat and self.binByBinStatMode == "full"
+        )
+        nexp, norm = self._compute_yields_noBBB(full=full, compute_norm=need_norm)
 
         if self.binByBinStat:
             if profile:
@@ -1381,7 +1590,12 @@ class Fitter:
 
                             i0 = tf.constant(0)
                             edm0 = tf.constant(tf.float64.max)
-                            tf.while_loop(cond, body, loop_vars=(i0, edm0))
+                            # XLA needs a static upper bound on loop iterations
+                            # to allocate fixed-size tensor lists when the HVP
+                            # is jit_compile=True.
+                            tf.while_loop(
+                                cond, body, loop_vars=(i0, edm0), maximum_iterations=50
+                            )
 
                             x = threshold + tf.exp(self.nbeta)
                             beta = (
@@ -1633,7 +1847,12 @@ class Fitter:
 
                             i0 = tf.constant(0)
                             edm0 = tf.constant(tf.float64.max)
-                            tf.while_loop(cond, body, loop_vars=(i0, edm0))
+                            # XLA needs a static upper bound on loop iterations
+                            # to allocate fixed-size tensor lists when the HVP
+                            # is jit_compile=True.
+                            tf.while_loop(
+                                cond, body, loop_vars=(i0, edm0), maximum_iterations=50
+                            )
 
                             x = threshold + tf.exp(self.nbeta)
                             beta = (
@@ -1953,7 +2172,7 @@ class Fitter:
 
     @tf.function
     def _expected_yield_noBBB(self, full=False):
-        res, _ = self._compute_yields_noBBB(full=full)
+        res, _ = self._compute_yields_noBBB(full=full, compute_norm=False)
         return res
 
     @tf.function
@@ -2087,6 +2306,12 @@ class Fitter:
 
         return ln, lc, lbeta, lpenalty, beta
 
+    def _compute_external_nll(self):
+        """Sum of external likelihood term contributions: sum_i (g_i^T x_sub + 0.5 x_sub^T H_i x_sub)."""
+        return external_likelihood.compute_external_nll(
+            self.external_terms, self.x, self.indata.dtype
+        )
+
     def _compute_nll(self, profile=True, full_nll=False):
         ln, lc, lbeta, lpenalty, beta = self._compute_nll_components(
             profile=profile, full_nll=full_nll
@@ -2098,47 +2323,82 @@ class Fitter:
 
         if lpenalty is not None:
             l = l + lpenalty
+
+        lext = self._compute_external_nll()
+        if lext is not None:
+            l = l + lext
         return l
 
     def _compute_loss(self, profile=True):
-        l = self._compute_nll(profile=profile)
-        return l
+        return self._compute_nll(profile=profile)
 
-    @tf.function
-    def loss_val(self):
-        val = self._compute_loss()
-        return val
+    def _make_tf_functions(self):
+        # Build tf.function wrappers at instance construction time so that
+        # jit_compile and the HVP autodiff mode can be controlled via fit
+        # options without redefining the class. self.jit_compile has
+        # already been resolved to a plain bool in __init__ (tri-state
+        # "auto"/"on"/"off" collapsed against self.indata.sparse), so
+        # this body just reads it.
+        jit = self.jit_compile
 
-    @tf.function
-    def loss_val_grad(self):
-        with tf.GradientTape() as t:
-            val = self._compute_loss()
-        grad = t.gradient(val, self.x)
-        return val, grad
+        def _loss_val(self):
+            return self._compute_loss()
 
-    # FIXME in principle this version of the function is preferred
-    # but seems to introduce some small numerical non-reproducibility
-    @tf.function
-    def loss_val_grad_hessp_fwdrev(self, p):
-        p = tf.stop_gradient(p)
-        with tf.autodiff.ForwardAccumulator(self.x, p) as acc:
-            with tf.GradientTape() as grad_tape:
+        def _loss_val_grad(self):
+            with tf.GradientTape() as t:
                 val = self._compute_loss()
-            grad = grad_tape.gradient(val, self.x)
-        hessp = acc.jvp(grad)
-        return val, grad, hessp
+            grad = t.gradient(val, self.x)
+            return val, grad
 
-    @tf.function
-    def loss_val_grad_hessp_revrev(self, p):
-        p = tf.stop_gradient(p)
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                val = self._compute_loss()
-            grad = t1.gradient(val, self.x)
-        hessp = t2.gradient(grad, self.x, output_gradients=p)
-        return val, grad, hessp
+        def _loss_val_grad_hessp_fwdrev(self, p):
+            p = tf.stop_gradient(p)
+            with tf.autodiff.ForwardAccumulator(self.x, p) as acc:
+                with tf.GradientTape() as grad_tape:
+                    val = self._compute_loss()
+                grad = grad_tape.gradient(val, self.x)
+            hessp = acc.jvp(grad)
+            return val, grad, hessp
 
-    loss_val_grad_hessp = loss_val_grad_hessp_revrev
+        def _loss_val_grad_hessp_revrev(self, p):
+            p = tf.stop_gradient(p)
+            with tf.GradientTape() as t2:
+                with tf.GradientTape() as t1:
+                    val = self._compute_loss()
+                grad = t1.gradient(val, self.x)
+            hessp = t2.gradient(grad, self.x, output_gradients=p)
+            return val, grad, hessp
+
+        self.loss_val = tf.function(jit_compile=jit)(
+            _loss_val.__get__(self, type(self))
+        )
+        self.loss_val_grad = tf.function(jit_compile=jit)(
+            _loss_val_grad.__get__(self, type(self))
+        )
+        # NOTE: fwdrev HVP is NOT jit-compiled. tf.autodiff.ForwardAccumulator
+        # does not propagate JVPs through XLA-compiled subgraphs (the JVP
+        # comes back as zero), regardless of inner/outer placement. The
+        # loss/grad and revrev HVP wrappers are unaffected.
+        self.loss_val_grad_hessp_fwdrev = tf.function(
+            _loss_val_grad_hessp_fwdrev.__get__(self, type(self))
+        )
+        self.loss_val_grad_hessp_revrev = tf.function(jit_compile=jit)(
+            _loss_val_grad_hessp_revrev.__get__(self, type(self))
+        )
+        # tf.autodiff.ForwardAccumulator does not support tangent
+        # propagation through SparseMatrixMatMul (no JVP rule for the
+        # CSR variant), so the fwdrev HVP cannot be used in sparse mode.
+        # Fall back to revrev with a warning.
+        if self.hvp_method == "fwdrev" and self.indata.sparse:
+            logger.warning(
+                "fwdrev HVP is not supported in sparse mode "
+                "(tf.autodiff.ForwardAccumulator cannot trace through "
+                "tf.linalg.sparse's CSR matmul); falling back to revrev."
+            )
+            self.loss_val_grad_hessp = self.loss_val_grad_hessp_revrev
+        elif self.hvp_method == "fwdrev":
+            self.loss_val_grad_hessp = self.loss_val_grad_hessp_fwdrev
+        else:
+            self.loss_val_grad_hessp = self.loss_val_grad_hessp_revrev
 
     @tf.function
     def loss_val_grad_hess(self, profile=True):
@@ -2245,28 +2505,64 @@ class Fitter:
 
     def minimize(self):
         if self.is_linear:
-            logger.info(
-                "Likelihood is purely quadratic, solving by Cholesky decomposition instead of iterative fit"
-            )
-
-            # no need to do a minimization, simple matrix solve is sufficient
-            val, grad, hess = self.loss_val_grad_hess()
-
-            # use a Cholesky decomposition to easily detect the non-positive-definite case
-            chol = tf.linalg.cholesky(hess)
-
-            # FIXME catch this exception to mark failed toys and continue
-            if tf.reduce_any(tf.math.is_nan(chol)).numpy():
-                raise ValueError(
-                    "Cholesky decomposition failed, Hessian is not positive-definite"
+            if self.compute_cov:
+                logger.info(
+                    "Likelihood is purely quadratic, solving by Cholesky decomposition instead of iterative fit"
                 )
 
-            del hess
-            gradv = grad[..., None]
-            dx = tf.linalg.cholesky_solve(chol, -gradv)[:, 0]
-            del chol
+                # no need to do a minimization, simple matrix solve is sufficient
+                val, grad, hess = self.loss_val_grad_hess()
 
-            self.x.assign_add(dx)
+                # use a Cholesky decomposition to easily detect the non-positive-definite case
+                chol = tf.linalg.cholesky(hess)
+
+                # FIXME catch this exception to mark failed toys and continue
+                if tf.reduce_any(tf.math.is_nan(chol)).numpy():
+                    raise ValueError(
+                        "Cholesky decomposition failed, Hessian is not positive-definite"
+                    )
+
+                del hess
+                gradv = grad[..., None]
+                dx = tf.linalg.cholesky_solve(chol, -gradv)[:, 0]
+                del chol
+
+                self.x.assign_add(dx)
+            else:
+                # --noHessian: we must not allocate the dense [npar, npar]
+                # Hessian that the Cholesky path above builds. Solve the
+                # normal equation H @ dx = -grad iteratively via conjugate
+                # gradient using only Hessian-vector products, which is
+                # already exposed as self.loss_val_grad_hessp. For a
+                # purely quadratic NLL the Hessian is positive-definite
+                # and CG converges to machine precision in at most npar
+                # steps (typically far fewer for well-conditioned
+                # problems).
+                import scipy.sparse.linalg as _spla
+
+                logger.info(
+                    "Likelihood is purely quadratic, solving with "
+                    "Hessian-free conjugate gradient (--noHessian)"
+                )
+                val, grad = self.loss_val_grad()
+                grad_np = grad.numpy()
+                n = int(grad_np.shape[0])
+                dtype = grad_np.dtype
+
+                def _hvp_np(p_np):
+                    p_tf = tf.constant(p_np, dtype=self.x.dtype)
+                    _, _, hessp = self.loss_val_grad_hessp(p_tf)
+                    return hessp.numpy()
+
+                op = _spla.LinearOperator((n, n), matvec=_hvp_np, dtype=dtype)
+                dx_np, info = _spla.cg(op, -grad_np, rtol=1e-10, atol=0.0)
+                if info != 0:
+                    raise ValueError(
+                        f"CG solver did not converge (info={info}); the "
+                        "Hessian may not be positive-definite or the "
+                        "problem may be ill-conditioned"
+                    )
+                self.x.assign_add(tf.constant(dx_np, dtype=self.x.dtype))
 
             callback = None
         else:

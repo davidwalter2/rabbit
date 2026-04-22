@@ -132,6 +132,32 @@ jobs:
         run: >- 
           python tests/symmetrizations.py -o $WEB_DIR/$PLOT_DIR/symmetrizations/ --titlePos 0 --fluctuate
 
+  unit-tests:
+    runs-on: [self-hosted, linux, x64]
+    needs: setenv
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_external_term.py
+          - test_multi_systematic.py
+          - test_sparse_fit.py
+
+    steps:
+      - env:
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
+          PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
+          PATH: ${{ needs.setenv.outputs.PATH }}
+        run: |
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
+          echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
+          echo "PATH=${PATH}" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v5
+
+      - name: run ${{ matrix.test }}
+        run: python tests/${{ matrix.test }}
+
   make-tensor:
     runs-on: [self-hosted, linux, x64]
     needs: setenv
