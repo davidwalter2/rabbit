@@ -1590,7 +1590,12 @@ class Fitter:
 
                             i0 = tf.constant(0)
                             edm0 = tf.constant(tf.float64.max)
-                            tf.while_loop(cond, body, loop_vars=(i0, edm0))
+                            # XLA needs a static upper bound on loop iterations
+                            # to allocate fixed-size tensor lists when the HVP
+                            # is jit_compile=True.
+                            tf.while_loop(
+                                cond, body, loop_vars=(i0, edm0), maximum_iterations=50
+                            )
 
                             x = threshold + tf.exp(self.nbeta)
                             beta = (
@@ -1842,7 +1847,12 @@ class Fitter:
 
                             i0 = tf.constant(0)
                             edm0 = tf.constant(tf.float64.max)
-                            tf.while_loop(cond, body, loop_vars=(i0, edm0))
+                            # XLA needs a static upper bound on loop iterations
+                            # to allocate fixed-size tensor lists when the HVP
+                            # is jit_compile=True.
+                            tf.while_loop(
+                                cond, body, loop_vars=(i0, edm0), maximum_iterations=50
+                            )
 
                             x = threshold + tf.exp(self.nbeta)
                             beta = (
