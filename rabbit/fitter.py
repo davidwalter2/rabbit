@@ -1614,7 +1614,22 @@ class Fitter:
                                 cond, body, loop_vars=(i0, edm0), maximum_iterations=50
                             )
 
-                            x = threshold + tf.exp(self.nbeta)
+                            # Implicit-function-theorem trick: one
+                            # differentiable Newton step at the converged
+                            # value restores du*/dz gradients otherwise lost
+                            # through tf.Variable.assign_sub in the loop.
+                            u_stop = tf.stop_gradient(self.nbeta)
+                            with tf.GradientTape() as t2_imp:
+                                t2_imp.watch(u_stop)
+                                with tf.GradientTape() as t1_imp:
+                                    t1_imp.watch(u_stop)
+                                    val_imp = fnll_nbeta(u_stop)
+                                grad_imp = t1_imp.gradient(val_imp, u_stop)
+                            hess_imp = t2_imp.gradient(grad_imp, u_stop)
+                            safe_hess_imp = tf.maximum(hess_imp, 1e-8)
+                            u_diff = u_stop - grad_imp / safe_hess_imp
+
+                            x = threshold + tf.exp(u_diff)
                             beta = (
                                 kstat
                                 * beta0
@@ -1871,7 +1886,22 @@ class Fitter:
                                 cond, body, loop_vars=(i0, edm0), maximum_iterations=50
                             )
 
-                            x = threshold + tf.exp(self.nbeta)
+                            # Implicit-function-theorem trick: one
+                            # differentiable Newton step at the converged
+                            # value restores du*/dz gradients otherwise lost
+                            # through tf.Variable.assign_sub in the loop.
+                            u_stop = tf.stop_gradient(self.nbeta)
+                            with tf.GradientTape() as t2_imp:
+                                t2_imp.watch(u_stop)
+                                with tf.GradientTape() as t1_imp:
+                                    t1_imp.watch(u_stop)
+                                    val_imp = fnll_nbeta(u_stop)
+                                grad_imp = t1_imp.gradient(val_imp, u_stop)
+                            hess_imp = t2_imp.gradient(grad_imp, u_stop)
+                            safe_hess_imp = tf.maximum(hess_imp, 1e-8)
+                            u_diff = u_stop - grad_imp / safe_hess_imp
+
+                            x = threshold + tf.exp(u_diff)
                             beta = (
                                 kstat
                                 * beta0
