@@ -324,13 +324,29 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 )
 
                 fitter_saturated = copy.deepcopy(fitter)
+
+                toy_theta0 = tf.identity(fitter_saturated.theta0)
+                saved_regularizers = fitter_saturated.regularizers
+                saved_tau = float(fitter_saturated.tau.numpy())
                 fitter_saturated.init_fit_parms(
                     composite_model,
                     args.setConstraintMinimum,
                     unblind=args.unblind,
                     freeze_parameters=args.freezeParameters,
                 )
+                fitter_saturated.theta0.assign(toy_theta0)
+                fitter_saturated.regularizers = saved_regularizers
+                fitter_saturated.tau.assign(saved_tau)
+
+                fitter_saturated.xdefaultassign()
                 cb = fitter_saturated.minimize()
+                if not args.noHessian:
+                    _, grad, hess = fitter_saturated.loss_val_grad_hess()
+                    edmval, cov = fitter_saturated.edmval_cov(grad, hess)
+                    logger.info(f"edmval: {edmval}")
+                else:
+                    edmval = None
+
                 nllvalreduced = fitter_saturated.reduced_nll().numpy()
 
                 ndf = saturated_model.npoi
@@ -342,7 +358,9 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 logger.info(f"    2*deltaNLL: {round(chi2val, 2)}")
                 logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
 
-                ws.add_chi2(chi2val, ndf, prefit, mapping, saturated=True)
+                ws.add_chi2(
+                    chi2val, ndf, prefit, mapping, saturated=True, edmval=edmval
+                )
 
         if args.saveHistsPerProcess and not mapping.skip_per_process:
             logger.info(f"Save processes histogram for {mapping.key}")
