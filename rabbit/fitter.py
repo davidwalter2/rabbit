@@ -238,14 +238,29 @@ class Fitter:
         # dummy tensor to allow differentiation
         self.ubeta = tf.zeros_like(self.beta)
 
+        # Per-(bin, process) mask of data-driven entries (sumw2 == 0).
+        # Used in lite mode to exclude these from the merged sumw reduction
+        # and from the β scaling. Defaults to None (no per-process axis).
+        self.proc_data_driven_mask = None
+
         if self.binByBinStat:
             if self.binByBinStatMode == "full":
                 self.varbeta = self.indata.sumw2
                 self.sumw = self.indata.sumw
             else:
                 if self.indata.sumw2.ndim > 1:
+                    # Identify data-driven processes per bin (no MC stat
+                    # uncertainty). They are excluded from the merged sumw
+                    # so the lite-mode kstat is computed from MC-only
+                    # contributions.
+                    self.proc_data_driven_mask = self.indata.sumw2 == 0.0
+                    sumw_mc = tf.where(
+                        self.proc_data_driven_mask,
+                        tf.zeros_like(self.indata.sumw),
+                        self.indata.sumw,
+                    )
                     self.varbeta = tf.reduce_sum(self.indata.sumw2, axis=-1)
-                    self.sumw = tf.reduce_sum(self.indata.sumw, axis=-1)
+                    self.sumw = tf.reduce_sum(sumw_mc, axis=-1)
                 else:
                     self.varbeta = self.indata.sumw2
                     self.sumw = self.indata.sumw
@@ -1523,10 +1538,18 @@ class Fitter:
 
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
         # Only materialize the dense [nbins, nproc] normcentral when an external
-        # caller requested it, or when binByBinStat "full" mode needs per-process
-        # yields for the analytic beta solution.
+        # caller requested it, when binByBinStat "full" mode needs per-process
+        # yields for the analytic beta solution, or when lite mode needs to
+        # split MC and data-driven (sumw2==0) contributions per bin.
         need_norm = compute_norm or (
-            self.binByBinStat and self.binByBinStatMode == "full"
+            self.binByBinStat
+            and (
+                self.binByBinStatMode == "full"
+                or (
+                    self.binByBinStatMode == "lite"
+                    and self.proc_data_driven_mask is not None
+                )
+            )
         )
         nexp, norm = self._compute_yields_noBBB(full=full, compute_norm=need_norm)
 
@@ -1538,14 +1561,41 @@ class Fitter:
                 nexp_profile = nexp[: self.indata.nbins]
                 beta0 = self.beta0[: self.indata.nbins]
 
+                # In lite mode, split nexp_profile into MC and data-driven
+                # (sumw2==0) per-bin sums so that β only scales the MC part.
+                # When no data-driven processes are present, n_mc == nexp_profile
+                # and n_data == 0, so the lite formulas reduce to their original
+                # form.
+                if (
+                    self.binByBinStatMode == "lite"
+                    and self.proc_data_driven_mask is not None
+                ):
+                    pdd = self.proc_data_driven_mask[: self.indata.nbins]
+                    norm_real = norm[: self.indata.nbins]
+                    n_mc = tf.reduce_sum(
+                        tf.where(pdd, tf.zeros_like(norm_real), norm_real), axis=-1
+                    )
+                    n_data = tf.reduce_sum(
+                        tf.where(pdd, norm_real, tf.zeros_like(norm_real)), axis=-1
+                    )
+                else:
+                    n_mc = nexp_profile
+                    n_data = tf.zeros_like(nexp_profile)
+
+                # Safe denominator for formulas that divide by n_mc; bins with
+                # n_mc == 0 will be overridden by betamask afterwards.
+                n_mc_safe = tf.where(n_mc > 0, n_mc, tf.ones_like(n_mc))
+
                 if self.chisqFit:
                     if self.binByBinStatType == "gamma":
                         kstat = self.kstat[: self.indata.nbins]
                         betamask = self.betamask[: self.indata.nbins]
 
                         if self.binByBinStatMode == "lite":
-                            abeta = nexp_profile**2
-                            bbeta = kstat * self.varnobs - nexp_profile * self.nobs
+                            abeta = n_mc_safe**2
+                            bbeta = (
+                                kstat * self.varnobs + (n_data - self.nobs) * n_mc_safe
+                            )
                             cbeta = -kstat * self.varnobs * beta0
                             beta = solve_quad_eq(abeta, bbeta, cbeta)
                         elif self.binByBinStatMode == "full":
@@ -1669,8 +1719,9 @@ class Fitter:
                         betamask = self.betamask[: self.indata.nbins]
                         if self.binByBinStatMode == "lite":
                             beta = (
-                                nexp_profile * self.nobs / self.varnobs + kstat * beta0
-                            ) / (kstat + nexp_profile * nexp_profile / self.varnobs)
+                                (self.nobs - n_data) * n_mc_safe / self.varnobs
+                                + kstat * beta0
+                            ) / (kstat + n_mc_safe * n_mc_safe / self.varnobs)
 
                             beta = tf.where(betamask, beta0, beta)
 
@@ -1722,14 +1773,13 @@ class Fitter:
                         betamask = self.betamask[: self.indata.nbins]
                         if self.binByBinStatMode == "lite":
 
-                            nexp_profile_m = tf.linalg.LinearOperatorDiag(nexp_profile)
-                            A = (
-                                nexp_profile_m @ self.data_cov_inv @ nexp_profile_m
-                                + tf.linalg.diag(kstat)
+                            n_mc_m = tf.linalg.LinearOperatorDiag(n_mc_safe)
+                            A = n_mc_m @ self.data_cov_inv @ n_mc_m + tf.linalg.diag(
+                                kstat
                             )
                             b = (
-                                nexp_profile_m
-                                @ (self.data_cov_inv @ self.nobs[:, None])
+                                n_mc_m
+                                @ (self.data_cov_inv @ (self.nobs - n_data)[:, None])
                                 + (kstat * beta0)[:, None]
                             )
 
@@ -1812,7 +1862,18 @@ class Fitter:
                         betamask = self.betamask[: self.indata.nbins]
 
                         if self.binByBinStatMode == "lite":
-                            beta = (self.nobs + kstat * beta0) / (nexp_profile + kstat)
+                            # Quadratic profile when data-driven processes
+                            # contribute (β scales only the MC part, leaving
+                            # n_data unchanged). Reduces to the original
+                            # closed form (nobs + k·β0) / (n_mc + k) when
+                            # n_data == 0.
+                            abeta = n_mc_safe * (n_mc_safe + kstat)
+                            bbeta = (
+                                n_mc_safe * (n_data - self.nobs - beta0 * kstat)
+                                + kstat * n_data
+                            )
+                            cbeta = -beta0 * kstat * n_data
+                            beta = solve_quad_eq(abeta, bbeta, cbeta)
                         elif self.binByBinStatMode == "full":
                             norm_profile = norm[: self.indata.nbins]
                             logbeta0 = self.logbeta0[: self.indata.nbins]
@@ -1939,9 +2000,20 @@ class Fitter:
                         kstat = self.kstat[: self.indata.nbins]
                         betamask = self.betamask[: self.indata.nbins]
                         if self.binByBinStatMode == "lite":
-                            abeta = kstat
-                            bbeta = nexp_profile - beta0 * kstat
-                            cbeta = -self.nobs
+                            # Quadratic in β when data-driven processes
+                            # contribute. Reduces to a·β² + b·β + c = 0 with
+                            # a = k, b = n_mc - β0·k, c = -nobs when
+                            # n_data == 0.
+                            abeta = kstat * n_mc_safe
+                            bbeta = (
+                                n_mc_safe**2
+                                - kstat * beta0 * n_mc_safe
+                                + kstat * n_data
+                            )
+                            cbeta = (
+                                n_mc_safe * (n_data - self.nobs)
+                                - kstat * beta0 * n_data
+                            )
                             beta = solve_quad_eq(abeta, bbeta, cbeta)
                             beta = tf.where(betamask, beta0, beta)
                         elif self.binByBinStatMode == "full":
@@ -2023,6 +2095,17 @@ class Fitter:
 
                     norm = tf.where(betamask, norm, betasel * norm)
                     nexp = tf.reduce_sum(norm, -1)
+                elif self.proc_data_driven_mask is not None:
+                    # β scales only MC processes; data-driven (sumw2==0)
+                    # entries pass through unchanged.
+                    pdd = self.proc_data_driven_mask[: nexp.shape[0]]
+                    scale = tf.where(
+                        pdd | betamask[..., None],
+                        tf.ones_like(norm),
+                        betasel[..., None],
+                    )
+                    norm = norm * scale
+                    nexp = tf.reduce_sum(norm, -1)
                 else:
                     nexp = tf.where(betamask, nexp, nexp * betasel)
                     if compute_norm:
@@ -2034,6 +2117,23 @@ class Fitter:
                 sbeta = tf.math.sqrt(varbeta)
                 if self.binByBinStatMode == "full":
                     norm = norm + sbeta * betasel
+                    nexp = tf.reduce_sum(norm, -1)
+                elif self.proc_data_driven_mask is not None:
+                    # Additive correction sbeta·β is distributed only over MC
+                    # processes, weighted by their share of n_mc per bin.
+                    pdd = self.proc_data_driven_mask[: nexp.shape[0]]
+                    mc_norm = tf.where(pdd, tf.zeros_like(norm), norm)
+                    n_mc_bin = tf.reduce_sum(mc_norm, axis=-1)
+                    n_mc_bin_safe = tf.where(
+                        n_mc_bin > 0, n_mc_bin, tf.ones_like(n_mc_bin)
+                    )
+                    addition = (
+                        sbeta[..., None]
+                        * betasel[..., None]
+                        * mc_norm
+                        / n_mc_bin_safe[..., None]
+                    )
+                    norm = norm + addition
                     nexp = tf.reduce_sum(norm, -1)
                 else:
                     nexpnorm = nexp[..., None]
