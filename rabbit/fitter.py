@@ -90,6 +90,7 @@ class Fitter:
         self.globalImpactsFromJVP = globalImpactsFromJVP
         self.binByBinStat = not options.noBinByBinStat
         self.binByBinStatMode = options.binByBinStatMode
+        self.minBBKstat = getattr(options, "minBBKstat", 0.0)
 
         if options.binByBinStatType == "automatic":
             if options.covarianceFit:
@@ -250,6 +251,28 @@ class Fitter:
                     self.sumw = self.indata.sumw
 
             self.betamask = (self.varbeta == 0.0) | (self.sumw == 0.0)
+            if self.minBBKstat > 0.0:
+                # Mask (bin, process) entries with effective MC stats below
+                # threshold to avoid ill-conditioned profiles (e.g. from
+                # mixed-sign-weight cancellations).
+                varbeta_safe = tf.where(
+                    self.betamask,
+                    tf.ones_like(self.varbeta),
+                    self.varbeta,
+                )
+                kstat_eff = self.sumw**2 / varbeta_safe
+                low_stat = kstat_eff < tf.constant(
+                    self.minBBKstat, dtype=self.varbeta.dtype
+                )
+                n_extra = int(
+                    tf.reduce_sum(tf.cast(low_stat & ~self.betamask, tf.int32)).numpy()
+                )
+                if n_extra > 0:
+                    logger.info(
+                        f"--minBBKstat {self.minBBKstat}: masking {n_extra} additional "
+                        f"low-stat (bin, process) entries"
+                    )
+                self.betamask = self.betamask | low_stat
             self.kstat = tf.where(self.betamask, 1.0, self.sumw**2 / self.varbeta)
 
             if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
