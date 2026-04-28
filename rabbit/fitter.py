@@ -12,14 +12,11 @@ from wums import logging
 
 from rabbit import external_likelihood, io_tools
 from rabbit import tfhelpers as tfh
+from rabbit.bbstat import solve_quad_eq
 from rabbit.impacts import global_impacts, nonprofiled_impacts, traditional_impacts
 from rabbit.tfhelpers import edmval_cov
 
 logger = logging.child_logger(__name__)
-
-
-def solve_quad_eq(a, b, c):
-    return 0.5 * (-b + tf.sqrt(b**2 - 4.0 * a * c)) / a
 
 
 def match_regexp_params(regular_expressions, parameter_names):
