@@ -240,3 +240,61 @@ class BinByBinStat:
 
     def beta_default_assign(self):
         self.beta.assign(self.beta0)
+
+    # --- constraint NLL term -----------------------------------------------
+
+    def lbeta(self, beta, full_nll=False):
+        """Constraint-NLL contribution from the β nuisance.
+
+        Returns ``None`` when BBB is disabled. Otherwise returns the scalar
+        ``Σ`` of per-(bin[, proc]) terms suitable for adding to the model
+        NLL (when ``full_nll=False``, the constant terms that don't depend
+        on β/β0 are dropped — this is the variant used inside the
+        minimizer; ``full_nll=True`` adds them back, e.g. for absolute
+        likelihood reporting).
+        """
+        if not self.enabled:
+            return None
+
+        beta0 = self.beta0
+        if self.binByBinStatType == "gamma":
+            kstat = self.kstat
+            betasafe = tf.where(beta0 == 0.0, tf.constant(1.0, dtype=beta.dtype), beta)
+            logbeta = tf.math.log(betasafe)
+
+            if full_nll:
+                # constant terms
+                lgammaalpha = tf.math.lgamma(kstat * beta0)
+                alphalntheta = -kstat * beta0 * tf.math.log(kstat)
+                lbeta = (
+                    -kstat * beta0 * logbeta + kstat * beta + lgammaalpha + alphalntheta
+                )
+            else:
+                lbeta = -kstat * beta0 * (logbeta - self.logbeta0) + kstat * (
+                    beta - beta0
+                )
+
+        elif self.binByBinStatType == "normal-multiplicative":
+            kstat = self.kstat
+            betamask = self.betamask
+            lbeta = tf.where(
+                betamask,
+                tf.constant(0.0, dtype=beta.dtype),
+                0.5 * tf.square(beta - beta0) * kstat,
+            )
+            if full_nll:
+                raise NotImplementedError()
+
+        elif self.binByBinStatType == "normal-additive":
+            lbeta = 0.5 * tf.square(beta - beta0)
+            if full_nll:
+                # TODO: verify
+                sigma2 = 1.0 / self.kstat
+                # log(1/sqrt(2π)) = -0.9189385332046727
+                lbeta = (
+                    lbeta
+                    + tf.cast(tf.shape(sigma2), tf.float64) * 0.9189385332046727
+                    + 0.5 * tf.math.log(sigma2)
+                )
+
+        return tf.reduce_sum(lbeta)
