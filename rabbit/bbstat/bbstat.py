@@ -8,6 +8,8 @@ package docstring in :mod:`rabbit.bbstat` for the high-level layout.
 import tensorflow as tf
 from wums import logging
 
+from rabbit.bbstat.formulas import solve_quad_eq
+
 logger = logging.child_logger(__name__)
 
 
@@ -60,6 +62,9 @@ class BinByBinStat:
         """
         self.indata = indata
         self.dtype = indata.dtype
+        self.chisqFit = chisqFit
+        self.covarianceFit = covarianceFit
+        self.data_cov_inv = data_cov_inv
 
         self.enabled = not options.noBinByBinStat
         self.binByBinStatMode = options.binByBinStatMode
@@ -298,3 +303,565 @@ class BinByBinStat:
                 )
 
         return tf.reduce_sum(lbeta)
+
+    # --- profile + application ---------------------------------------------
+
+    def needs_per_proc_norm(self):
+        """Whether the host should materialize per-process norms.
+
+        ``full`` mode always needs them (its profile uses per-(bin, proc)
+        β); ``lite`` mode only needs them when at least one process is
+        data-driven so that β is applied selectively.
+        """
+        if not self.enabled:
+            return False
+        if self.binByBinStatMode == "full":
+            return True
+        return self.proc_data_driven_mask is not None
+
+    def profile_and_apply(
+        self,
+        nexp,
+        norm,
+        nobs,
+        varnobs,
+        lognobs,
+        *,
+        profile=True,
+        compute_norm=False,
+        full=True,
+    ):
+        """Profile β (when ``profile=True``) and apply it to ``nexp`` / ``norm``.
+
+        Returns ``(nexp, norm, beta)`` where ``beta`` is the (possibly
+        profiled) β tensor. When BBB is disabled, returns the inputs
+        untouched and ``beta=None``.
+        """
+        if not self.enabled:
+            return nexp, norm, None
+
+        if profile:
+            # analytic solution for profiled barlow-beeston lite parameters for each combination
+            # of likelihood and uncertainty form
+
+            nexp_profile = nexp[: self.indata.nbins]
+            beta0 = self.beta0[: self.indata.nbins]
+
+            # In lite mode, split nexp_profile into MC and data-driven
+            # (sumw2==0) per-bin sums so that β only scales the MC part.
+            # When no data-driven processes are present, n_mc == nexp_profile
+            # and n_data == 0, so the lite formulas reduce to their original
+            # form.
+            if (
+                self.binByBinStatMode == "lite"
+                and self.proc_data_driven_mask is not None
+            ):
+                pdd = self.proc_data_driven_mask[: self.indata.nbins]
+                norm_real = norm[: self.indata.nbins]
+                n_mc = tf.reduce_sum(
+                    tf.where(pdd, tf.zeros_like(norm_real), norm_real), axis=-1
+                )
+                n_data = tf.reduce_sum(
+                    tf.where(pdd, norm_real, tf.zeros_like(norm_real)), axis=-1
+                )
+            else:
+                n_mc = nexp_profile
+                n_data = tf.zeros_like(nexp_profile)
+
+            # Safe denominator for formulas that divide by n_mc; bins with
+            # n_mc == 0 will be overridden by betamask afterwards.
+            n_mc_safe = tf.where(n_mc > 0, n_mc, tf.ones_like(n_mc))
+
+            if self.chisqFit:
+                if self.binByBinStatType == "gamma":
+                    kstat = self.kstat[: self.indata.nbins]
+                    betamask = self.betamask[: self.indata.nbins]
+
+                    if self.binByBinStatMode == "lite":
+                        abeta = n_mc_safe**2
+                        bbeta = kstat * varnobs + (n_data - nobs) * n_mc_safe
+                        cbeta = -kstat * varnobs * beta0
+                        beta = solve_quad_eq(abeta, bbeta, cbeta)
+                    elif self.binByBinStatMode == "full":
+                        norm_profile = norm[: self.indata.nbins]
+                        logbeta0 = self.logbeta0[: self.indata.nbins]
+
+                        # Minimum total expected yield for which all betas are
+                        # positive. Optimise in log-space u = log(x - threshold)
+                        # so that x = threshold + exp(u) > threshold for any
+                        # real u, guaranteeing den > 0 and beta > 0 without any
+                        # clipping. Protect against zero norm_profile for
+                        # masked processes: kstat/0 = inf for the argmin
+                        # gradient gives 0*(-inf) = NaN. Use a dummy norm=1
+                        # for betamask bins so the division is finite, then
+                        # set those entries to +inf to exclude them from the
+                        # min.
+                        norm_thresh = tf.where(
+                            betamask, tf.ones_like(norm_profile), norm_profile
+                        )
+                        f_thresh = tf.where(
+                            betamask,
+                            tf.fill(
+                                tf.shape(kstat),
+                                tf.cast(float("inf"), kstat.dtype),
+                            ),
+                            kstat / norm_thresh,
+                        )
+                        threshold = nobs - varnobs * tf.reduce_min(f_thresh, axis=1)
+
+                        # Initialise nbeta in log-space.
+                        self.nbeta.assign(tf.zeros_like(nobs))
+
+                        # solving nbeta numerically using newtons method
+                        # (does not work with forward differentiation i.e.
+                        # use --globalImpacts with --globalImpactsDisableJVP)
+                        def fnll_nbeta(u):
+                            x = threshold + tf.exp(u)
+                            den = (
+                                kstat + ((x - nobs) / varnobs)[..., None] * norm_profile
+                            )
+                            beta = kstat * beta0 / den
+                            beta = tf.where(betamask, beta0, beta)
+                            betasafe = tf.where(
+                                beta0 == 0.0,
+                                tf.constant(1.0, dtype=beta.dtype),
+                                beta,
+                            )
+                            logbeta = tf.math.log(betasafe)
+                            new_nexp = tf.reduce_sum(beta * norm_profile, axis=-1)
+                            ln = 0.5 * (new_nexp - nobs) ** 2 / varnobs
+                            lbeta = tf.reduce_sum(
+                                kstat * (beta - beta0)
+                                - kstat * beta0 * (logbeta - logbeta0),
+                                axis=-1,
+                            )
+                            return ln + lbeta
+
+                        beta = self._newton_solve_nbeta(
+                            fnll_nbeta=fnll_nbeta,
+                            kstat=kstat,
+                            beta0=beta0,
+                            betamask=betamask,
+                            norm_profile=norm_profile,
+                            nobs=nobs,
+                            varnobs=varnobs,
+                            threshold=threshold,
+                            chisq_fit=True,
+                        )
+
+                    beta = tf.where(betamask, beta0, beta)
+                elif self.binByBinStatType == "normal-multiplicative":
+                    kstat = self.kstat[: self.indata.nbins]
+                    betamask = self.betamask[: self.indata.nbins]
+                    if self.binByBinStatMode == "lite":
+                        beta = (
+                            (nobs - n_data) * n_mc_safe / varnobs + kstat * beta0
+                        ) / (kstat + n_mc_safe * n_mc_safe / varnobs)
+                        beta = tf.where(betamask, beta0, beta)
+
+                    elif self.binByBinStatMode == "full":
+                        norm_profile = norm[: self.indata.nbins]
+                        n2kstat = tf.square(norm_profile) / kstat
+                        n2kstat = tf.where(
+                            betamask,
+                            tf.constant(0.0, dtype=self.indata.dtype),
+                            n2kstat,
+                        )
+                        n2kstatsum = tf.reduce_sum(n2kstat, axis=-1)
+                        nbeta = (
+                            nobs / varnobs * n2kstatsum
+                            + tf.reduce_sum(norm_profile * beta0, axis=-1)
+                        ) / (1 + 1 / varnobs * n2kstatsum)
+                        beta = (
+                            beta0
+                            + (1 / varnobs * (nobs - nbeta))[..., None]
+                            * norm_profile
+                            / kstat
+                        )
+                        beta = tf.where(betamask, beta0, beta)
+                elif self.binByBinStatType == "normal-additive":
+                    varbeta = self.varbeta[: self.indata.nbins]
+                    sbeta = tf.math.sqrt(varbeta)
+                    if self.binByBinStatMode == "lite":
+                        beta = (sbeta * (nobs - nexp_profile) + varnobs * beta0) / (
+                            varnobs + varbeta
+                        )
+                    elif self.binByBinStatMode == "full":
+                        varbetasum = tf.reduce_sum(varbeta, axis=-1)
+                        nbeta = (
+                            tf.reduce_sum(sbeta * beta0, axis=-1)
+                            + varbetasum / varnobs * (nobs - nexp_profile)
+                        ) / (1 + varbetasum / varnobs)
+                        beta = (
+                            beta0
+                            - sbeta * ((nexp_profile + nbeta - nobs) / varnobs)[:, None]
+                        )
+            elif self.covarianceFit:
+                if self.binByBinStatType == "normal-multiplicative":
+                    kstat = self.kstat[: self.indata.nbins]
+                    betamask = self.betamask[: self.indata.nbins]
+                    if self.binByBinStatMode == "lite":
+                        n_mc_m = tf.linalg.LinearOperatorDiag(n_mc_safe)
+                        A = n_mc_m @ self.data_cov_inv @ n_mc_m + tf.linalg.diag(kstat)
+                        b = (
+                            n_mc_m @ (self.data_cov_inv @ (nobs - n_data)[:, None])
+                            + (kstat * beta0)[:, None]
+                        )
+
+                        # Cholesky solve sometimes does not give corret result
+                        # chol = tf.linalg.cholesky(A)
+                        # beta = tf.linalg.cholesky_solve(chol, b)
+                        beta = tf.linalg.solve(A, b)
+                        beta = tf.squeeze(beta, axis=-1)
+                        beta = tf.where(betamask, beta0, beta)
+                    elif self.binByBinStatMode == "full":
+                        norm_profile = norm[: self.indata.nbins]
+
+                        # first solve sum of processes
+                        nbeta0 = tf.reduce_sum(norm_profile * beta0, axis=1)
+                        n2kstat = tf.square(norm_profile) / kstat
+                        n2kstat = tf.where(
+                            betamask,
+                            tf.constant(0.0, dtype=self.indata.dtype),
+                            n2kstat,
+                        )
+                        n2kstatsum = tf.reduce_sum(n2kstat, axis=1)
+                        n2kstatsum_m = tf.linalg.LinearOperatorDiag(n2kstatsum)
+
+                        A = n2kstatsum_m @ self.data_cov_inv + tf.eye(
+                            self.data_cov_inv.shape[0],
+                            dtype=self.data_cov_inv.dtype,
+                        )
+                        b = (
+                            n2kstatsum_m @ self.data_cov_inv @ (nobs[:, None])
+                            + nbeta0[:, None]
+                        )
+
+                        # Cholesky solve sometimes does not give corret result
+                        # chol = tf.linalg.cholesky(A)
+                        # nbeta = tf.linalg.cholesky_solve(chol, b)
+                        nbeta = tf.linalg.solve(A, b)
+
+                        # now solve for beta [nprocesses x nbins]
+                        beta = beta0 - norm_profile / kstat * (
+                            self.data_cov_inv @ (nbeta - nobs[:, None])
+                        )
+                        beta = tf.where(betamask, beta0, beta)
+                elif self.binByBinStatType == "normal-additive":
+                    varbeta = self.varbeta[: self.indata.nbins]
+                    sbeta = tf.math.sqrt(varbeta)
+                    if self.binByBinStatMode == "lite":
+                        sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
+                        beta = tf.linalg.lu_solve(
+                            *self.betaauxlu,
+                            sbeta_m
+                            @ self.data_cov_inv
+                            @ ((nobs - nexp_profile)[:, None])
+                            + beta0[:, None],
+                        )
+                        beta = tf.squeeze(beta, axis=-1)
+                    elif self.binByBinStatMode == "full":
+                        # first solve for sum of processes
+                        sbetabeta0sum = tf.reduce_sum(sbeta * beta0, axis=1)
+                        varbetasum = tf.reduce_sum(varbeta, axis=1)
+                        varbetasum = tf.linalg.LinearOperatorDiag(varbetasum)
+
+                        nbeta = tf.linalg.lu_solve(
+                            *self.betaauxlu,
+                            varbetasum
+                            @ self.data_cov_inv
+                            @ ((nobs - nexp_profile)[:, None])
+                            + sbetabeta0sum[:, None],
+                        )
+                        # second solve for beta
+                        beta = beta0 - sbeta * (
+                            self.data_cov_inv
+                            @ (nbeta + nexp_profile[:, None] - nobs[:, None])
+                        )
+            else:
+                if self.binByBinStatType == "gamma":
+                    kstat = self.kstat[: self.indata.nbins]
+                    betamask = self.betamask[: self.indata.nbins]
+
+                    if self.binByBinStatMode == "lite":
+                        # Quadratic profile when data-driven processes
+                        # contribute (β scales only the MC part, leaving
+                        # n_data unchanged). Reduces to the original
+                        # closed form (nobs + k·β0) / (n_mc + k) when
+                        # n_data == 0.
+                        abeta = n_mc_safe * (n_mc_safe + kstat)
+                        bbeta = (
+                            n_mc_safe * (n_data - nobs - beta0 * kstat) + kstat * n_data
+                        )
+                        cbeta = -beta0 * kstat * n_data
+                        beta = solve_quad_eq(abeta, bbeta, cbeta)
+                    elif self.binByBinStatMode == "full":
+                        norm_profile = norm[: self.indata.nbins]
+                        logbeta0 = self.logbeta0[: self.indata.nbins]
+
+                        # Minimum total expected yield for which all betas are
+                        # positive. Optimise in log-space u = log(x - threshold)
+                        # so that x = threshold + exp(u) > threshold for any
+                        # real u, guaranteeing den > 0 and beta > 0 without any
+                        # clipping. Protect against zero norm_profile for
+                        # masked processes (see chisqFit branch above).
+                        norm_thresh = tf.where(
+                            betamask, tf.ones_like(norm_profile), norm_profile
+                        )
+                        f_thresh = tf.where(
+                            betamask,
+                            tf.fill(
+                                tf.shape(kstat),
+                                tf.cast(float("inf"), kstat.dtype),
+                            ),
+                            1.0 + kstat / norm_thresh,
+                        )
+                        threshold = nobs / tf.reduce_min(f_thresh, axis=1)
+
+                        # Initialise nbeta in log-space from the current
+                        # nexp_profile.
+                        self.nbeta.assign(tf.zeros_like(nobs))
+
+                        def fnll_nbeta(u):
+                            x = threshold + tf.exp(u)
+                            den = (1 - nobs / x)[..., None] * norm_profile + kstat
+                            beta = kstat * beta0 / den
+                            beta = tf.where(betamask, beta0, beta)
+                            betasafe = tf.where(
+                                beta0 == 0.0,
+                                tf.constant(1.0, dtype=beta.dtype),
+                                beta,
+                            )
+                            logbeta = tf.math.log(betasafe)
+                            new_nexp = tf.reduce_sum(beta * norm_profile, axis=-1)
+                            nexpsafe = tf.where(
+                                nobs == 0.0,
+                                tf.constant(1.0, dtype=new_nexp.dtype),
+                                new_nexp,
+                            )
+                            lognexp = tf.math.log(nexpsafe)
+                            ln = new_nexp - nobs - nobs * (lognexp - lognobs)
+                            lbeta = tf.reduce_sum(
+                                kstat * (beta - beta0)
+                                - kstat * beta0 * (logbeta - logbeta0),
+                                axis=-1,
+                            )
+                            return ln + lbeta
+
+                        beta = self._newton_solve_nbeta(
+                            fnll_nbeta=fnll_nbeta,
+                            kstat=kstat,
+                            beta0=beta0,
+                            betamask=betamask,
+                            norm_profile=norm_profile,
+                            nobs=nobs,
+                            varnobs=None,
+                            threshold=threshold,
+                            chisq_fit=False,
+                        )
+
+                    beta = tf.where(betamask, beta0, beta)
+                elif self.binByBinStatType == "normal-multiplicative":
+                    kstat = self.kstat[: self.indata.nbins]
+                    betamask = self.betamask[: self.indata.nbins]
+                    if self.binByBinStatMode == "lite":
+                        # Quadratic in β when data-driven processes
+                        # contribute. Reduces to a·β² + b·β + c = 0 with
+                        # a = k, b = n_mc - β0·k, c = -nobs when
+                        # n_data == 0.
+                        abeta = kstat * n_mc_safe
+                        bbeta = (
+                            n_mc_safe**2 - kstat * beta0 * n_mc_safe + kstat * n_data
+                        )
+                        cbeta = n_mc_safe * (n_data - nobs) - kstat * beta0 * n_data
+                        beta = solve_quad_eq(abeta, bbeta, cbeta)
+                        beta = tf.where(betamask, beta0, beta)
+                    elif self.binByBinStatMode == "full":
+                        norm_profile = norm[: self.indata.nbins]
+                        n2kstat = tf.square(norm_profile) / kstat
+                        n2kstat = tf.where(
+                            betamask,
+                            tf.constant(0.0, dtype=self.indata.dtype),
+                            n2kstat,
+                        )
+                        pbeta = tf.reduce_sum(n2kstat - beta0 * norm_profile, axis=-1)
+                        qbeta = -nobs * tf.reduce_sum(n2kstat, axis=-1)
+                        nbeta = solve_quad_eq(1, pbeta, qbeta)
+                        beta = (
+                            beta0 + (nobs / nbeta - 1)[..., None] * norm_profile / kstat
+                        )
+                        beta = tf.where(betamask, beta0, beta)
+                elif self.binByBinStatType == "normal-additive":
+                    varbeta = self.varbeta[: self.indata.nbins]
+                    sbeta = tf.math.sqrt(varbeta)
+                    if self.binByBinStatMode == "lite":
+                        abeta = sbeta
+                        abeta = tf.where(
+                            varbeta == 0.0,
+                            tf.constant(1.0, dtype=varbeta.dtype),
+                            abeta,
+                        )
+                        bbeta = varbeta + nexp_profile - sbeta * beta0
+                        cbeta = sbeta * (nexp_profile - nobs) - nexp_profile * beta0
+                        beta = solve_quad_eq(abeta, bbeta, cbeta)
+                        beta = tf.where(varbeta == 0.0, beta0, beta)
+                    elif self.binByBinStatMode == "full":
+                        norm_profile = norm[: self.indata.nbins]
+                        qbeta = -nobs * tf.reduce_sum(varbeta, axis=-1)
+                        pbeta = tf.reduce_sum(
+                            varbeta - sbeta * beta0 - norm_profile, axis=-1
+                        )
+                        nbeta = solve_quad_eq(1, pbeta, qbeta)
+                        beta = beta0 + (nobs / nbeta - 1)[..., None] * sbeta
+
+            if self.indata.nbinsmasked:
+                beta = tf.concat([beta, self.beta0[self.indata.nbins :]], axis=0)
+        else:
+            beta = self.beta
+
+        # Add dummy tensor to allow convenient differentiation by beta even
+        # when profiling
+        beta = beta + self.ubeta
+
+        betasel = beta[: nexp.shape[0]]
+
+        if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
+            betamask = self.betamask[: nexp.shape[0]]
+            if self.binByBinStatMode == "full":
+                if self.indata.betavar is not None and full:
+                    # apply beta variations as normal scaling
+                    n0 = self.indata.norm
+                    sbeta = tf.math.sqrt(self.kstat[: self.indata.nbins])
+                    dbeta = sbeta * (betasel[: self.indata.nbins] - 1)
+                    dbeta = tf.where(
+                        betamask[: self.indata.nbins], tf.zeros_like(dbeta), dbeta
+                    )
+                    var = tf.einsum("ijk,jk->ik", self.indata.betavar, dbeta)
+                    safe_n0 = tf.where(n0 > 0, n0, 1.0)
+                    ratio = var / safe_n0
+                    norm = tf.where(n0 > 0, norm * (1 + ratio), norm)
+
+                norm = tf.where(betamask, norm, betasel * norm)
+                nexp = tf.reduce_sum(norm, -1)
+            elif self.proc_data_driven_mask is not None:
+                # β scales only MC processes; data-driven (sumw2==0)
+                # entries pass through unchanged.
+                pdd = self.proc_data_driven_mask[: nexp.shape[0]]
+                scale = tf.where(
+                    pdd | betamask[..., None],
+                    tf.ones_like(norm),
+                    betasel[..., None],
+                )
+                norm = norm * scale
+                nexp = tf.reduce_sum(norm, -1)
+            else:
+                nexp = tf.where(betamask, nexp, nexp * betasel)
+                if compute_norm:
+                    norm = tf.where(
+                        betamask[..., None], norm, betasel[..., None] * norm
+                    )
+        elif self.binByBinStatType == "normal-additive":
+            varbeta = self.varbeta[: nexp.shape[0]]
+            sbeta = tf.math.sqrt(varbeta)
+            if self.binByBinStatMode == "full":
+                norm = norm + sbeta * betasel
+                nexp = tf.reduce_sum(norm, -1)
+            elif self.proc_data_driven_mask is not None:
+                # Additive correction sbeta·β is distributed only over MC
+                # processes, weighted by their share of n_mc per bin.
+                pdd = self.proc_data_driven_mask[: nexp.shape[0]]
+                mc_norm = tf.where(pdd, tf.zeros_like(norm), norm)
+                n_mc_bin = tf.reduce_sum(mc_norm, axis=-1)
+                n_mc_bin_safe = tf.where(n_mc_bin > 0, n_mc_bin, tf.ones_like(n_mc_bin))
+                addition = (
+                    sbeta[..., None]
+                    * betasel[..., None]
+                    * mc_norm
+                    / n_mc_bin_safe[..., None]
+                )
+                norm = norm + addition
+                nexp = tf.reduce_sum(norm, -1)
+            else:
+                nexpnorm = nexp[..., None]
+                nexp = nexp + sbeta * betasel
+                if compute_norm:
+                    # distribute the change in yields proportionally across processes
+                    norm = (
+                        norm + sbeta[..., None] * betasel[..., None] * norm / nexpnorm
+                    )
+
+        return nexp, norm, beta
+
+    # --- gamma + full Newton helper ---------------------------------------
+
+    def _newton_solve_nbeta(
+        self,
+        *,
+        fnll_nbeta,
+        kstat,
+        beta0,
+        betamask,
+        norm_profile,
+        nobs,
+        varnobs,
+        threshold,
+        chisq_fit,
+    ):
+        """Numerical profile of β for the gamma + full mode.
+
+        Uses Newton iteration on the per-bin scalar ``nbeta`` (in
+        log-space ``u = log(x - threshold)``) to find the joint
+        minimum of the data NLL + γ-constraint, then performs one
+        differentiable Newton step at the converged value to restore
+        ``du*/dz`` gradients otherwise lost through
+        ``tf.Variable.assign_sub``.
+        """
+
+        def val_grad_hess_nbeta():
+            with tf.GradientTape() as t2:
+                with tf.GradientTape() as t1:
+                    val = fnll_nbeta(self.nbeta)
+                grad = t1.gradient(val, self.nbeta)
+            hess = t2.gradient(grad, self.nbeta)
+            return val, grad, hess
+
+        def body(i, edm):
+            val, grad, hess = val_grad_hess_nbeta()
+            safe_hess = tf.maximum(hess, 1e-8)
+            step = tf.clip_by_value(grad / safe_hess, -1.0, 1.0)
+            self.nbeta.assign_sub(step)
+            return i + 1, tf.reduce_max(0.5 * grad**2 / safe_hess)
+
+        def cond(i, edm):
+            return tf.logical_and(i < 50, edm > 1e-10)
+
+        i0 = tf.constant(0)
+        edm0 = tf.constant(tf.float64.max)
+        # XLA needs a static upper bound on loop iterations to allocate
+        # fixed-size tensor lists when the HVP is jit_compile=True.
+        tf.while_loop(cond, body, loop_vars=(i0, edm0), maximum_iterations=50)
+
+        # Implicit-function-theorem trick: one differentiable Newton step
+        # at the converged value restores du*/dz gradients otherwise lost
+        # through tf.Variable.assign_sub in the loop.
+        u_stop = tf.stop_gradient(self.nbeta)
+        with tf.GradientTape() as t2_imp:
+            t2_imp.watch(u_stop)
+            with tf.GradientTape() as t1_imp:
+                t1_imp.watch(u_stop)
+                val_imp = fnll_nbeta(u_stop)
+            grad_imp = t1_imp.gradient(val_imp, u_stop)
+        hess_imp = t2_imp.gradient(grad_imp, u_stop)
+        safe_hess_imp = tf.maximum(hess_imp, 1e-8)
+        u_diff = u_stop - grad_imp / safe_hess_imp
+
+        x = threshold + tf.exp(u_diff)
+        if chisq_fit:
+            beta = (
+                kstat
+                * beta0
+                / (kstat + ((x - nobs) / varnobs)[..., None] * norm_profile)
+            )
+        else:
+            beta = kstat * beta0 / ((1 - nobs / x)[..., None] * norm_profile + kstat)
+        return beta
