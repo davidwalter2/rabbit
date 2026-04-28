@@ -12,7 +12,11 @@ from wums import logging
 
 from rabbit import external_likelihood, io_tools
 from rabbit import tfhelpers as tfh
-from rabbit.bbstat import solve_quad_eq
+from rabbit.bbstat import (
+    VALID_BIN_BY_BIN_STAT_TYPES,
+    BinByBinStat,
+    solve_quad_eq,
+)
 from rabbit.impacts import global_impacts, nonprofiled_impacts, traditional_impacts
 from rabbit.tfhelpers import edmval_cov
 
@@ -75,7 +79,7 @@ class FitterCallback:
 
 
 class Fitter:
-    valid_bin_by_bin_stat_types = ["gamma", "normal-additive", "normal-multiplicative"]
+    valid_bin_by_bin_stat_types = VALID_BIN_BY_BIN_STAT_TYPES
     valid_systematic_types = ["log_normal", "normal"]
 
     def __init__(
@@ -85,33 +89,6 @@ class Fitter:
 
         self.earlyStopping = options.earlyStopping
         self.globalImpactsFromJVP = globalImpactsFromJVP
-        self.binByBinStat = not options.noBinByBinStat
-        self.binByBinStatMode = options.binByBinStatMode
-        self.minBBKstat = getattr(options, "minBBKstat", 0.0)
-
-        if options.binByBinStatType == "automatic":
-            if options.covarianceFit:
-                self.binByBinStatType = "normal-additive"
-            elif options.binByBinStatMode == "full":
-                self.binByBinStatType = "normal-multiplicative"
-            else:
-                self.binByBinStatType = "gamma"
-        else:
-            self.binByBinStatType = options.binByBinStatType
-
-        if (
-            options.covarianceFit
-            and self.binByBinStat
-            and not self.binByBinStatType.startswith("normal")
-        ):
-            raise Exception(
-                'bin-by-bin stat only for option "--covarianceFit" with "--binByBinStatType normal"'
-            )
-
-        if self.binByBinStatType not in Fitter.valid_bin_by_bin_stat_types:
-            raise RuntimeError(
-                f"Invalid binByBinStatType {self.binByBinStatType}, valid choices are {Fitter.valid_bin_by_bin_stat_types}"
-            )
 
         if self.indata.systematic_type not in Fitter.valid_systematic_types:
             raise RuntimeError(
@@ -172,14 +149,6 @@ class Fitter:
             options.prefitUnconstrainedNuisanceUncertainty
         )
 
-        # --- fit params
-        self.init_fit_parms(
-            param_model,
-            options.setConstraintMinimum,
-            unblind=options.unblind,
-            freeze_parameters=options.freezeParameters,
-        )
-
         # --- observed number of events per bin
         self.nobs = tf.Variable(
             tf.zeros_like(self.indata.data_obs), trainable=False, name="nobs"
@@ -207,124 +176,28 @@ class Fitter:
                 # provided covariance
                 self.data_cov_inv = self.indata.data_cov_inv
 
-        # FIXME for now this is needed even if binByBinStat is off because of how it is used in the global impacts
-        #  and uncertainty band computations (gradient is allowed to be zero or None and then propagated or skipped only later)
-
-        # --- MC stat
-        # global observables for mc stat uncertainty
-        if self.binByBinStatMode == "full":
-            self.beta_shape = self.indata.sumw.shape
-        elif self.binByBinStatMode == "lite":
-            self.beta_shape = (self.indata.sumw.shape[0],)
-
-        self.beta0 = tf.Variable(
-            tf.zeros(self.beta_shape, dtype=self.indata.dtype),
-            trainable=False,
-            name="beta0",
+        # --- bin-by-bin statistical treatment (β nuisances + masks + kstat).
+        # All BBB state is owned by the BinByBinStat helper. Fitter accesses
+        # it via property shims (see further below) so external callers that
+        # historically read self.binByBinStat / self.beta / self.kstat / etc.
+        # continue to work. Constructed here, before init_fit_parms, because
+        # init_fit_parms's is_linear computation reads self.binByBinStat.
+        self.bbstat = BinByBinStat(
+            indata,
+            options,
+            chisqFit=self.chisqFit,
+            covarianceFit=self.covarianceFit,
+            data_cov_inv=self.data_cov_inv,
+            nobs_template=self.nobs,
         )
-        self.logbeta0 = tf.Variable(
-            tf.zeros(self.beta_shape, dtype=self.indata.dtype),
-            trainable=False,
-            name="logbeta0",
+
+        # --- fit params
+        self.init_fit_parms(
+            param_model,
+            options.setConstraintMinimum,
+            unblind=options.unblind,
+            freeze_parameters=options.freezeParameters,
         )
-        self.beta0defaultassign()
-
-        # nuisance parameters for mc stat uncertainty
-        self.beta = tf.Variable(self.beta0, trainable=False, name="beta")
-
-        # dummy tensor to allow differentiation
-        self.ubeta = tf.zeros_like(self.beta)
-
-        # Per-(bin, process) mask of data-driven entries (sumw2 == 0).
-        # Used in lite mode to exclude these from the merged sumw reduction
-        # and from the β scaling. Defaults to None (no per-process axis).
-        self.proc_data_driven_mask = None
-
-        if self.binByBinStat:
-            if self.binByBinStatMode == "full":
-                self.varbeta = self.indata.sumw2
-                self.sumw = self.indata.sumw
-            else:
-                if self.indata.sumw2.ndim > 1:
-                    # Identify data-driven processes per bin (no MC stat
-                    # uncertainty). They are excluded from the merged sumw
-                    # so the lite-mode kstat is computed from MC-only
-                    # contributions.
-                    self.proc_data_driven_mask = self.indata.sumw2 == 0.0
-                    sumw_mc = tf.where(
-                        self.proc_data_driven_mask,
-                        tf.zeros_like(self.indata.sumw),
-                        self.indata.sumw,
-                    )
-                    self.varbeta = tf.reduce_sum(self.indata.sumw2, axis=-1)
-                    self.sumw = tf.reduce_sum(sumw_mc, axis=-1)
-                else:
-                    self.varbeta = self.indata.sumw2
-                    self.sumw = self.indata.sumw
-
-            self.betamask = (self.varbeta == 0.0) | (self.sumw == 0.0)
-            if self.minBBKstat > 0.0:
-                # Mask (bin, process) entries with effective MC stats below
-                # threshold to avoid ill-conditioned profiles (e.g. from
-                # mixed-sign-weight cancellations).
-                varbeta_safe = tf.where(
-                    self.betamask,
-                    tf.ones_like(self.varbeta),
-                    self.varbeta,
-                )
-                kstat_eff = self.sumw**2 / varbeta_safe
-                low_stat = kstat_eff < tf.constant(
-                    self.minBBKstat, dtype=self.varbeta.dtype
-                )
-                n_extra = int(
-                    tf.reduce_sum(tf.cast(low_stat & ~self.betamask, tf.int32)).numpy()
-                )
-                if n_extra > 0:
-                    logger.info(
-                        f"--minBBKstat {self.minBBKstat}: masking {n_extra} additional "
-                        f"low-stat (bin, process) entries"
-                    )
-                self.betamask = self.betamask | low_stat
-            self.kstat = tf.where(self.betamask, 1.0, self.sumw**2 / self.varbeta)
-
-            if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
-                if self.binByBinStatType == "gamma" and self.binByBinStatMode == "full":
-                    logger.warning(
-                        "Running with '--binByBinStatType gamma --binByBinStatMode full' is experimental and results should be taken with care"
-                    )
-                    self.nbeta = tf.Variable(
-                        tf.ones_like(self.nobs), trainable=True, name="nbeta"
-                    )
-
-            elif self.binByBinStatType == "normal-additive":
-                # precompute decomposition of composite matrix to speed up
-                # calculation of profiled beta values
-                if self.covarianceFit:
-                    sbeta = tf.math.sqrt(self.varbeta[: self.indata.nbins])
-
-                    if self.binByBinStatMode == "lite":
-                        sbeta = tf.linalg.LinearOperatorDiag(sbeta)
-                        self.betaauxlu = tf.linalg.lu(
-                            sbeta @ self.data_cov_inv @ sbeta
-                            + tf.eye(
-                                self.data_cov_inv.shape[0],
-                                dtype=self.data_cov_inv.dtype,
-                            )
-                        )
-                    elif self.binByBinStatMode == "full":
-                        varbetasum = tf.reduce_sum(
-                            self.varbeta[: self.indata.nbins], axis=1
-                        )
-
-                        varbetasum = tf.linalg.LinearOperatorDiag(varbetasum)
-
-                        self.betaauxlu = tf.linalg.lu(
-                            varbetasum @ self.data_cov_inv
-                            + tf.eye(
-                                self.data_cov_inv.shape[0],
-                                dtype=self.data_cov_inv.dtype,
-                            )
-                        )
 
         self.nexpnom = tf.Variable(
             self.expected_yield(), trainable=False, name="nexpnom"
@@ -664,11 +537,77 @@ class Fitter:
             [self.get_poi(), self.get_model_nui(), self.get_theta()], axis=0
         )
 
+    # --- BBB-related backward-compat property shims -----------------------
+    # External callers (and lots of internal code) read these attributes
+    # off Fitter directly. They now live on Fitter.bbstat; expose forwarding
+    # properties so the rest of the codebase doesn't have to change.
+
+    @property
+    def binByBinStat(self):
+        return self.bbstat.enabled
+
+    @property
+    def binByBinStatMode(self):
+        return self.bbstat.binByBinStatMode
+
+    @property
+    def binByBinStatType(self):
+        return self.bbstat.binByBinStatType
+
+    @property
+    def minBBKstat(self):
+        return self.bbstat.minBBKstat
+
+    @property
+    def beta_shape(self):
+        return self.bbstat.beta_shape
+
+    @property
+    def beta0(self):
+        return self.bbstat.beta0
+
+    @property
+    def logbeta0(self):
+        return self.bbstat.logbeta0
+
+    @property
+    def beta(self):
+        return self.bbstat.beta
+
+    @property
+    def ubeta(self):
+        return self.bbstat.ubeta
+
+    @property
+    def nbeta(self):
+        return self.bbstat.nbeta
+
+    @property
+    def varbeta(self):
+        return self.bbstat.varbeta
+
+    @property
+    def sumw(self):
+        return self.bbstat.sumw
+
+    @property
+    def betamask(self):
+        return self.bbstat.betamask
+
+    @property
+    def kstat(self):
+        return self.bbstat.kstat
+
+    @property
+    def betaauxlu(self):
+        return self.bbstat.betaauxlu
+
+    @property
+    def proc_data_driven_mask(self):
+        return self.bbstat.proc_data_driven_mask
+
     def _default_beta0(self):
-        if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
-            return tf.ones(self.beta_shape, dtype=self.indata.dtype)
-        elif self.binByBinStatType == "normal-additive":
-            return tf.zeros(self.beta_shape, dtype=self.indata.dtype)
+        return self.bbstat.default_beta0()
 
     def prefit_variance(self, unconstrained_err=0.0):
         """Per-parameter prefit variance vector of length npar.
@@ -727,13 +666,7 @@ class Fitter:
         self.lognobs.assign(tf.math.log(nobssafe))
 
     def set_beta0(self, values):
-        self.beta0.assign(values)
-        # compute offset for Gamma nll improved numerical precision in minimizatoin
-        # the offset is chosen to give the saturated likelihood
-        beta0safe = tf.where(
-            values == 0.0, tf.constant(1.0, dtype=values.dtype), values
-        )
-        self.logbeta0.assign(tf.math.log(beta0safe))
+        self.bbstat.set_beta0(values)
 
     def theta0defaultassign(self):
         self.theta0.assign(self.theta0default)
@@ -747,10 +680,10 @@ class Fitter:
             )
 
     def beta0defaultassign(self):
-        self.set_beta0(self._default_beta0())
+        self.bbstat.beta0_default_assign()
 
     def betadefaultassign(self):
-        self.beta.assign(self.beta0)
+        self.bbstat.beta_default_assign()
 
     def defaultassign(self):
         var_pre = self.prefit_variance(
