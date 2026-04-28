@@ -246,6 +246,80 @@ class BinByBinStat:
     def beta_default_assign(self):
         self.beta.assign(self.beta0)
 
+    # --- toy randomization -------------------------------------------------
+
+    def randomize_bayes(self):
+        """Bayesian toy: randomize the *value* of β around β0.
+
+        FIXME: only valid for β0 = β = 1 in the gamma case (which should
+        always hold when throwing toys).
+        """
+        if not self.enabled:
+            return
+
+        if self.binByBinStatType == "gamma":
+            betagen = (
+                tf.random.gamma(
+                    shape=[],
+                    alpha=self.kstat * self.beta0 + 1.0,
+                    beta=tf.ones_like(self.kstat),
+                    dtype=self.beta.dtype,
+                )
+                / self.kstat
+            )
+            betagen = tf.where(self.kstat == 0.0, 0.0, betagen)
+            self.beta.assign(betagen)
+        else:
+            if self.binByBinStatType == "normal-multiplicative":
+                stddev_beta0 = tf.sqrt(self.varbeta)
+            elif self.binByBinStatType == "normal-additive":
+                stddev_beta0 = tf.ones_like(self.beta0)
+            self.beta.assign(
+                tf.random.normal(
+                    shape=[],
+                    mean=self.beta0,
+                    stddev=stddev_beta0,
+                    dtype=self.beta.dtype,
+                )
+            )
+
+    def randomize_frequentist(self):
+        """Frequentist toy: randomize the *constraint minimum* β0 around β.
+
+        FIXME: only valid for β0 = β = 1 in the gamma case.
+        """
+        if not self.enabled:
+            return
+
+        if self.binByBinStatType == "gamma":
+            beta0gen = (
+                tf.random.poisson(
+                    shape=[],
+                    lam=self.kstat * self.beta,
+                    dtype=self.beta.dtype,
+                )
+                / self.kstat
+            )
+            beta0gen = tf.where(
+                self.kstat == 0.0,
+                tf.constant(0.0, dtype=self.kstat.dtype),
+                beta0gen,
+            )
+            self.set_beta0(beta0gen)
+        else:
+            if self.binByBinStatType == "normal-multiplicative":
+                stddev_beta = tf.sqrt(self.varbeta)
+            elif self.binByBinStatType == "normal-additive":
+                stddev_beta = tf.ones_like(self.beta)
+            self.set_beta0(
+                tf.random.normal(
+                    shape=[],
+                    mean=self.beta,
+                    stddev=stddev_beta,
+                    dtype=self.beta.dtype,
+                )
+            )
+
     # --- constraint NLL term -----------------------------------------------
 
     def lbeta(self, beta, full_nll=False):
