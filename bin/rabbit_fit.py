@@ -29,8 +29,8 @@ from rabbit import fitter, inputdata, parsing, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
 from rabbit.mappings import project
-from rabbit.poi_models import helpers as ph
-from rabbit.poi_models import poi_model
+from rabbit.param_models import helpers as ph
+from rabbit.param_models import param_model
 from rabbit.regularization import helpers as rh
 from rabbit.regularization.lcurve import l_curve_optimize_tau, l_curve_scan_tau
 from rabbit.tfhelpers import edmval_cov
@@ -316,21 +316,37 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
             ):
                 # saturated likelihood test
 
-                saturated_model = poi_model.SaturatedProjectModel(
+                saturated_model = param_model.SaturatedProjectModel(
                     fitter.indata, mapping.channel_info
                 )
-                composite_model = poi_model.CompositePOIModel(
-                    [fitter.poi_model, saturated_model]
+                composite_model = param_model.CompositeParamModel(
+                    [fitter.param_model, saturated_model]
                 )
 
                 fitter_saturated = copy.deepcopy(fitter)
+
+                toy_theta0 = tf.identity(fitter_saturated.theta0)
+                saved_regularizers = fitter_saturated.regularizers
+                saved_tau = float(fitter_saturated.tau.numpy())
                 fitter_saturated.init_fit_parms(
                     composite_model,
                     args.setConstraintMinimum,
                     unblind=args.unblind,
                     freeze_parameters=args.freezeParameters,
                 )
+                fitter_saturated.theta0.assign(toy_theta0)
+                fitter_saturated.regularizers = saved_regularizers
+                fitter_saturated.tau.assign(saved_tau)
+
+                fitter_saturated.xdefaultassign()
                 cb = fitter_saturated.minimize()
+                if not args.noHessian:
+                    _, grad, hess = fitter_saturated.loss_val_grad_hess()
+                    edmval, cov = fitter_saturated.edmval_cov(grad, hess)
+                    logger.info(f"edmval: {edmval}")
+                else:
+                    edmval = None
+
                 nllvalreduced = fitter_saturated.reduced_nll().numpy()
 
                 ndf = saturated_model.npoi
@@ -342,7 +358,9 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 logger.info(f"    2*deltaNLL: {round(chi2val, 2)}")
                 logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
 
-                ws.add_chi2(chi2val, ndf, prefit, mapping, saturated=True)
+                ws.add_chi2(
+                    chi2val, ndf, prefit, mapping, saturated=True, edmval=edmval
+                )
 
         if args.saveHistsPerProcess and not mapping.skip_per_process:
             logger.info(f"Save processes histogram for {mapping.key}")
@@ -498,7 +516,9 @@ def fit(args, fitter, ws, dofit=True):
     nllvalreduced = fitter.reduced_nll().numpy()
 
     ndfsat = (
-        tf.size(fitter.nobs) - fitter.poi_model.npoi - fitter.indata.nsystnoconstraint
+        tf.size(fitter.nobs)
+        - fitter.param_model.nparams
+        - fitter.indata.nsystnoconstraint
     ).numpy()
 
     chi2_val = 2.0 * nllvalreduced
@@ -646,12 +666,12 @@ def main():
 
     indata = inputdata.FitInputData(args.filename, args.pseudoData)
 
-    margs = args.poiModel
-    poi_model = ph.load_model(margs[0], indata, *margs[1:], **vars(args))
+    model_specs = args.paramModel or [["Mu"]]
+    param_model = ph.load_models(model_specs, indata, **vars(args))
 
     ifitter = fitter.Fitter(
         indata,
-        poi_model,
+        param_model,
         args,
         do_blinding=any(blinded_fits),
         globalImpactsFromJVP=not args.globalImpactsDisableJVP,
@@ -687,8 +707,8 @@ def main():
         "meta_info": output_tools.make_meta_info_dict(args=args),
         "meta_info_input": ifitter.indata.metadata,
         "procs": ifitter.indata.procs,
-        "pois": ifitter.poi_model.pois,
-        "nois": ifitter.parms[ifitter.poi_model.npoi :][indata.noiidxs],
+        "pois": ifitter.param_model.params[: ifitter.param_model.npoi],
+        "nois": ifitter.parms[ifitter.param_model.nparams :][indata.noiidxs],
     }
 
     with workspace.Workspace(
