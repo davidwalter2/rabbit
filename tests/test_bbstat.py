@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from rabbit.bbstat import VALID_BIN_BY_BIN_STAT_TYPES, BinByBinStat, solve_quad_eq
+from rabbit.bbstat.bbstat import VALID_BIN_BY_BIN_STAT_TYPES, BinByBinStat
+from rabbit.bbstat.formulas import solve_quad_eq
 
 
 def _make_indata(sumw, sumw2):

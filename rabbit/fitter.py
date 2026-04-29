@@ -12,7 +12,7 @@ from wums import logging
 
 from rabbit import external_likelihood, io_tools
 from rabbit import tfhelpers as tfh
-from rabbit.bbstat import VALID_BIN_BY_BIN_STAT_TYPES, BinByBinStat
+from rabbit.bbstat.bbstat import VALID_BIN_BY_BIN_STAT_TYPES, BinByBinStat
 from rabbit.impacts import global_impacts, nonprofiled_impacts, traditional_impacts
 from rabbit.tfhelpers import edmval_cov
 
@@ -309,10 +309,7 @@ class Fitter:
             and self.param_model.is_linear
             and self.indata.symmetric_tensor
             and self.indata.systematic_type == "normal"
-            and (
-                (not self.bbstat.enabled)
-                or self.bbstat.binByBinStatType == "normal-additive"
-            )
+            and self.bbstat.is_linear
         )
 
         # force retrace of @tf.function methods since self.x shape may have changed
@@ -742,15 +739,7 @@ class Fitter:
                     loc=self.x, scale_tril=tf.linalg.cholesky(self.cov)
                 )
                 self.x.assign(pparms.sample())
-            if self.bbstat.enabled:
-                self.bbstat.beta.assign(
-                    tf.random.normal(
-                        shape=[],
-                        mean=self.bbstat.beta0,
-                        stddev=tf.sqrt(self.bbstat.varbeta),
-                        dtype=self.bbstat.beta.dtype,
-                    )
-                )
+            self.bbstat.randomize_postfit()
 
     def edmval_cov(self, grad, hess):
         if len(self.frozen_params) > 0:

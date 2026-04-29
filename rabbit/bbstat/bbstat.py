@@ -250,6 +250,17 @@ class BinByBinStat:
     def beta_default_assign(self):
         self.beta.assign(self.beta0)
 
+    @property
+    def is_linear(self):
+        """Whether the BBB contribution to the loss is purely quadratic.
+
+        True when BBB is disabled (no contribution) or the constraint is
+        ``normal-additive`` (``0.5 (β-β0)²``). False for ``gamma`` and
+        ``normal-multiplicative`` whose constraints involve ``log β`` or
+        ``β·kstat``-like terms. Used by :attr:`Fitter.is_linear`.
+        """
+        return (not self.enabled) or self.binByBinStatType == "normal-additive"
+
     # --- toy randomization -------------------------------------------------
 
     def randomize_bayes(self):
@@ -286,6 +297,31 @@ class BinByBinStat:
                     dtype=self.beta.dtype,
                 )
             )
+
+    def randomize_postfit(self):
+        """Postfit toy: randomize β around β0 using a normal with stddev
+        ``sqrt(varbeta)``.
+
+        Used by :meth:`Fitter.toyassign` when ``randomize_parameters=True``
+        — i.e., when the toy-throwing routine wants to perturb β alongside
+        the fit parameters ``x``. No-op when BBB is disabled.
+
+        Note: type-agnostic (unlike :meth:`randomize_bayes`); always uses
+        the normal-multiplicative-form stddev. Preserves the legacy
+        behaviour from ``Fitter.toyassign`` and is correct in expectation
+        for ``normal-multiplicative``; the gamma and normal-additive cases
+        re-use the same approximation as before.
+        """
+        if not self.enabled:
+            return
+        self.beta.assign(
+            tf.random.normal(
+                shape=[],
+                mean=self.beta0,
+                stddev=tf.sqrt(self.varbeta),
+                dtype=self.beta.dtype,
+            )
+        )
 
     def randomize_frequentist(self):
         """Frequentist toy: randomize the *constraint minimum* β0 around β.

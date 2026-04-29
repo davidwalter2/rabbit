@@ -1,8 +1,7 @@
 """Closed-form helpers for the bin-by-bin (BBB) statistical treatment.
 
-Pure functions only — no TF Variables, no Fitter state. The algebra here
-is shared between :mod:`rabbit.bbstat.bbstat` and the Newton-loop
-helpers in :mod:`rabbit.bbstat.newton`.
+Pure functions only — no TF Variables, no Fitter state. Used by
+:mod:`rabbit.bbstat.bbstat`.
 """
 
 import tensorflow as tf
