@@ -449,10 +449,13 @@ class BinByBinStat:
             # n_active == 0 will be overridden by betamask afterwards.
             n_active_safe = tf.where(n_active > 0, n_active, tf.ones_like(n_active))
 
+            # Real-bins slices used by every type×mode branch below.
+            kstat = self.kstat[: self.indata.nbins]
+            betamask = self.betamask[: self.indata.nbins]
+            varbeta = self.varbeta[: self.indata.nbins]
+
             if self.chisqFit:
                 if self.binByBinStatType == "gamma":
-                    kstat = self.kstat[: self.indata.nbins]
-                    betamask = self.betamask[: self.indata.nbins]
 
                     if self.binByBinStatMode == "lite":
                         abeta = n_active_safe**2
@@ -527,8 +530,6 @@ class BinByBinStat:
 
                     beta = tf.where(betamask, beta0, beta)
                 elif self.binByBinStatType == "normal-multiplicative":
-                    kstat = self.kstat[: self.indata.nbins]
-                    betamask = self.betamask[: self.indata.nbins]
                     if self.binByBinStatMode == "lite":
                         beta = (
                             (nobs - n_zero_var) * n_active_safe / varnobs
@@ -557,7 +558,6 @@ class BinByBinStat:
                         )
                         beta = tf.where(betamask, beta0, beta)
                 elif self.binByBinStatType == "normal-additive":
-                    varbeta = self.varbeta[: self.indata.nbins]
                     sbeta = tf.math.sqrt(varbeta)
                     if self.binByBinStatMode == "lite":
                         beta = (sbeta * (nobs - nexp_profile) + varnobs * beta0) / (
@@ -575,8 +575,6 @@ class BinByBinStat:
                         )
             elif self.covarianceFit:
                 if self.binByBinStatType == "normal-multiplicative":
-                    kstat = self.kstat[: self.indata.nbins]
-                    betamask = self.betamask[: self.indata.nbins]
                     if self.binByBinStatMode == "lite":
                         n_active_m = tf.linalg.LinearOperatorDiag(n_active_safe)
                         A = (
@@ -629,7 +627,6 @@ class BinByBinStat:
                         )
                         beta = tf.where(betamask, beta0, beta)
                 elif self.binByBinStatType == "normal-additive":
-                    varbeta = self.varbeta[: self.indata.nbins]
                     sbeta = tf.math.sqrt(varbeta)
                     if self.binByBinStatMode == "lite":
                         sbeta_m = tf.linalg.LinearOperatorDiag(sbeta)
@@ -661,8 +658,6 @@ class BinByBinStat:
                         )
             else:
                 if self.binByBinStatType == "gamma":
-                    kstat = self.kstat[: self.indata.nbins]
-                    betamask = self.betamask[: self.indata.nbins]
 
                     if self.binByBinStatMode == "lite":
                         # Quadratic profile when zero-variance processes
@@ -744,8 +739,6 @@ class BinByBinStat:
 
                     beta = tf.where(betamask, beta0, beta)
                 elif self.binByBinStatType == "normal-multiplicative":
-                    kstat = self.kstat[: self.indata.nbins]
-                    betamask = self.betamask[: self.indata.nbins]
                     if self.binByBinStatMode == "lite":
                         # Quadratic in β when zero-variance processes
                         # contribute. Reduces to a·β² + b·β + c = 0 with
@@ -779,7 +772,6 @@ class BinByBinStat:
                         )
                         beta = tf.where(betamask, beta0, beta)
                 elif self.binByBinStatType == "normal-additive":
-                    varbeta = self.varbeta[: self.indata.nbins]
                     sbeta = tf.math.sqrt(varbeta)
                     if self.binByBinStatMode == "lite":
                         abeta = sbeta
