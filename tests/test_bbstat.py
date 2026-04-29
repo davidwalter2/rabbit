@@ -218,3 +218,9 @@ def test_valid_types_constant():
     assert "gamma" in VALID_BIN_BY_BIN_STAT_TYPES
     assert "normal-additive" in VALID_BIN_BY_BIN_STAT_TYPES
     assert "normal-multiplicative" in VALID_BIN_BY_BIN_STAT_TYPES
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v"]))
