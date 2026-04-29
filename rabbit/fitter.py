@@ -173,11 +173,9 @@ class Fitter:
                 self.data_cov_inv = self.indata.data_cov_inv
 
         # --- bin-by-bin statistical treatment (β nuisances + masks + kstat).
-        # All BBB state is owned by the BinByBinStat helper. Fitter accesses
-        # it via property shims (see further below) so external callers that
-        # historically read self.binByBinStat / self.beta / self.kstat / etc.
-        # continue to work. Constructed here, before init_fit_parms, because
-        # init_fit_parms's is_linear computation reads self.binByBinStat.
+        # All BBB state is owned by the BinByBinStat helper. Constructed
+        # here, before init_fit_parms, because init_fit_parms's is_linear
+        # computation reads self.bbstat.enabled.
         self.bbstat = BinByBinStat(
             indata,
             options,
@@ -311,7 +309,10 @@ class Fitter:
             and self.param_model.is_linear
             and self.indata.symmetric_tensor
             and self.indata.systematic_type == "normal"
-            and ((not self.binByBinStat) or self.binByBinStatType == "normal-additive")
+            and (
+                (not self.bbstat.enabled)
+                or self.bbstat.binByBinStatType == "normal-additive"
+            )
         )
 
         # force retrace of @tf.function methods since self.x shape may have changed
@@ -533,78 +534,6 @@ class Fitter:
             [self.get_poi(), self.get_model_nui(), self.get_theta()], axis=0
         )
 
-    # --- BBB-related backward-compat property shims -----------------------
-    # External callers (and lots of internal code) read these attributes
-    # off Fitter directly. They now live on Fitter.bbstat; expose forwarding
-    # properties so the rest of the codebase doesn't have to change.
-
-    @property
-    def binByBinStat(self):
-        return self.bbstat.enabled
-
-    @property
-    def binByBinStatMode(self):
-        return self.bbstat.binByBinStatMode
-
-    @property
-    def binByBinStatType(self):
-        return self.bbstat.binByBinStatType
-
-    @property
-    def minBBKstat(self):
-        return self.bbstat.minBBKstat
-
-    @property
-    def beta_shape(self):
-        return self.bbstat.beta_shape
-
-    @property
-    def beta0(self):
-        return self.bbstat.beta0
-
-    @property
-    def logbeta0(self):
-        return self.bbstat.logbeta0
-
-    @property
-    def beta(self):
-        return self.bbstat.beta
-
-    @property
-    def ubeta(self):
-        return self.bbstat.ubeta
-
-    @property
-    def nbeta(self):
-        return self.bbstat.nbeta
-
-    @property
-    def varbeta(self):
-        return self.bbstat.varbeta
-
-    @property
-    def sumw(self):
-        return self.bbstat.sumw
-
-    @property
-    def betamask(self):
-        return self.bbstat.betamask
-
-    @property
-    def kstat(self):
-        return self.bbstat.kstat
-
-    @property
-    def betaauxlu(self):
-        return self.bbstat.betaauxlu
-
-    @property
-    def proc_zero_var_mask(self):
-        return self.bbstat.proc_zero_var_mask
-
-    def _default_beta0(self):
-        return self.bbstat.default_beta0()
-
     def prefit_variance(self, unconstrained_err=0.0):
         """Per-parameter prefit variance vector of length npar.
 
@@ -661,9 +590,6 @@ class Fitter:
         nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
         self.lognobs.assign(tf.math.log(nobssafe))
 
-    def set_beta0(self, values):
-        self.bbstat.set_beta0(values)
-
     def theta0defaultassign(self):
         self.theta0.assign(self.theta0default)
 
@@ -675,12 +601,6 @@ class Fitter:
                 tf.concat([self.param_model.xparamdefault, self.theta0], axis=0)
             )
 
-    def beta0defaultassign(self):
-        self.bbstat.beta0_default_assign()
-
-    def betadefaultassign(self):
-        self.bbstat.beta_default_assign()
-
     def defaultassign(self):
         var_pre = self.prefit_variance(
             unconstrained_err=self.prefit_unconstrained_nuisance_uncertainty
@@ -689,9 +609,9 @@ class Fitter:
         if self.cov is not None:
             self.cov.assign(tf.linalg.diag(var_pre))
         self.theta0defaultassign()
-        if self.binByBinStat:
-            self.beta0defaultassign()
-            self.betadefaultassign()
+        if self.bbstat.enabled:
+            self.bbstat.beta0_default_assign()
+            self.bbstat.beta_default_assign()
         self.xdefaultassign()
         if self.do_blinding:
             self.set_blinding_offsets(False)
@@ -788,8 +708,8 @@ class Fitter:
 
         # assign start values for nuisance parameters to constraint minima
         self.xdefaultassign()
-        if self.binByBinStat:
-            self.betadefaultassign()
+        if self.bbstat.enabled:
+            self.bbstat.beta_default_assign()
         # set likelihood offset
         self.nexpnom.assign(self.expected_yield())
 
@@ -822,13 +742,13 @@ class Fitter:
                     loc=self.x, scale_tril=tf.linalg.cholesky(self.cov)
                 )
                 self.x.assign(pparms.sample())
-            if self.binByBinStat:
-                self.beta.assign(
+            if self.bbstat.enabled:
+                self.bbstat.beta.assign(
                     tf.random.normal(
                         shape=[],
-                        mean=self.beta0,
-                        stddev=tf.sqrt(self.varbeta),
-                        dtype=self.beta.dtype,
+                        mean=self.bbstat.beta0,
+                        stddev=tf.sqrt(self.bbstat.varbeta),
+                        dtype=self.bbstat.beta.dtype,
                     )
                 )
 
@@ -933,7 +853,7 @@ class Fitter:
         hess_stat = hess[:nstat, :nstat]
         cov_stat = tf.linalg.inv(hess_stat)
 
-        if self.binByBinStat:
+        if self.bbstat.enabled:
             val_no_bbb, grad_no_bbb, hess_no_bbb = self.loss_val_grad_hess(
                 profile=False
             )
@@ -957,8 +877,8 @@ class Fitter:
     def global_impacts_parms(self):
         return global_impacts.global_impacts_parms(
             self.x,
-            self.ubeta,
-            self.beta_shape,
+            self.bbstat.ubeta,
+            self.bbstat.beta_shape,
             self._compute_yields_with_beta,
             self._compute_lbeta,
             self._compute_lc,
@@ -966,8 +886,8 @@ class Fitter:
             self.param_model.nparams,
             self.indata.noiidxs,
             self.indata.systgroupidxs,
-            self.binByBinStat,
-            self.binByBinStatMode,
+            self.bbstat.enabled,
+            self.bbstat.binByBinStatMode,
             self.globalImpactsFromJVP,
             self.cov,
         )
@@ -984,15 +904,16 @@ class Fitter:
             self.nobs if self.varnobs is None else self.varnobs,
             (
                 1.0
-                if self.binByBinStatType in ["normal-additive"] or not self.binByBinStat
-                else 1.0 / self.kstat
+                if self.bbstat.binByBinStatType in ["normal-additive"]
+                or not self.bbstat.enabled
+                else 1.0 / self.bbstat.kstat
             ),
             self.param_model.npoi,
             self.param_model.nparams,
             self.indata.noiidxs,
-            self.binByBinStat,
-            self.binByBinStatMode,
-            self.beta_shape,
+            self.bbstat.enabled,
+            self.bbstat.binByBinStatMode,
+            self.bbstat.beta_shape,
             self.indata.systgroupidxs,
             self.data_cov_inv,
         )
@@ -1017,9 +938,9 @@ class Fitter:
 
     def _pd2ldbeta2(self, profile=False):
         with tf.GradientTape(watch_accessed_variables=False) as t2:
-            t2.watch([self.ubeta])
+            t2.watch([self.bbstat.ubeta])
             with tf.GradientTape(watch_accessed_variables=False) as t1:
-                t1.watch([self.ubeta])
+                t1.watch([self.bbstat.ubeta])
                 if profile:
                     val = self._compute_loss(profile=True)
                 else:
@@ -1033,26 +954,28 @@ class Fitter:
                     lbeta = self._compute_lbeta(beta)
                     val = lbeta
 
-            pdldbeta = t1.gradient(val, self.ubeta)
+            pdldbeta = t1.gradient(val, self.bbstat.ubeta)
         if self.covarianceFit and profile:
-            pd2ldbeta2_matrix = t2.jacobian(pdldbeta, self.ubeta)
+            pd2ldbeta2_matrix = t2.jacobian(pdldbeta, self.bbstat.ubeta)
             pd2ldbeta2 = tf.linalg.LinearOperatorFullMatrix(
                 pd2ldbeta2_matrix, is_self_adjoint=True
             )
         else:
             # pd2ldbeta2 is diagonal, so we can use gradient instead of jacobian
-            pd2ldbeta2 = t2.gradient(pdldbeta, self.ubeta)
+            pd2ldbeta2 = t2.gradient(pdldbeta, self.bbstat.ubeta)
         return pd2ldbeta2
 
     def _dxdvars(self):
         with tf.GradientTape() as t2:
-            t2.watch([self.theta0, self.nobs, self.beta0])
+            t2.watch([self.theta0, self.nobs, self.bbstat.beta0])
             with tf.GradientTape() as t1:
-                t1.watch([self.theta0, self.nobs, self.beta0])
+                t1.watch([self.theta0, self.nobs, self.bbstat.beta0])
                 val = self._compute_loss()
             grad = t1.gradient(val, self.x)
         pd2ldxdtheta0, pd2ldxdnobs, pd2ldxdbeta0 = t2.jacobian(
-            grad, [self.theta0, self.nobs, self.beta0], unconnected_gradients="zero"
+            grad,
+            [self.theta0, self.nobs, self.bbstat.beta0],
+            unconnected_gradients="zero",
         )
 
         # cov is inverse hesse, thus cov ~ d2xd2l
@@ -1064,13 +987,13 @@ class Fitter:
 
     def _dndvars(self, fun):
         with tf.GradientTape() as t:
-            t.watch([self.theta0, self.nobs, self.beta0])
+            t.watch([self.theta0, self.nobs, self.bbstat.beta0])
             n = fun()
             n_flat = tf.reshape(n, (-1,))
 
         pdndx, pdndtheta0, pdndnobs, pdndbeta0 = t.jacobian(
             n_flat,
-            [self.x, self.theta0, self.nobs, self.beta0],
+            [self.x, self.theta0, self.nobs, self.bbstat.beta0],
             unconnected_gradients="zero",
         )
 
@@ -1127,8 +1050,8 @@ class Fitter:
             )
             return expected, *jacs
 
-        if self.binByBinStat:
-            dvars = [self.x, self.ubeta]
+        if self.bbstat.enabled:
+            dvars = [self.x, self.bbstat.ubeta]
             expected, dexpdx, pdexpdbeta = compute_derivatives(dvars)
         else:
             dvars = [self.x]
@@ -1151,11 +1074,11 @@ class Fitter:
             if self.covarianceFit and profile:
                 pd2ldbeta2_pdexpdbeta = pd2ldbeta2.solve(pdexpdbeta, adjoint_arg=True)
             else:
-                if self.binByBinStatType == "normal-additive":
+                if self.bbstat.binByBinStatType == "normal-additive":
                     pd2ldbeta2_pdexpdbeta = pdexpdbeta / pd2ldbeta2[None, :]
                 else:
                     pd2ldbeta2_pdexpdbeta = tf.where(
-                        self.betamask[None, :],
+                        self.bbstat.betamask[None, :],
                         tf.zeros_like(pdexpdbeta),
                         pdexpdbeta / pd2ldbeta2[None, :],
                     )
@@ -1180,16 +1103,16 @@ class Fitter:
         if compute_global_impacts:
             impacts, impacts_grouped = global_impacts.global_impacts_obs(
                 self.x,
-                self.ubeta,
-                self.beta_shape,
+                self.bbstat.ubeta,
+                self.bbstat.beta_shape,
                 self._compute_yields_with_beta,
                 self._compute_lbeta,
                 self._compute_lc,
                 self.param_model.npoi,
                 self.param_model.nparams,
                 self.indata.systgroupidxs,
-                self.binByBinStat,
-                self.binByBinStatMode,
+                self.bbstat.enabled,
+                self.bbstat.binByBinStatMode,
                 self.globalImpactsFromJVP,
                 cov_dexpdx,
                 expvar_flat,
@@ -1224,13 +1147,13 @@ class Fitter:
                     self.nobs if self.varnobs is None else self.varnobs,
                     (
                         1.0
-                        if self.binByBinStatType in ["normal-additive"]
-                        or not self.binByBinStat
-                        else 1.0 / self.kstat
+                        if self.bbstat.binByBinStatType in ["normal-additive"]
+                        or not self.bbstat.enabled
+                        else 1.0 / self.bbstat.kstat
                     ),
-                    self.binByBinStat,
-                    self.binByBinStatMode,
-                    self.beta_shape,
+                    self.bbstat.enabled,
+                    self.bbstat.binByBinStatMode,
+                    self.bbstat.beta_shape,
                     self.indata.systgroupidxs,
                     self.data_cov_inv,
                 )
@@ -1425,7 +1348,7 @@ class Fitter:
     @tf.function
     def _profile_beta(self):
         nexp, norm, beta = self._compute_yields_with_beta(full=False)
-        self.beta.assign(beta)
+        self.bbstat.beta.assign(beta)
 
     def _compute_yields(self, inclusive=True, profile=True, full=True):
         nexpcentral, normcentral, beta = self._compute_yields_with_beta(
@@ -1477,24 +1400,26 @@ class Fitter:
 
         res_cov += res_cov_stat
 
-        if self.binByBinStat:
+        if self.bbstat.enabled:
             pd2ldbeta2 = self._pd2ldbeta2(profile=False)
 
             with tf.GradientTape() as t2:
-                t2.watch([self.ubeta, self.beta0])
+                t2.watch([self.bbstat.ubeta, self.bbstat.beta0])
                 with tf.GradientTape() as t1:
-                    t1.watch([self.ubeta, self.beta0])
+                    t1.watch([self.bbstat.ubeta, self.bbstat.beta0])
                     _1, _2, beta = self._compute_yields_with_beta(
                         profile=False, compute_norm=False, full=False
                     )
                     lbeta = self._compute_lbeta(beta)
 
-                dlbetadbeta = t1.gradient(lbeta, self.ubeta)
-            pd2lbetadbetadbeta0 = t2.gradient(dlbetadbeta, self.beta0)
+                dlbetadbeta = t1.gradient(lbeta, self.bbstat.ubeta)
+            pd2lbetadbetadbeta0 = t2.gradient(dlbetadbeta, self.bbstat.beta0)
             var_beta0 = pd2ldbeta2 / pd2lbetadbetadbeta0**2
 
-            if self.binByBinStatType in ["gamma", "normal-multiplicative"]:
-                var_beta0 = tf.where(self.betamask, tf.zeros_like(var_beta0), var_beta0)
+            if self.bbstat.binByBinStatType in ["gamma", "normal-multiplicative"]:
+                var_beta0 = tf.where(
+                    self.bbstat.betamask, tf.zeros_like(var_beta0), var_beta0
+                )
 
             res_cov_BBB = dresdbeta0 @ (
                 tf.reshape(var_beta0, [-1])[:, None] * tf.transpose(dresdbeta0)
@@ -1812,17 +1737,17 @@ class Fitter:
     @tf.function
     def loss_val_grad_hess_beta(self, profile=True):
         with tf.GradientTape() as t2:
-            t2.watch(self.ubeta)
+            t2.watch(self.bbstat.ubeta)
             with tf.GradientTape() as t1:
-                t1.watch(self.ubeta)
+                t1.watch(self.bbstat.ubeta)
                 val = self._compute_loss(profile=profile)
-            grad = t1.gradient(val, self.ubeta)
-        hess = t2.jacobian(grad, self.ubeta)
+            grad = t1.gradient(val, self.bbstat.ubeta)
+        hess = t2.jacobian(grad, self.bbstat.ubeta)
 
         grad = tf.reshape(grad, [-1])
         hess = tf.reshape(hess, [grad.shape[0], grad.shape[0]])
 
-        betamask = ~tf.reshape(self.betamask, [-1])
+        betamask = ~tf.reshape(self.bbstat.betamask, [-1])
         grad = grad[betamask]
         hess = tf.boolean_mask(hess, betamask, axis=0)
         hess = tf.boolean_mask(hess, betamask, axis=1)

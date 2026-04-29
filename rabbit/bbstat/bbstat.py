@@ -24,9 +24,8 @@ class BinByBinStat:
     / ``proc_zero_var_mask`` tensors, and any precomputed LU
     decompositions used by the covarianceFit profile.
 
-    The flag :attr:`enabled` mirrors ``not options.noBinByBinStat`` and
-    callers should branch on it instead of the legacy
-    ``Fitter.binByBinStat``. ``proc_zero_var_mask`` flags
+    The flag :attr:`enabled` mirrors ``not options.noBinByBinStat``;
+    callers should branch on it. ``proc_zero_var_mask`` flags
     ``(bin, process)`` entries with ``sumw2 == 0`` — those have no
     bin-by-bin statistical uncertainty, so β passes through them
     unchanged in lite mode rather than scaling them along with the
@@ -519,7 +518,6 @@ class BinByBinStat:
                             fnll_nbeta=fnll_nbeta,
                             kstat=kstat,
                             beta0=beta0,
-                            betamask=betamask,
                             norm_profile=norm_profile,
                             nobs=nobs,
                             varnobs=varnobs,
@@ -737,7 +735,6 @@ class BinByBinStat:
                             fnll_nbeta=fnll_nbeta,
                             kstat=kstat,
                             beta0=beta0,
-                            betamask=betamask,
                             norm_profile=norm_profile,
                             nobs=nobs,
                             varnobs=None,
@@ -893,7 +890,6 @@ class BinByBinStat:
         fnll_nbeta,
         kstat,
         beta0,
-        betamask,
         norm_profile,
         nobs,
         varnobs,
