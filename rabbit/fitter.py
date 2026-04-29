@@ -599,8 +599,8 @@ class Fitter:
         return self.bbstat.betaauxlu
 
     @property
-    def proc_data_driven_mask(self):
-        return self.bbstat.proc_data_driven_mask
+    def proc_zero_var_mask(self):
+        return self.bbstat.proc_zero_var_mask
 
     def _default_beta0(self):
         return self.bbstat.default_beta0()
@@ -1407,7 +1407,8 @@ class Fitter:
         # Only materialize the dense [nbins, nproc] normcentral when an
         # external caller requested it, when BBB "full" mode needs per-process
         # yields for the analytic β solution, or when "lite" mode needs to
-        # split MC and data-driven (sumw2==0) contributions per bin.
+        # split finite-variance (sumw2>0) and zero-variance (sumw2==0)
+        # contributions per bin.
         need_norm = compute_norm or self.bbstat.needs_per_proc_norm()
         nexp, norm = self._compute_yields_noBBB(full=full, compute_norm=need_norm)
         return self.bbstat.profile_and_apply(

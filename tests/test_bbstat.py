@@ -65,8 +65,9 @@ def test_solve_quad_eq_simple_root():
     assert float(solve_quad_eq(a, b, c)) == pytest.approx(3.0)
 
 
-def test_solve_quad_eq_lite_gamma_no_data_driven():
-    # Closed form for gamma+lite (no data-driven): β = (n + k·β0) / (N + k).
+def test_solve_quad_eq_lite_gamma_all_finite_variance():
+    # Closed form for gamma+lite when all processes have finite variance:
+    # β = (n + k·β0) / (N + k).
     # The new formula is: a·β² + b·β + c = 0 with
     #   a = N·(N + k), b = N·(0 - n - β0·k) + k·0 = -N·(n + β0·k), c = 0.
     # Positive root = (n + β0·k) / (N + k).
@@ -174,29 +175,30 @@ def test_min_bb_kstat_extends_betamask():
     np.testing.assert_array_equal(bb.betamask.numpy(), expected_mask)
 
 
-# --- selective lite-mode for data-driven processes ---------------------------
+# --- selective lite-mode for zero-variance processes -------------------------
 
 
-def test_proc_data_driven_mask_detection():
-    """sumw2 == 0 entries are flagged as data-driven and excluded from sumw."""
+def test_proc_zero_var_mask_detection():
+    """sumw2 == 0 entries are flagged as zero-variance and excluded from sumw."""
     sumw = np.array([[1.0, 5.0], [2.0, 0.0]], dtype=np.float64)
     sumw2 = np.array([[1.0, 0.0], [2.0, 0.0]], dtype=np.float64)
     bb = _make_bbstat(sumw=sumw, sumw2=sumw2, binByBinStatMode="lite")
-    # First proc is MC (sumw2>0 in row 0 and 1), second is fully data-driven (sumw2=0).
-    assert bb.proc_data_driven_mask is not None
+    # First proc has finite variance (sumw2>0 in both rows), second is fully
+    # zero-variance (sumw2=0).
+    assert bb.proc_zero_var_mask is not None
     expected = sumw2 == 0.0
-    np.testing.assert_array_equal(bb.proc_data_driven_mask.numpy(), expected)
-    # Merged sumw should NOT include the data-driven contribution.
+    np.testing.assert_array_equal(bb.proc_zero_var_mask.numpy(), expected)
+    # Merged sumw should NOT include the zero-variance contribution.
     np.testing.assert_allclose(bb.sumw.numpy(), [1.0, 2.0])
 
 
-def test_full_mode_skips_data_driven_detection():
+def test_full_mode_skips_zero_var_detection():
     """In full mode there's no merging; per-(bin, proc) betamask handles the
     sumw2==0 entries individually."""
     sumw = np.array([[1.0, 5.0]], dtype=np.float64)
     sumw2 = np.array([[1.0, 0.0]], dtype=np.float64)
     bb = _make_bbstat(sumw=sumw, sumw2=sumw2, binByBinStatMode="full")
-    assert bb.proc_data_driven_mask is None
+    assert bb.proc_zero_var_mask is None
     # betamask is (bin, proc) shape and True where sumw2==0 OR sumw==0.
     assert bb.betamask.shape == (1, 2)
     np.testing.assert_array_equal(bb.betamask.numpy(), [[False, True]])

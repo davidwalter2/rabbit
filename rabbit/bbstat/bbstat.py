@@ -21,12 +21,16 @@ class BinByBinStat:
 
     Constructed once by :class:`rabbit.fitter.Fitter`. Owns β/β0/log β0/uβ
     TF Variables, the per-bin (or per-(bin, proc)) ``kstat`` / ``betamask``
-    / ``proc_data_driven_mask`` tensors, and any precomputed LU
+    / ``proc_zero_var_mask`` tensors, and any precomputed LU
     decompositions used by the covarianceFit profile.
 
     The flag :attr:`enabled` mirrors ``not options.noBinByBinStat`` and
     callers should branch on it instead of the legacy
-    ``Fitter.binByBinStat``.
+    ``Fitter.binByBinStat``. ``proc_zero_var_mask`` flags
+    ``(bin, process)`` entries with ``sumw2 == 0`` — those have no
+    bin-by-bin statistical uncertainty, so β passes through them
+    unchanged in lite mode rather than scaling them along with the
+    finite-variance contributions.
     """
 
     valid_types = VALID_BIN_BY_BIN_STAT_TYPES
@@ -125,10 +129,10 @@ class BinByBinStat:
         # dummy tensor to allow differentiation by β even when profiling
         self.ubeta = tf.zeros_like(self.beta)
 
-        # Per-(bin, process) mask of data-driven entries (sumw2 == 0).
+        # Per-(bin, process) mask of zero-variance entries (sumw2 == 0).
         # Used in lite mode to exclude these from the merged sumw reduction
         # and from the β scaling. Defaults to None (no per-process axis).
-        self.proc_data_driven_mask = None
+        self.proc_zero_var_mask = None
 
         # Optional: gamma+full uses a per-bin Newton iterate variable.
         self.nbeta = None
@@ -141,18 +145,19 @@ class BinByBinStat:
                 self.sumw = self.indata.sumw
             else:
                 if self.indata.sumw2.ndim > 1:
-                    # Identify data-driven processes per bin (no MC stat
-                    # uncertainty). They are excluded from the merged sumw
-                    # so the lite-mode kstat is computed from MC-only
-                    # contributions.
-                    self.proc_data_driven_mask = self.indata.sumw2 == 0.0
-                    sumw_mc = tf.where(
-                        self.proc_data_driven_mask,
+                    # Identify zero-variance entries per bin (sumw2 == 0,
+                    # no bin-by-bin stat uncertainty to track). They are
+                    # excluded from the merged sumw so the lite-mode
+                    # kstat is computed from finite-variance contributions
+                    # only.
+                    self.proc_zero_var_mask = self.indata.sumw2 == 0.0
+                    sumw_active = tf.where(
+                        self.proc_zero_var_mask,
                         tf.zeros_like(self.indata.sumw),
                         self.indata.sumw,
                     )
                     self.varbeta = tf.reduce_sum(self.indata.sumw2, axis=-1)
-                    self.sumw = tf.reduce_sum(sumw_mc, axis=-1)
+                    self.sumw = tf.reduce_sum(sumw_active, axis=-1)
                 else:
                     self.varbeta = self.indata.sumw2
                     self.sumw = self.indata.sumw
@@ -384,14 +389,15 @@ class BinByBinStat:
         """Whether the host should materialize per-process norms.
 
         ``full`` mode always needs them (its profile uses per-(bin, proc)
-        β); ``lite`` mode only needs them when at least one process is
-        data-driven so that β is applied selectively.
+        β); ``lite`` mode only needs them when at least one process has
+        zero variance so that β is applied selectively to the
+        finite-variance contributions.
         """
         if not self.enabled:
             return False
         if self.binByBinStatMode == "full":
             return True
-        return self.proc_data_driven_mask is not None
+        return self.proc_zero_var_mask is not None
 
     def profile_and_apply(
         self,
@@ -421,30 +427,28 @@ class BinByBinStat:
             nexp_profile = nexp[: self.indata.nbins]
             beta0 = self.beta0[: self.indata.nbins]
 
-            # In lite mode, split nexp_profile into MC and data-driven
-            # (sumw2==0) per-bin sums so that β only scales the MC part.
-            # When no data-driven processes are present, n_mc == nexp_profile
-            # and n_data == 0, so the lite formulas reduce to their original
+            # In lite mode, split nexp_profile into per-bin sums over
+            # processes with finite variance (sumw2 > 0) and zero variance
+            # (sumw2 == 0) so that β only scales the finite-variance part.
+            # When all processes have finite variances, n_active == nexp_profile
+            # and n_zero_var == 0, so the lite formulas reduce to their original
             # form.
-            if (
-                self.binByBinStatMode == "lite"
-                and self.proc_data_driven_mask is not None
-            ):
-                pdd = self.proc_data_driven_mask[: self.indata.nbins]
+            if self.binByBinStatMode == "lite" and self.proc_zero_var_mask is not None:
+                zv_mask = self.proc_zero_var_mask[: self.indata.nbins]
                 norm_real = norm[: self.indata.nbins]
-                n_mc = tf.reduce_sum(
-                    tf.where(pdd, tf.zeros_like(norm_real), norm_real), axis=-1
+                n_active = tf.reduce_sum(
+                    tf.where(zv_mask, tf.zeros_like(norm_real), norm_real), axis=-1
                 )
-                n_data = tf.reduce_sum(
-                    tf.where(pdd, norm_real, tf.zeros_like(norm_real)), axis=-1
+                n_zero_var = tf.reduce_sum(
+                    tf.where(zv_mask, norm_real, tf.zeros_like(norm_real)), axis=-1
                 )
             else:
-                n_mc = nexp_profile
-                n_data = tf.zeros_like(nexp_profile)
+                n_active = nexp_profile
+                n_zero_var = tf.zeros_like(nexp_profile)
 
-            # Safe denominator for formulas that divide by n_mc; bins with
-            # n_mc == 0 will be overridden by betamask afterwards.
-            n_mc_safe = tf.where(n_mc > 0, n_mc, tf.ones_like(n_mc))
+            # Safe denominator for formulas that divide by n_active; bins with
+            # n_active == 0 will be overridden by betamask afterwards.
+            n_active_safe = tf.where(n_active > 0, n_active, tf.ones_like(n_active))
 
             if self.chisqFit:
                 if self.binByBinStatType == "gamma":
@@ -452,8 +456,8 @@ class BinByBinStat:
                     betamask = self.betamask[: self.indata.nbins]
 
                     if self.binByBinStatMode == "lite":
-                        abeta = n_mc_safe**2
-                        bbeta = kstat * varnobs + (n_data - nobs) * n_mc_safe
+                        abeta = n_active_safe**2
+                        bbeta = kstat * varnobs + (n_zero_var - nobs) * n_active_safe
                         cbeta = -kstat * varnobs * beta0
                         beta = solve_quad_eq(abeta, bbeta, cbeta)
                     elif self.binByBinStatMode == "full":
@@ -529,8 +533,9 @@ class BinByBinStat:
                     betamask = self.betamask[: self.indata.nbins]
                     if self.binByBinStatMode == "lite":
                         beta = (
-                            (nobs - n_data) * n_mc_safe / varnobs + kstat * beta0
-                        ) / (kstat + n_mc_safe * n_mc_safe / varnobs)
+                            (nobs - n_zero_var) * n_active_safe / varnobs
+                            + kstat * beta0
+                        ) / (kstat + n_active_safe * n_active_safe / varnobs)
                         beta = tf.where(betamask, beta0, beta)
 
                     elif self.binByBinStatMode == "full":
@@ -575,10 +580,14 @@ class BinByBinStat:
                     kstat = self.kstat[: self.indata.nbins]
                     betamask = self.betamask[: self.indata.nbins]
                     if self.binByBinStatMode == "lite":
-                        n_mc_m = tf.linalg.LinearOperatorDiag(n_mc_safe)
-                        A = n_mc_m @ self.data_cov_inv @ n_mc_m + tf.linalg.diag(kstat)
+                        n_active_m = tf.linalg.LinearOperatorDiag(n_active_safe)
+                        A = (
+                            n_active_m @ self.data_cov_inv @ n_active_m
+                            + tf.linalg.diag(kstat)
+                        )
                         b = (
-                            n_mc_m @ (self.data_cov_inv @ (nobs - n_data)[:, None])
+                            n_active_m
+                            @ (self.data_cov_inv @ (nobs - n_zero_var)[:, None])
                             + (kstat * beta0)[:, None]
                         )
 
@@ -658,16 +667,18 @@ class BinByBinStat:
                     betamask = self.betamask[: self.indata.nbins]
 
                     if self.binByBinStatMode == "lite":
-                        # Quadratic profile when data-driven processes
-                        # contribute (β scales only the MC part, leaving
-                        # n_data unchanged). Reduces to the original
-                        # closed form (nobs + k·β0) / (n_mc + k) when
-                        # n_data == 0.
-                        abeta = n_mc_safe * (n_mc_safe + kstat)
+                        # Quadratic profile when zero-variance processes
+                        # contribute (β scales only the finite-variance
+                        # part, leaving n_zero_var unchanged). Reduces to
+                        # the original closed form
+                        # (nobs + k·β0) / (n_active + k) when
+                        # n_zero_var == 0.
+                        abeta = n_active_safe * (n_active_safe + kstat)
                         bbeta = (
-                            n_mc_safe * (n_data - nobs - beta0 * kstat) + kstat * n_data
+                            n_active_safe * (n_zero_var - nobs - beta0 * kstat)
+                            + kstat * n_zero_var
                         )
-                        cbeta = -beta0 * kstat * n_data
+                        cbeta = -beta0 * kstat * n_zero_var
                         beta = solve_quad_eq(abeta, bbeta, cbeta)
                     elif self.binByBinStatMode == "full":
                         norm_profile = norm[: self.indata.nbins]
@@ -739,15 +750,20 @@ class BinByBinStat:
                     kstat = self.kstat[: self.indata.nbins]
                     betamask = self.betamask[: self.indata.nbins]
                     if self.binByBinStatMode == "lite":
-                        # Quadratic in β when data-driven processes
+                        # Quadratic in β when zero-variance processes
                         # contribute. Reduces to a·β² + b·β + c = 0 with
-                        # a = k, b = n_mc - β0·k, c = -nobs when
-                        # n_data == 0.
-                        abeta = kstat * n_mc_safe
+                        # a = k, b = n_active - β0·k, c = -nobs when
+                        # n_zero_var == 0.
+                        abeta = kstat * n_active_safe
                         bbeta = (
-                            n_mc_safe**2 - kstat * beta0 * n_mc_safe + kstat * n_data
+                            n_active_safe**2
+                            - kstat * beta0 * n_active_safe
+                            + kstat * n_zero_var
                         )
-                        cbeta = n_mc_safe * (n_data - nobs) - kstat * beta0 * n_data
+                        cbeta = (
+                            n_active_safe * (n_zero_var - nobs)
+                            - kstat * beta0 * n_zero_var
+                        )
                         beta = solve_quad_eq(abeta, bbeta, cbeta)
                         beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatMode == "full":
@@ -817,12 +833,12 @@ class BinByBinStat:
 
                 norm = tf.where(betamask, norm, betasel * norm)
                 nexp = tf.reduce_sum(norm, -1)
-            elif self.proc_data_driven_mask is not None:
-                # β scales only MC processes; data-driven (sumw2==0)
-                # entries pass through unchanged.
-                pdd = self.proc_data_driven_mask[: nexp.shape[0]]
+            elif self.proc_zero_var_mask is not None:
+                # β scales only finite-variance entries; zero-variance
+                # entries (sumw2==0) pass through unchanged.
+                zv_mask = self.proc_zero_var_mask[: nexp.shape[0]]
                 scale = tf.where(
-                    pdd | betamask[..., None],
+                    zv_mask | betamask[..., None],
                     tf.ones_like(norm),
                     betasel[..., None],
                 )
@@ -840,18 +856,21 @@ class BinByBinStat:
             if self.binByBinStatMode == "full":
                 norm = norm + sbeta * betasel
                 nexp = tf.reduce_sum(norm, -1)
-            elif self.proc_data_driven_mask is not None:
-                # Additive correction sbeta·β is distributed only over MC
-                # processes, weighted by their share of n_mc per bin.
-                pdd = self.proc_data_driven_mask[: nexp.shape[0]]
-                mc_norm = tf.where(pdd, tf.zeros_like(norm), norm)
-                n_mc_bin = tf.reduce_sum(mc_norm, axis=-1)
-                n_mc_bin_safe = tf.where(n_mc_bin > 0, n_mc_bin, tf.ones_like(n_mc_bin))
+            elif self.proc_zero_var_mask is not None:
+                # Additive correction sbeta·β is distributed only over
+                # finite-variance entries, weighted by their share of
+                # n_active per bin.
+                zv_mask = self.proc_zero_var_mask[: nexp.shape[0]]
+                active_norm = tf.where(zv_mask, tf.zeros_like(norm), norm)
+                n_active_bin = tf.reduce_sum(active_norm, axis=-1)
+                n_active_bin_safe = tf.where(
+                    n_active_bin > 0, n_active_bin, tf.ones_like(n_active_bin)
+                )
                 addition = (
                     sbeta[..., None]
                     * betasel[..., None]
-                    * mc_norm
-                    / n_mc_bin_safe[..., None]
+                    * active_norm
+                    / n_active_bin_safe[..., None]
                 )
                 norm = norm + addition
                 nexp = tf.reduce_sum(norm, -1)
