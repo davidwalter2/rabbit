@@ -414,10 +414,23 @@ class AxisNormModel(ParamModel):
         self.params = np.array(names)
 
         self.npou = 0
-        self.allowNegativeParam = allowNegativeParam
-        self.is_linear = self.npoi == 0 or self.allowNegativeParam
-
-        self.set_param_default(expectSignal, allowNegativeParam)
+        # Enforce non-negativity via x²: norm = raw² ≥ 0, applied inside compute()
+        # so this works correctly whether called standalone or inside a composite.
+        # allowNegativeParam=True tells the fitter/composite to pass raw x through;
+        # the squaring is handled here. Default raw = sqrt(1) = 1 so norm starts at 1.
+        self.allowNegativeParam = True
+        self.is_linear = False
+        paramdefault = np.ones(self.npoi, dtype=np.float64)
+        if expectSignal is not None:
+            for signal, value in expectSignal:
+                encoded = signal.encode() if isinstance(signal, str) else signal
+                matches = np.where(np.isin(self.params, encoded))[0]
+                if len(matches) == 0:
+                    raise ValueError(f"{encoded} not in list of params: {self.params}")
+                paramdefault[matches[0]] = float(value)
+        self.xparamdefault = tf.constant(
+            np.sqrt(paramdefault), dtype=self.indata.dtype
+        )
 
     def compute(self, param, full=False):
         reshape = [
@@ -436,7 +449,7 @@ class AxisNormModel(ParamModel):
                 for i, proc_idx in enumerate(self.proc_idxs):
                     ipoi = param[i * self.n_cell : (i + 1) * self.n_cell]
                     scaling = tf.reshape(
-                        tf.broadcast_to(tf.reshape(ipoi, reshape), shape_input), [-1, 1]
+                        tf.broadcast_to(tf.reshape(tf.square(ipoi), reshape), shape_input), [-1, 1]
                     )
                     proc_col = tf.one_hot(proc_idx, self.indata.nproc, dtype=self.indata.dtype)
                     irnorm = irnorm + (scaling - 1.0) * tf.reshape(proc_col, [1, -1])
