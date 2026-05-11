@@ -399,7 +399,9 @@ class AxisNormModel(ParamModel):
                         f"Available: {[p.decode() if isinstance(p, bytes) else p for p in indata.procs]}"
                     )
                 target_encoded.append(encoded)
-        self.proc_idxs = [int(np.where(indata.procs == p)[0][0]) for p in target_encoded]
+        self.proc_idxs = [
+            int(np.where(indata.procs == p)[0][0]) for p in target_encoded
+        ]
 
         cell_shape = [a.size for a in self.requested_axes]
         self.n_cell = int(np.prod(cell_shape))
@@ -407,9 +409,15 @@ class AxisNormModel(ParamModel):
 
         names = []
         for proc_encoded in target_encoded:
-            proc_name = proc_encoded.decode() if isinstance(proc_encoded, bytes) else str(proc_encoded)
+            proc_name = (
+                proc_encoded.decode()
+                if isinstance(proc_encoded, bytes)
+                else str(proc_encoded)
+            )
             for idxs in itertools.product(*[range(s) for s in cell_shape]):
-                label = "_".join(f"{a.name}{i}" for a, i in zip(self.requested_axes, idxs))
+                label = "_".join(
+                    f"{a.name}{i}" for a, i in zip(self.requested_axes, idxs)
+                )
                 names.append(f"norm_{proc_name}_{label}".encode())
         self.params = np.array(names)
 
@@ -429,14 +437,12 @@ class AxisNormModel(ParamModel):
                     raise ValueError(f"{encoded} not in list of params: {self.params}")
                 paramdefault[matches[0]] = float(value)
         # x^2
-        self.xparamdefault = tf.constant(
-            np.sqrt(paramdefault), dtype=self.indata.dtype
-        )
+        self.xparamdefault = tf.constant(np.sqrt(paramdefault), dtype=self.indata.dtype)
         # softplus
         _softplus_inv_1 = float(np.log(np.exp(1.0) - 1.0))
-        #self.xparamdefault = tf.constant(
+        # self.xparamdefault = tf.constant(
         #    _softplus_inv_1 * paramdefault, dtype=self.indata.dtype
-        #)
+        # )
 
     def compute(self, param, full=False):
         reshape = [
@@ -450,19 +456,26 @@ class AxisNormModel(ParamModel):
             if v["masked"] and not full:
                 continue
             nbins_channel = int(np.prod([a.size for a in v["axes"]]))
-            irnorm = tf.ones([nbins_channel, self.indata.nproc], dtype=self.indata.dtype)
+            irnorm = tf.ones(
+                [nbins_channel, self.indata.nproc], dtype=self.indata.dtype
+            )
             if k == self.channel:
                 for i, proc_idx in enumerate(self.proc_idxs):
                     ipoi = param[i * self.n_cell : (i + 1) * self.n_cell]
                     # x^2
                     scaling = tf.reshape(
-                        tf.broadcast_to(tf.reshape(tf.square(ipoi), reshape), shape_input), [-1, 1]
+                        tf.broadcast_to(
+                            tf.reshape(tf.square(ipoi), reshape), shape_input
+                        ),
+                        [-1, 1],
                     )
                     # softplus
-                    #scaling = tf.reshape(
+                    # scaling = tf.reshape(
                     #    tf.broadcast_to(tf.reshape(tf.nn.softplus(ipoi), reshape), shape_input), [-1, 1]
-                    #)
-                    proc_col = tf.one_hot(proc_idx, self.indata.nproc, dtype=self.indata.dtype)
+                    # )
+                    proc_col = tf.one_hot(
+                        proc_idx, self.indata.nproc, dtype=self.indata.dtype
+                    )
                     irnorm = irnorm + (scaling - 1.0) * tf.reshape(proc_col, [1, -1])
             rnorms.append(irnorm)
 
@@ -507,8 +520,13 @@ class AxisExpModel(ParamModel):
         channel, proc_spec, shape_axis, cell_axes_csv = args[:4]
         slope_axes_csv = args[4] if len(args) == 5 else None
         return cls(
-            indata, channel, proc_spec, shape_axis, cell_axes_csv,
-            slope_axes_csv=slope_axes_csv, **kwargs
+            indata,
+            channel,
+            proc_spec,
+            shape_axis,
+            cell_axes_csv,
+            slope_axes_csv=slope_axes_csv,
+            **kwargs,
         )
 
     def __init__(
@@ -583,7 +601,9 @@ class AxisExpModel(ParamModel):
                         f"Available: {[p.decode() if isinstance(p, bytes) else p for p in indata.procs]}"
                     )
                 target_encoded.append(encoded)
-        self.proc_idxs = [int(np.where(indata.procs == p)[0][0]) for p in target_encoded]
+        self.proc_idxs = [
+            int(np.where(indata.procs == p)[0][0]) for p in target_encoded
+        ]
 
         cell_shape = [a.size for a in self.cell_axes]
         self.n_cell = int(np.prod(cell_shape))
@@ -591,7 +611,11 @@ class AxisExpModel(ParamModel):
 
         names = []
         for proc_encoded in target_encoded:
-            proc_name = proc_encoded.decode() if isinstance(proc_encoded, bytes) else str(proc_encoded)
+            proc_name = (
+                proc_encoded.decode()
+                if isinstance(proc_encoded, bytes)
+                else str(proc_encoded)
+            )
             for idxs in itertools.product(*[range(s) for s in cell_shape]):
                 label = "_".join(f"{a.name}{i}" for a, i in zip(self.cell_axes, idxs))
                 names.append(f"lnAmpl_{proc_name}_{label}".encode())
@@ -634,7 +658,9 @@ class AxisExpModel(ParamModel):
             if v["masked"] and not full:
                 continue
             nbins_channel = int(np.prod([a.size for a in v["axes"]]))
-            irnorm = tf.ones([nbins_channel, self.indata.nproc], dtype=self.indata.dtype)
+            irnorm = tf.ones(
+                [nbins_channel, self.indata.nproc], dtype=self.indata.dtype
+            )
             if k == self.channel:
                 for i, proc_idx in enumerate(self.proc_idxs):
                     stride = self.n_cell + self.n_slope_groups
@@ -646,7 +672,9 @@ class AxisExpModel(ParamModel):
                         tf.broadcast_to(tf.exp(a + b * x_reshaped), self.full_shape),
                         [-1, 1],
                     )
-                    proc_col = tf.one_hot(proc_idx, self.indata.nproc, dtype=self.indata.dtype)
+                    proc_col = tf.one_hot(
+                        proc_idx, self.indata.nproc, dtype=self.indata.dtype
+                    )
                     irnorm = irnorm + (scaling - 1.0) * tf.reshape(proc_col, [1, -1])
             rnorms.append(irnorm)
 
@@ -744,7 +772,9 @@ class AxisBernsteinModel(ParamModel):
                         f"Available: {[p.decode() if isinstance(p, bytes) else p for p in indata.procs]}"
                     )
                 target_encoded.append(encoded)
-        self.proc_idxs = [int(np.where(indata.procs == p)[0][0]) for p in target_encoded]
+        self.proc_idxs = [
+            int(np.where(indata.procs == p)[0][0]) for p in target_encoded
+        ]
 
         cell_shape = [a.size for a in self.cell_axes]
         self.n_cell = int(np.prod(cell_shape))
@@ -752,13 +782,19 @@ class AxisBernsteinModel(ParamModel):
 
         names = []
         for proc_encoded in target_encoded:
-            proc_name = proc_encoded.decode() if isinstance(proc_encoded, bytes) else str(proc_encoded)
+            proc_name = (
+                proc_encoded.decode()
+                if isinstance(proc_encoded, bytes)
+                else str(proc_encoded)
+            )
             # nominal: independent softplus endpoints
             for prefix in ("c0", "c1"):
-            # alternative (lnAmpl+frac): decouples amplitude from shape, avoids 2D null space
-            # for prefix in ("lnAmpl", "frac"):
+                # alternative (lnAmpl+frac): decouples amplitude from shape, avoids 2D null space
+                # for prefix in ("lnAmpl", "frac"):
                 for idxs in itertools.product(*[range(s) for s in cell_shape]):
-                    label = "_".join(f"{a.name}{i}" for a, i in zip(self.cell_axes, idxs))
+                    label = "_".join(
+                        f"{a.name}{i}" for a, i in zip(self.cell_axes, idxs)
+                    )
                     names.append(f"{prefix}_{proc_name}_{label}".encode())
         self.params = np.array(names)
 
@@ -807,12 +843,18 @@ class AxisBernsteinModel(ParamModel):
             if v["masked"] and not full:
                 continue
             nbins_channel = int(np.prod([a.size for a in v["axes"]]))
-            irnorm = tf.ones([nbins_channel, self.indata.nproc], dtype=self.indata.dtype)
+            irnorm = tf.ones(
+                [nbins_channel, self.indata.nproc], dtype=self.indata.dtype
+            )
             if k == self.channel:
                 for i, proc_idx in enumerate(self.proc_idxs):
                     # nominal: independent softplus endpoints
-                    c0_poi = param[i * 2 * self.n_cell : i * 2 * self.n_cell + self.n_cell]
-                    c1_poi = param[i * 2 * self.n_cell + self.n_cell : (i + 1) * 2 * self.n_cell]
+                    c0_poi = param[
+                        i * 2 * self.n_cell : i * 2 * self.n_cell + self.n_cell
+                    ]
+                    c1_poi = param[
+                        i * 2 * self.n_cell + self.n_cell : (i + 1) * 2 * self.n_cell
+                    ]
                     c0 = tf.reshape(tf.nn.softplus(c0_poi), self.cell_reshape)
                     c1 = tf.reshape(tf.nn.softplus(c1_poi), self.cell_reshape)
                     scaling = tf.reshape(
@@ -838,7 +880,9 @@ class AxisBernsteinModel(ParamModel):
                     #     ),
                     #     [-1, 1],
                     # )
-                    proc_col = tf.one_hot(proc_idx, self.indata.nproc, dtype=self.indata.dtype)
+                    proc_col = tf.one_hot(
+                        proc_idx, self.indata.nproc, dtype=self.indata.dtype
+                    )
                     irnorm = irnorm + (scaling - 1.0) * tf.reshape(proc_col, [1, -1])
             rnorms.append(irnorm)
 
