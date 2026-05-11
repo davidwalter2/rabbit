@@ -414,10 +414,10 @@ class AxisNormModel(ParamModel):
         self.params = np.array(names)
 
         self.npou = 0
-        # Enforce non-negativity via x²: norm = raw² ≥ 0, applied inside compute()
+        # Enforce non-negativity via x^2 (commented out) or softplus (current) applied inside compute()
         # so this works correctly whether called standalone or inside a composite.
         # allowNegativeParam=True tells the fitter/composite to pass raw x through;
-        # the squaring is handled here. Default raw = sqrt(1) = 1 so norm starts at 1.
+        # the squaring is handled here. Default raw = sqrt(1) = 1 so norm starts at 1 (same true for softplus).
         self.allowNegativeParam = True
         self.is_linear = False
         paramdefault = np.ones(self.npoi, dtype=np.float64)
@@ -428,9 +428,15 @@ class AxisNormModel(ParamModel):
                 if len(matches) == 0:
                     raise ValueError(f"{encoded} not in list of params: {self.params}")
                 paramdefault[matches[0]] = float(value)
+        # x^2
         self.xparamdefault = tf.constant(
             np.sqrt(paramdefault), dtype=self.indata.dtype
         )
+        # softplus
+        _softplus_inv_1 = float(np.log(np.exp(1.0) - 1.0))
+        #self.xparamdefault = tf.constant(
+        #    _softplus_inv_1 * paramdefault, dtype=self.indata.dtype
+        #)
 
     def compute(self, param, full=False):
         reshape = [
@@ -448,9 +454,14 @@ class AxisNormModel(ParamModel):
             if k == self.channel:
                 for i, proc_idx in enumerate(self.proc_idxs):
                     ipoi = param[i * self.n_cell : (i + 1) * self.n_cell]
+                    # x^2
                     scaling = tf.reshape(
                         tf.broadcast_to(tf.reshape(tf.square(ipoi), reshape), shape_input), [-1, 1]
                     )
+                    # softplus
+                    #scaling = tf.reshape(
+                    #    tf.broadcast_to(tf.reshape(tf.nn.softplus(ipoi), reshape), shape_input), [-1, 1]
+                    #)
                     proc_col = tf.one_hot(proc_idx, self.indata.nproc, dtype=self.indata.dtype)
                     irnorm = irnorm + (scaling - 1.0) * tf.reshape(proc_col, [1, -1])
             rnorms.append(irnorm)
@@ -742,7 +753,10 @@ class AxisBernsteinModel(ParamModel):
         names = []
         for proc_encoded in target_encoded:
             proc_name = proc_encoded.decode() if isinstance(proc_encoded, bytes) else str(proc_encoded)
+            # nominal: independent softplus endpoints
             for prefix in ("c0", "c1"):
+            # alternative (lnAmpl+frac): decouples amplitude from shape, avoids 2D null space
+            # for prefix in ("lnAmpl", "frac"):
                 for idxs in itertools.product(*[range(s) for s in cell_shape]):
                     label = "_".join(f"{a.name}{i}" for a, i in zip(self.cell_axes, idxs))
                     names.append(f"{prefix}_{proc_name}_{label}".encode())
@@ -764,13 +778,9 @@ class AxisBernsteinModel(ParamModel):
             a.size if a.name == shape_axis else 1 for a in channel_axes
         ]
 
-        # Non-negative Bernstein coefficients via softplus: c = log(1 + exp(x)).
-        # softplus is always > 0 and has nonzero gradient everywhere, unlike x²
-        # which has zero gradient at x=0 and produces a degenerate (zero-pivot)
-        # Hessian when background → 0 at best fit (boundary of parameter space).
-        # allowNegativeParam=True tells the fitter to pass raw x; softplus
-        # is applied inside compute() below.
-        # Default x = softplus_inv(1) ≈ 0.5413 so c starts at 1 (flat background).
+        # Non-negativity via softplus inside compute(); allowNegativeParam=True
+        # so the fitter passes raw params through and squaring is not applied.
+        # Default raw = softplus_inv(1) ≈ 0.5413 so c0=c1=1 (flat unit background).
         self.npou = 0
         self.allowNegativeParam = True
         self.is_linear = False
@@ -779,10 +789,15 @@ class AxisBernsteinModel(ParamModel):
                 "AxisBernsteinModel does not support expectSignal; "
                 "set initial Bernstein coefficients via --expectSignal on another model."
             )
+        # nominal: softplus_inv(1) so c0=c1=1 at init (flat unit background)
         _softplus_inv_1 = float(np.log(np.exp(1.0) - 1.0))  # ≈ 0.5413
         self.xparamdefault = tf.constant(
             _softplus_inv_1 * np.ones(self.npoi), dtype=self.indata.dtype
         )
+        # alternative (lnAmpl+frac): lnAmpl=0, frac=0 → flat unit background
+        # self.xparamdefault = tf.constant(
+        #     np.zeros(self.npoi), dtype=self.indata.dtype
+        # )
 
     def compute(self, param, full=False):
         x_reshaped = tf.reshape(self.x_m, self.shape_reshape)
@@ -795,6 +810,7 @@ class AxisBernsteinModel(ParamModel):
             irnorm = tf.ones([nbins_channel, self.indata.nproc], dtype=self.indata.dtype)
             if k == self.channel:
                 for i, proc_idx in enumerate(self.proc_idxs):
+                    # nominal: independent softplus endpoints
                     c0_poi = param[i * 2 * self.n_cell : i * 2 * self.n_cell + self.n_cell]
                     c1_poi = param[i * 2 * self.n_cell + self.n_cell : (i + 1) * 2 * self.n_cell]
                     c0 = tf.reshape(tf.nn.softplus(c0_poi), self.cell_reshape)
@@ -806,6 +822,22 @@ class AxisBernsteinModel(ParamModel):
                         ),
                         [-1, 1],
                     )
+                    # alternative (lnAmpl+frac): amplitude decoupled from shape;
+                    # 1D null space per empty cell instead of 2D, better-conditioned Hessian
+                    # lnAmpl_poi = param[i * 2 * self.n_cell : i * 2 * self.n_cell + self.n_cell]
+                    # frac_poi = param[i * 2 * self.n_cell + self.n_cell : (i + 1) * 2 * self.n_cell]
+                    # lnAmpl = tf.reshape(lnAmpl_poi, self.cell_reshape)
+                    # frac = tf.reshape(frac_poi, self.cell_reshape)
+                    # scaling = tf.reshape(
+                    #     tf.broadcast_to(
+                    #         2.0 * tf.exp(lnAmpl) * (
+                    #             tf.sigmoid(frac) * (1.0 - x_reshaped)
+                    #             + tf.sigmoid(-frac) * x_reshaped
+                    #         ),
+                    #         self.full_shape,
+                    #     ),
+                    #     [-1, 1],
+                    # )
                     proc_col = tf.one_hot(proc_idx, self.indata.nproc, dtype=self.indata.dtype)
                     irnorm = irnorm + (scaling - 1.0) * tf.reshape(proc_col, [1, -1])
             rnorms.append(irnorm)
