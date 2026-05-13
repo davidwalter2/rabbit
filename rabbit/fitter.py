@@ -139,6 +139,13 @@ class Fitter:
 
         self.chisqFit = options.chisqFit
         self.covarianceFit = options.covarianceFit
+        # When True, self.is_linear is forced True regardless of the actual
+        # linearity of the param model, asymmetry tensor, or systematic type.
+        # The minimize() path then takes a single Cholesky / Hessian-CG step
+        # from the current x, i.e. a Gaussian approximation around that point.
+        # Convergence to the true minimum then requires an outer iteration
+        # that re-anchors the linearization point.
+        self.force_linear = getattr(options, "forceLinear", False)
 
         self.do_blinding = do_blinding
         self.prefit_unconstrained_nuisance_uncertainty = (
@@ -315,14 +322,23 @@ class Fitter:
         self.frozen_indices = np.array([])
         self.freeze_params(freeze_parameters)
 
-        # determine if problem is linear (ie likelihood is purely quadratic)
-        self.is_linear = (
+        # determine if problem is linear (ie likelihood is purely quadratic).
+        # --forceLinear bypasses the structural checks and forces the
+        # quadratic-solver path; the user is responsible for ensuring the
+        # resulting Gaussian step is meaningful (e.g. via an outer iteration
+        # that re-anchors the linearization point).
+        self.is_linear = self.force_linear or (
             (self.chisqFit or self.covarianceFit)
             and self.param_model.is_linear
             and self.indata.symmetric_tensor
             and self.indata.systematic_type == "normal"
             and self.bbstat.is_linear
         )
+        if self.force_linear:
+            logger.info(
+                "--forceLinear set: solving by a single Gaussian (Cholesky / "
+                "Hessian-CG) step regardless of the actual likelihood shape."
+            )
 
         # force retrace of @tf.function methods since self.x shape may have changed
         for name in dir(type(self)):
