@@ -206,6 +206,18 @@ class Fitter:
     ):
         self.param_model = param_model
 
+        # Internal (scaled) copy of indata.logk used by the yield-computation
+        # hot path. For systematic_type == "normal" with a non-trivial param
+        # model, the linearized additive variation Δ does not naturally scale
+        # with the param-model factor rnorm(poi), so a ±20% variation defined
+        # at the MC nominal becomes a different relative effect once rnorm
+        # moves away from 1. Pre-multiplying logk by rnorm_init (the param
+        # model evaluated at xparamdefault) restores the relative size of the
+        # variation at the linearization point, without introducing a θ·poi
+        # bilinearity in the hot path. For log_normal systematics the
+        # multiplicative form already has this property so no copy is made.
+        self._init_logk_scaled()
+
         if self.do_blinding:
             self._blinding_offsets_poi = tf.Variable(
                 tf.ones([self.param_model.npoi], dtype=self.indata.dtype),
@@ -1201,6 +1213,57 @@ class Fitter:
 
         return expvars
 
+    def _init_logk_scaled(self):
+        """Build an internal copy of indata.logk for the yield-computation
+        hot path, pre-multiplied per (bin, proc) by the param-model factor
+        evaluated at xparamdefault.
+
+        For systematic_type == "log_normal" the multiplicative form
+        ``rnorm * exp(θ·logk) * norm`` already carries the param-model
+        scaling through to the variation, so no copy is needed and
+        self.logk / self.logk_csr alias the indata tensors.
+
+        For systematic_type == "normal" the linearized variation
+        ``rnorm * norm + θ·logk`` does not scale with rnorm. We absorb a
+        constant rnorm_init = param_model.compute(xparamdefault) into logk
+        once, so the relative size of an additive variation matches the
+        multiplicative case at the linearization point. The scaling is a
+        constant, so the hot path remains strictly linear in θ.
+        """
+        if self.indata.systematic_type != "normal" or self.param_model.nparams == 0:
+            self.logk = self.indata.logk
+            if self.indata.sparse:
+                self.logk_csr = self.indata.logk_csr
+            return
+
+        rnorm_init = self.param_model.compute(self.param_model.xparamdefault, full=True)
+        rnorm_init = tf.broadcast_to(
+            rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
+        )
+
+        if self.indata.sparse:
+            # logk dense shape is [norm_nnz, nsyst_or_2nsyst]; each value
+            # at logk.indices[i] = (norm_pos, syst_pos) corresponds to the
+            # (bin, proc) pair stored at norm.indices[norm_pos]. Gather
+            # rnorm_init through this two-level mapping.
+            rnorm_at_norm = tf.gather_nd(rnorm_init, self.indata.norm.indices)
+            scale_per_logk = tf.gather(rnorm_at_norm, self.indata.logk.indices[:, 0])
+            new_values = self.indata.logk.values * scale_per_logk
+            self.logk = tf.SparseTensor(
+                self.indata.logk.indices,
+                new_values,
+                self.indata.logk.dense_shape,
+            )
+            self.logk_csr = tf_sparse_csr.CSRSparseMatrix(self.logk)
+        else:
+            # Dense logk: [nbinsfull, nproc, nsyst] symmetric, or
+            # [nbinsfull, nproc, 2, nsyst] asymmetric. Broadcast rnorm_init
+            # over the trailing axes.
+            if self.indata.symmetric_tensor:
+                self.logk = self.indata.logk * rnorm_init[..., None]
+            else:
+                self.logk = self.indata.logk * rnorm_init[..., None, None]
+
     def _compute_yields_noBBB(self, full=True, compute_norm=True):
         # full: compute yields inclduing masked channels
         # compute_norm: also build the dense [nbins, nproc] normcentral tensor.
@@ -1240,7 +1303,7 @@ class Fitter:
             # enclosing loss/grad/HVP tf.functions are built with
             # jit_compile=False in sparse mode (see _make_tf_functions).
             logsnorm = tf.squeeze(
-                tf_sparse_csr.matmul(self.indata.logk_csr, mthetaalpha),
+                tf_sparse_csr.matmul(self.logk_csr, mthetaalpha),
                 axis=-1,
             )
 
@@ -1283,11 +1346,11 @@ class Fitter:
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull
-                logk = self.indata.logk
+                logk = self.logk
                 norm = self.indata.norm
             else:
                 nbins = self.indata.nbins
-                logk = self.indata.logk[:nbins]
+                logk = self.logk[:nbins]
                 norm = self.indata.norm[:nbins]
 
             if self.indata.symmetric_tensor:
