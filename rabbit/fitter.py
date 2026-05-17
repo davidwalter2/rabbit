@@ -12,7 +12,7 @@ from wums import logging
 
 from rabbit import external_likelihood, io_tools
 from rabbit import tfhelpers as tfh
-from rabbit.bbstat.bbstat import VALID_BIN_BY_BIN_STAT_TYPES, BinByBinStat
+from rabbit.bbstat.bbstat import BinByBinStat
 from rabbit.impacts import global_impacts, nonprofiled_impacts, traditional_impacts
 from rabbit.tfhelpers import edmval_cov
 
@@ -75,7 +75,6 @@ class FitterCallback:
 
 
 class Fitter:
-    valid_bin_by_bin_stat_types = VALID_BIN_BY_BIN_STAT_TYPES
     valid_systematic_types = ["log_normal", "normal"]
 
     def __init__(

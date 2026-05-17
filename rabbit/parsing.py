@@ -241,6 +241,12 @@ def common_parser():
         help="Don't compute the hessian of parameters",
     )
     parser.add_argument(
+        "--noEDM",
+        default=False,
+        action="store_true",
+        help="Don't compute the estimated distance to minimum as fit quality evaluation",
+    )
+    parser.add_argument(
         "--forceLinear",
         default=False,
         action="store_true",
