@@ -841,6 +841,9 @@ def fit(args, fitter, ws, dofit=True):
     # "--externalPostfit <result with a covariance> --globalImpacts" skipped
     # the whole block and wrote no impacts at all, while still exiting 0.
     cov_available = False
+    # covariance for the global impacts to decompose (None = fitter.cov); a
+    # de-biased fit sets it to the de-biased curvature covariance below.
+    global_impacts_cov = None
 
     if recompute_cov:
         if args.noEDM and fitter.do_blinding:
@@ -893,19 +896,27 @@ def fit(args, fitter, ws, dofit=True):
                 edmval, cov = fitter.edmval_cov(grad, bread)
                 logger.info(f"edmval: {edmval}")
             logger.debug(f"[timing] edmval_cov(): {time.perf_counter() - _t_edm:.1f} s")
+            # the de-biased CURVATURE covariance, kept for the impacts below
+            cov_curv = cov
 
             # Robust (sandwich) covariance for the de-biased fit. Bread = the
             # (fisher- or observed-) curvature `bread`; continuous-M uses the
             # analytic meat H = A + M (Sigma = A^-1 + A^-1 M A^-1), two-half uses
-            # the full-sample meat (both in --covMode).
+            # the full-sample meat (both in --covMode). cov_curv is kept so the
+            # impacts can decompose the de-biased CURVATURE consistently and the
+            # sandwich's extra term is reported as the `mcStatDebias` group.
             _debias = getattr(fitter, "mcStatDebias", "none")
             _debiascov = getattr(fitter, "mcStatDebiasCov", "sandwich")
-            if _debiascov == "sandwich":
-                if _debias == "continuousM" and getattr(fitter, "mcstat_M", None) is not None:
+            _is_debiased = (
+                (_debias == "continuousM" and getattr(fitter, "mcstat_M", None) is not None)
+                or (_debias in ("twoHalf", "kfold") and getattr(fitter, "norm_A", None) is not None)
+            )
+            if _debiascov == "sandwich" and _is_debiased:
+                if _debias == "continuousM":
                     cov = fitter.cov_mcstat_sandwich(bread)
                     logger.info("Reporting continuous-M sandwich covariance "
                                 f"(A^-1 + A^-1 M A^-1, covMode={_covmode})")
-                elif _debias in ("twoHalf", "kfold") and getattr(fitter, "norm_A", None) is not None:
+                else:
                     cov = fitter.cov_twohalf_sandwich(bread, covMode=_covmode)
                     logger.info("Reporting two-half sandwich covariance "
                                 f"(A^-1 H A^-1, covMode={_covmode})")
@@ -926,12 +937,27 @@ def fit(args, fitter, ws, dofit=True):
 
             if args.doImpacts and not skip_hessian_impacts:
                 _t_imp = time.perf_counter()
-                ws.add_impacts_hists(*fitter.impacts_parms(hess))
+                # Decompose the de-biased CURVATURE (cov_curv) with the matching
+                # curvature `bread`, so total/syst/stat are consistent. When the
+                # reported cov is the sandwich, append the extra coverage term
+                # diag(sandwich - curvature) as the `mcStatDebias` impact group.
+                extra_vars = None
+                if _is_debiased and _debiascov == "sandwich":
+                    extra_vars = [
+                        tf.linalg.diag_part(fitter.cov) - tf.linalg.diag_part(cov_curv)
+                    ]
+                ws.add_impacts_hists(
+                    *fitter.impacts_parms(bread, cov=cov_curv, extra_group_vars=extra_vars)
+                )
                 logger.debug(
                     f"[timing] impacts_parms(): {time.perf_counter() - _t_imp:.1f} s"
                 )
 
             del hess
+
+            if _is_debiased:
+                # de-biased fit: global impacts decompose the de-biased curvature
+                global_impacts_cov = cov_curv
 
             parms_variances = tf.linalg.diag_part(fitter.cov)
             cov_available = True
@@ -1032,7 +1058,7 @@ def fit(args, fitter, ws, dofit=True):
         if args.globalImpacts:
             _t_gimp = time.perf_counter()
             ws.add_impacts_hists(
-                *fitter.global_impacts_parms(),
+                *fitter.global_impacts_parms(cov=global_impacts_cov),
                 base_name="global_impacts",
                 global_impacts=True,
             )
