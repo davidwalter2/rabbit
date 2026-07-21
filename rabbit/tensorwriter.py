@@ -20,6 +20,9 @@ class TensorWriter:
         systematic_type="log_normal",
         allow_negative_expectation=False,
         add_bin_by_bin_stat_to_data_cov=False,
+        clip_syst_variations=False,
+        zero_syst_low_neff=0.0,
+        zero_syst_low_neff_procs=None,
     ):
         self.allow_negative_expectation = allow_negative_expectation
 
@@ -78,9 +81,28 @@ class TensorWriter:
         # add_auxiliary and rabbit.auxiliary.
         self.auxiliary = []
 
-        self.clipSystVariations = False
-        if self.clipSystVariations > 0.0:
+        # If >0, log-normal systematic variations are clipped so that each bin's
+        # up/down factor k=exp(logk) stays within [1/x, x] with x=clip_syst_variations
+        # (e.g. 10 => [0.1x, 10x]). Tames spurious huge variations in near-empty
+        # bins whose nominal is a stat-cancellation residual. Given as either the
+        # up-factor or the down-fraction (|log| makes 10 and 0.1 equivalent).
+        self.clipSystVariations = clip_syst_variations
+        self.clip = None
+        if self.clipSystVariations and self.clipSystVariations > 0.0:
             self.clip = np.abs(np.log(self.clipSystVariations))
+
+        # If >0, at write time every systematic's logk is set to 0 in any
+        # (bin, process) whose effective sample size n_eff = sumw**2/sumw2 is
+        # below this threshold (in units of effective events; n_eff is
+        # scale-invariant). Such bins are mixed-sign NLO-weight cancellation
+        # residuals where logk = log(syst/nom) is floating-point noise and
+        # nom*exp(logk) blows up. Zeroing logk keeps the (unbiased) nominal but
+        # removes the meaningless systematic lever. Optionally restricted to a
+        # list of process names via zero_syst_low_neff_procs (None => all).
+        self.zeroSystLowNeff = zero_syst_low_neff
+        self.zeroSystLowNeffProcs = (
+            set(zero_syst_low_neff_procs) if zero_syst_low_neff_procs else None
+        )
 
         self.logkepsilon = math.log(
             1e-3
@@ -1014,7 +1036,7 @@ class TensorWriter:
                     logk_vals,
                     self.logkepsilon,
                 )
-                if self.clipSystVariations > 0.0:
+                if self.clipSystVariations and self.clipSystVariations > 0.0:
                     logk_vals = np.clip(logk_vals, -self.clip, self.clip)
             elif systematic_type == "normal":
                 logk_vals = kfactor * (syst_at_pos - norm_at_pos)
@@ -1517,9 +1539,10 @@ class TensorWriter:
                 self.logkepsilon * np.ones_like(_logk),
             )
 
-            # FIXME does this actually take effect since _logk_view is normally returned?
-            if self.clipSystVariations > 0.0:
-                _logk = np.clip(_logk, -self.clip, self.clip)
+            # Clip the value that is actually returned (previously applied to
+            # _logk, which is not returned, so the clip never took effect here).
+            if self.clipSystVariations and self.clipSystVariations > 0.0:
+                _logk_view = np.clip(_logk_view, -self.clip, self.clip)
 
             return _logk_view
         elif systematic_type == "normal":
@@ -1548,7 +1571,7 @@ class TensorWriter:
                 _logk,
                 self.logkepsilon,
             )
-            if self.clipSystVariations > 0.0:
+            if self.clipSystVariations and self.clipSystVariations > 0.0:
                 _logk = np.clip(_logk, -self.clip, self.clip)
             return _logk
         elif systematic_type == "normal":
@@ -1632,7 +1655,82 @@ class TensorWriter:
             for group in groups:
                 self.dict_systgroups[group].add(name)
 
+    def _zero_low_neff_systematics(self):
+        """Zero every systematic's logk in (bin, process) with low effective
+        sample size n_eff = sumw**2 / sumw2 < zeroSystLowNeff.
+
+        Runs at the start of write() (before the tensors are assembled). Leaves
+        the nominal (dict_norm), sumw2 and data untouched — only the stored logk
+        values (both the average and, for asymmetric systematics, the halfdiff)
+        are set to 0 in the flagged bins. See the __init__ note for the physics.
+        """
+        thr = self.zeroSystLowNeff
+        if not thr or thr <= 0.0:
+            return
+
+        procs_filter = self.zeroSystLowNeffProcs  # None => all processes
+        zeroed_per_proc = defaultdict(int)
+
+        for channel in self.dict_logkavg:
+            for proc in self.dict_logkavg[channel]:
+                if procs_filter is not None and proc not in procs_filter:
+                    continue
+
+                sumw2 = np.asarray(self.dict_sumw2[channel][proc], dtype=np.float64)
+                norm_raw = self.dict_norm[channel][proc]
+                if self._issparse(norm_raw):
+                    # scipy CSR: densify to a per-bin nominal (zeros elsewhere)
+                    norm = np.zeros_like(sumw2)
+                    norm[np.asarray(norm_raw.indices, dtype=np.int64)] = norm_raw.data
+                else:
+                    norm = np.asarray(norm_raw, dtype=np.float64)
+
+                ok = (norm > 0.0) & (sumw2 > 0.0)
+                neff = np.full(norm.shape, np.inf)
+                neff[ok] = norm[ok] ** 2 / sumw2[ok]
+                mask_bins = ok & (neff < thr)  # per-bin, this (channel, proc)
+                if not mask_bins.any():
+                    continue
+
+                zeroed_per_proc[proc] += int(mask_bins.sum())
+                masked_idx = np.where(mask_bins)[0]
+
+                for dict_logk, dict_idx in (
+                    (self.dict_logkavg, self.dict_logkavg_indices),
+                    (self.dict_logkhalfdiff, self.dict_logkhalfdiff_indices),
+                ):
+                    proc_systs = dict_logk.get(channel, {}).get(proc, {})
+                    for syst in proc_systs:
+                        if self.sparse:
+                            # values stored densely per nnz; bin index lives in
+                            # the parallel indices dict, shape (nnz, 1)
+                            idx = np.asarray(dict_idx[channel][proc][syst]).reshape(-1)
+                            vals = np.asarray(proc_systs[syst], dtype=np.float64)
+                            drop = np.isin(idx, masked_idx)
+                            if drop.any():
+                                vals = vals.copy()
+                                vals[drop] = 0.0
+                                proc_systs[syst] = vals
+                        else:
+                            # full-size dense array indexed by flat bin
+                            arr = np.asarray(proc_systs[syst], dtype=np.float64).copy()
+                            arr[mask_bins] = 0.0
+                            proc_systs[syst] = arr
+
+        for proc, n in sorted(zeroed_per_proc.items()):
+            logger.info(
+                f"--zeroSystLowNeff {thr}: zeroed all systematics' logk in "
+                f"{n} bin(s) for process '{proc}' (n_eff < {thr})"
+            )
+        if not zeroed_per_proc:
+            logger.info(
+                f"--zeroSystLowNeff {thr}: no (bin, process) below the n_eff "
+                "threshold; nothing zeroed"
+            )
+
     def write(self, outfolder="./", outfilename="rabbit_input.hdf5", meta_data_dict={}):
+
+        self._zero_low_neff_systematics()
 
         if self.signals.intersection(self.bkgs):
             raise RuntimeError(
