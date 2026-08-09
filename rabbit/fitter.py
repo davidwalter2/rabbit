@@ -2100,10 +2100,20 @@ class Fitter:
 
         return ln, lc, lbeta, lpenalty, beta
 
-    def _compute_external_nll(self):
-        """Sum of external likelihood term contributions: sum_i (g_i^T x_sub + 0.5 x_sub^T H_i x_sub)."""
+    def _compute_external_nll(self, full_nll=False):
+        """Sum of external likelihood term contributions.
+
+        Each term contributes ``g_i^T x_sub + 0.5 x_sub^T H_i x_sub + const_i``,
+        plus its Gaussian log-normalization when ``full_nll`` is set. The two
+        scalars mirror the treatment of the native constraint term in
+        :meth:`_compute_lc`: that one is written in centered form, so its
+        "value at the prior mean is zero" property is automatic and only the
+        log-normalization is gated on ``full_nll``. External terms are stored
+        expanded, so the centering constant has to be added back explicitly.
+        See :mod:`rabbit.external_likelihood`.
+        """
         return external_likelihood.compute_external_nll(
-            self.external_terms, self.x, self.indata.dtype
+            self.external_terms, self.x, self.indata.dtype, full_nll=full_nll
         )
 
     def _compute_nll(self, profile=True, full_nll=False):
@@ -2118,7 +2128,7 @@ class Fitter:
         if lpenalty is not None:
             l = l + lpenalty
 
-        lext = self._compute_external_nll()
+        lext = self._compute_external_nll(full_nll=full_nll)
         if lext is not None:
             l = l + lext
         return l

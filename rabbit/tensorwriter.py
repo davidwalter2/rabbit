@@ -1350,12 +1350,14 @@ class TensorWriter:
             )
         return np.array([ax.value(i) for i in range(len(ax))], dtype=object)
 
-    def add_external_likelihood_term(self, grad=None, hess=None, name=None):
+    def add_external_likelihood_term(
+        self, grad=None, hess=None, name=None, mean=None, const=None, lognorm=None
+    ):
         """Add an additive quadratic term to the negative log-likelihood.
 
         The term has the form
 
-            L_ext(x) = g^T x_sub + 0.5 * x_sub^T H x_sub
+            L_ext(x) = g^T x_sub + 0.5 * x_sub^T H x_sub + const  [+ lognorm]
 
         where ``x_sub`` is the slice of the full fit parameter vector
         corresponding to the parameters identified by the StrCategory axes
@@ -1364,11 +1366,20 @@ class TensorWriter:
         strings and resolved against the full parameter list (POIs + systs)
         at fit time.
 
+        To declare a Gaussian prior ``N(mu, C)``, the recommended form is to
+        pass ``hess`` (= ``C^-1``) together with ``mean`` and let this method
+        derive ``grad = -H mu`` and the scalars for you. Building ``grad``
+        yourself works too, but then a *dense* ``hess`` is required for the
+        scalars to be derived automatically at load time -- with a sparse
+        ``hess`` there is no cheap way to recover ``mu`` from ``g``, and the
+        term stays uncentered. See :mod:`rabbit.external_likelihood`.
+
         Parameters
         ----------
         grad : hist.Hist, optional
             1D histogram with one ``hist.axis.StrCategory`` axis whose bin
             labels are parameter names. Values are the gradient ``g``.
+            Mutually exclusive with ``mean``.
         hess : hist.Hist or wums.SparseHist, optional
             2D histogram with two ``hist.axis.StrCategory`` axes; both must
             have identical bin labels equal to the gradient parameter list
@@ -1379,11 +1390,40 @@ class TensorWriter:
         name : str, optional
             Identifier for this term. Auto-generated if not provided.
             Multiple terms can be added by calling this method repeatedly.
+        mean : hist.Hist or array-like, optional
+            The prior mean ``mu``, in the same parameter order as ``hess``.
+            Requires ``hess`` and forbids ``grad``. Sets ``g = -H mu`` and
+            ``const = 0.5 mu^T H mu``; the latter needs only a matvec, so
+            this is also the way to get a *sparse* Gaussian term centered
+            correctly. If a 1D ``hist.Hist`` is given its axis labels are
+            checked against the Hessian's.
+        const : float, optional
+            Override for the centering constant ``0.5 mu^T H mu``. Rarely
+            needed; use ``mean`` instead. Passing ``0.0`` explicitly is
+            meaningful -- it records "this really is zero" and suppresses
+            the automatic derivation at load time.
+        lognorm : float, optional
+            Override for the Gaussian log-normalization
+            ``0.5 (k log 2pi - log det H)``, added to the full NLL only.
+            Supply this for a sparse Gaussian term if you want
+            ``nllvalfull`` to be a true -log L; it is not derived from a
+            sparse Hessian automatically.
         """
         if grad is None and hess is None:
             raise ValueError(
                 "add_external_likelihood_term requires at least one of grad or hess"
             )
+        if mean is not None:
+            if hess is None:
+                raise ValueError(
+                    "add_external_likelihood_term: mean= requires hess= "
+                    "(the prior mean is only meaningful together with H = C^-1)"
+                )
+            if grad is not None:
+                raise ValueError(
+                    "add_external_likelihood_term: pass either mean= or grad=, "
+                    "not both (grad is derived as -H mu when mean is given)"
+                )
 
         if name is None:
             name = f"ext{len(self.external_terms)}"
@@ -1459,6 +1499,43 @@ class TensorWriter:
                         f"params length {len(params)}"
                     )
 
+        # Gaussian prior declared as (H, mu): derive g = -H mu and the centering
+        # constant 0.5 mu^T H mu. Both need only a matvec, so this path works
+        # for a sparse H too -- which the load-time derivation cannot, since
+        # recovering mu from g there would take a sparse solve.
+        if mean is not None:
+            if hasattr(mean, "axes"):
+                if len(mean.axes) != 1:
+                    raise ValueError(
+                        f"mean must be a 1D histogram, got {len(mean.axes)} axes"
+                    )
+                mean_params = self._strcategory_labels(mean.axes[0])
+                if not np.array_equal(params, mean_params):
+                    raise ValueError(
+                        "mean and hess must use the same parameter list in the "
+                        f"same order; got mean params {mean_params.tolist()} vs "
+                        f"hess params {np.asarray(params).tolist()}"
+                    )
+                mu = np.asarray(mean.values()).flatten().astype(self.dtype)
+            else:
+                mu = np.asarray(mean, dtype=self.dtype).ravel()
+                if len(mu) != len(params):
+                    raise RuntimeError(
+                        f"mean length {len(mu)} does not match params length "
+                        f"{len(params)}"
+                    )
+
+            if hess_dense is not None:
+                Hmu = hess_dense @ mu
+            else:
+                rows, cols, vals = hess_sparse
+                Hmu = np.zeros(len(params), dtype=self.dtype)
+                np.add.at(Hmu, rows, vals * mu[cols])
+
+            grad_values = (-Hmu).astype(self.dtype)
+            if const is None:
+                const = float(0.5 * mu @ Hmu)
+
         self.external_terms.append(
             {
                 "name": name,
@@ -1466,6 +1543,8 @@ class TensorWriter:
                 "grad_values": grad_values,
                 "hess_dense": hess_dense,
                 "hess_sparse": hess_sparse,
+                "const": None if const is None else float(const),
+                "lognorm": None if lognorm is None else float(lognorm),
             }
         )
 
@@ -2280,6 +2359,13 @@ class TensorWriter:
                     compression="gzip",
                 )
                 params_ds[...] = [str(p) for p in term["params"]]
+
+                # Optional Gaussian scalars. Written only when known, so that
+                # "absent" keeps meaning "derive it at load time if you can"
+                # and existing files stay readable unchanged.
+                for key in ("const", "lognorm"):
+                    if term.get(key) is not None:
+                        term_group.create_dataset(key, data=float(term[key]))
 
                 if term["grad_values"] is not None:
                     nbytes += h5pyutils_write.writeFlatInChunks(
