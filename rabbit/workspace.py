@@ -117,7 +117,7 @@ class Workspace:
             file_path = f"{parts[0]}_{postfix}.{parts[1]}"
         return file_path
 
-    def dump_obj(self, obj, key, mapping_key=None, channel=None):
+    def dump_obj(self, obj, key, mapping_key=None, channel=None, group=None):
         result = self.results
 
         if mapping_key is not None:
@@ -133,6 +133,13 @@ class Workspace:
             if channel not in result["channels"]:
                 result["channels"][channel] = {}
             result = result["channels"][channel]
+
+        # One further, freely-named level, so a second fit's results can sit
+        # beside the primary one under the same key names.
+        if group is not None:
+            if group not in result:
+                result[group] = {}
+            result = result[group]
 
         result[key] = obj
 
@@ -190,6 +197,7 @@ class Workspace:
         label=None,
         channel=None,
         mapping_key=None,
+        group=None,
         is_matrix=False,
         flow=False,
     ):
@@ -208,7 +216,7 @@ class Workspace:
                     variances = variances[start:stop]
 
         h = self.hist(name, axes, values, variances, label, flow=flow)
-        self.dump_hist(h, mapping_key, channel)
+        self.dump_hist(h, mapping_key, channel, group=group)
 
     def add_value(self, value, name, *args, **kwargs):
         self.dump_obj(value, name, *args, **kwargs)
@@ -221,6 +229,42 @@ class Workspace:
         self.add_value(float(chi2), "chi2" + postfix, mapping.key)
         if edmval is not None:
             self.add_value(float(edmval), "edmval" + postfix, mapping.key)
+
+    def add_minimizer_status(self, status, name="minimizer_status", *args, **kwargs):
+        """Store a :meth:`Fitter.minimizer_status` dict (no-op if ``None``)."""
+        if status is not None:
+            self.add_value(dict(status), name, *args, **kwargs)
+
+    @staticmethod
+    def _parms_axis(parms, name="parms"):
+        return hist.axis.StrCategory(
+            [p.decode() if isinstance(p, bytes) else str(p) for p in parms], name=name
+        )
+
+    def add_named_parms_hist(
+        self, values, parms, hist_name="parms", variances=None, **kwargs
+    ):
+        """Store a postfit parameter vector carrying its own parameter list,
+        for a fit whose model differs from the primary one."""
+        if variances is None:
+            variances = np.full(len(values), np.nan)
+        self.add_hist(
+            hist_name,
+            self._parms_axis(parms),
+            np.asarray(values),
+            variances=variances,
+            **kwargs,
+        )
+
+    def add_named_cov_hist(self, cov, parms, hist_name="cov", **kwargs):
+        """:meth:`add_cov_hist` for a fit with its own parameter list."""
+        self.add_hist(
+            hist_name,
+            [self._parms_axis(parms, "parms_x"), self._parms_axis(parms, "parms_y")],
+            cov,
+            is_matrix=True,
+            **kwargs,
+        )
 
     def add_observed_hists(
         self,
@@ -587,12 +631,16 @@ class Workspace:
 
         return name, label
 
-    def add_1D_integer_hist(self, values, name_x, name_y):
+    def add_1D_integer_hist(self, values, name_x, name_y, **kwargs):
         axis_epoch = hist.axis.Integer(
             0, len(values), underflow=False, overflow=False, name=name_x
         )
         self.add_hist(
-            f"{name_x}_{name_y}", axis_epoch, values, label=f"{name_x} {name_y}"
+            f"{name_x}_{name_y}",
+            axis_epoch,
+            values,
+            label=f"{name_x} {name_y}",
+            **kwargs,
         )
 
     def write_meta(self, meta):

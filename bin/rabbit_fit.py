@@ -442,10 +442,17 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 fitter_saturated.tau.assign(saved_tau)
 
                 fitter_saturated.xdefaultassign()
+                # The composite re-init reordered and resized the parameter
+                # vector (one POI per projected bin, inserted ahead of the
+                # original model's block), so regularizers must be re-armed or
+                # they read the wrong entries. xdefaultassign() above is
+                # deliberate but does not arm them.
+                fitter_saturated.arm_regularizers()
                 cb = fitter_saturated.minimize()
+                cov_saturated = None
                 if not args.noHessian:
                     _, grad, hess = fitter_saturated.loss_val_grad_hess()
-                    edmval, cov = fitter_saturated.edmval_cov(grad, hess)
+                    edmval, cov_saturated = fitter_saturated.edmval_cov(grad, hess)
                     logger.info(f"edmval: {edmval}")
                 else:
                     edmval = None
@@ -464,6 +471,28 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 ws.add_chi2(
                     chi2val, ndf, prefit, mapping, saturated=True, edmval=edmval
                 )
+
+                # Persist the saturated fit itself, not just its chi2, under
+                # results["mappings"][<mapping>]["saturated_fit"], using the same
+                # key names the primary fit uses at top level.
+                SAT = dict(mapping_key=mapping.key, group="saturated_fit")
+                ws.add_value(float(nllvalreduced), "nllvalreduced", **SAT)
+                ws.add_named_parms_hist(
+                    fitter_saturated.x.numpy(),
+                    fitter_saturated.parms,
+                    variances=(
+                        np.diag(cov_saturated) if cov_saturated is not None else None
+                    ),
+                    **SAT,
+                )
+                ws.add_minimizer_status(fitter_saturated.minimizer_status(), **SAT)
+                if edmval is not None:
+                    ws.add_value(float(edmval), "edmval", **SAT)
+                if cov_saturated is not None:
+                    ws.add_named_cov_hist(cov_saturated, fitter_saturated.parms, **SAT)
+                if cb is not None and getattr(cb, "loss_history", None) is not None:
+                    ws.add_1D_integer_hist(cb.loss_history, "epoch", "loss", **SAT)
+                    ws.add_1D_integer_hist(cb.time_history, "epoch", "time", **SAT)
 
         if args.saveHistsPerProcess and not mapping.skip_per_process:
             logger.info(f"Save processes histogram for {mapping.key}")
