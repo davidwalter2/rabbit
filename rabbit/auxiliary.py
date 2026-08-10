@@ -25,6 +25,42 @@ from rabbit import h5pyutils_write
 from rabbit.h5pyutils_read import maketensor
 
 
+def initial_params_name(model, process, channel):
+    """Canonical auxiliary bundle name for a param model's initial parameters.
+
+    A ParamModel that supports pre-computed starting values looks up this name in
+    ``FitInputData.auxiliary`` when no explicit ``params:`` token is given, so the
+    tool writing the datacard can ship the values alongside the templates they were
+    derived from. The bundle is expected to hold at least a ``params`` array and a
+    scalar ``order``.
+    """
+    return f"initial_params_{model}_{process}_{channel}"
+
+
+def read_initial_params(indata, name):
+    """Return ``(params, order)`` from auxiliary bundle ``name``, or ``(None, None)``.
+
+    Parameters
+    ----------
+    indata : rabbit.inputdata.FitInputData
+        Input data whose ``auxiliary`` bundles are searched.
+    name : str
+        Bundle name, e.g. from :func:`initial_params_name`.
+    """
+    bundle = getattr(indata, "auxiliary", {}).get(name)
+    if bundle is None:
+        return None, None
+    if "params" not in bundle:
+        raise ValueError(
+            f"auxiliary bundle '{name}' has no 'params' dataset, found {sorted(bundle)}"
+        )
+    params = np.asarray(bundle["params"])
+    order = None
+    if "order" in bundle:
+        order = int(np.asarray(bundle["order"]).reshape(-1)[0])
+    return params, order
+
+
 def _is_string_array(arr):
     """True if ``arr`` should be stored as strings rather than numbers."""
     return arr.dtype.kind in ("U", "S", "O")

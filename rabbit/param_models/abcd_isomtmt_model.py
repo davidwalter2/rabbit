@@ -15,7 +15,7 @@ CLI syntax:
     --paramModel ABCDIsoMT               [yieldCorrection:0|1] <process> <channel>
     --paramModel ExtendedABCDIsoMT       [yieldCorrection:0|1] <process> <channel>
     --paramModel SmoothABCDIsoMT         [order:N] [yieldCorrection:0|1] <process> <channel>
-    --paramModel SmoothExtendedABCDIsoMT [params:file.hdf5 | order:N] \\
+    --paramModel SmoothExtendedABCDIsoMT [params:<src> | order:N] \\
                                          [yieldCorrection:0|1] <process> <channel>
 
 ``yieldCorrection`` defaults to 0 (no MC factor); pass ``yieldCorrection:1``
@@ -29,12 +29,18 @@ mt=sideband:       B                   A
 mt=signal:         D  ← predicted      C
 """
 
-import h5py
+from wums import logging
 
+from rabbit.auxiliary import initial_params_name, read_initial_params
 from rabbit.param_models.abcd_model import ABCD
 from rabbit.param_models.extended_abcd_model import ExtendedABCD
 from rabbit.param_models.smooth_abcd_model import SmoothABCD
-from rabbit.param_models.smooth_extended_abcd_model import SmoothExtendedABCD
+from rabbit.param_models.smooth_extended_abcd_model import (
+    SmoothExtendedABCD,
+    resolve_params_token,
+)
+
+logger = logging.child_logger(__name__)
 
 
 def _isomtmt_regions(indata, channel_name):
@@ -76,22 +82,21 @@ def _parse_isomtmt_args(tokens):
     return order, process, channel, yield_correction
 
 
-def _parse_isomtmt_args_with_params(tokens):
-    """Parse [params:file.hdf5 | order:N] [yieldCorrection:0|1] <process> <channel>
+def _parse_isomtmt_args_with_params(tokens, indata, model_name):
+    """Parse [params:<src> | order:N] [yieldCorrection:0|1] <process> <channel>
     from a token list.
 
-    ``params:`` and ``order:`` are mutually exclusive; the params file encodes
+    ``params:`` and ``order:`` are mutually exclusive; the params source encodes
     the polynomial order via its stored ``order`` field.
+
+    With neither token, the initial parameters are taken from the auxiliary bundle
+    ``initial_params_<model>_<process>_<channel>`` of the input file if the tool
+    that wrote the datacard stored one, and are left at zero otherwise.
     """
-    initial_params = None
-    order = 1
+    params_token = None
+    order = None
     if tokens and tokens[0].startswith("params:"):
-        params_file = tokens.pop(0).split(":", 1)[1]
-
-        with h5py.File(params_file, mode="r") as f:
-            initial_params = f["params"][...]
-            order = f["order"][...]
-
+        params_token = tokens.pop(0)
     elif tokens and tokens[0].startswith("order:"):
         order = int(tokens.pop(0).split(":", 1)[1])
     yield_correction = _pop_yield_correction(tokens)
@@ -101,7 +106,27 @@ def _parse_isomtmt_args_with_params(tokens):
     channel = tokens.pop(0)
     if tokens:
         raise ValueError(f"Unexpected extra arguments: {tokens}")
-    return order, process, channel, initial_params, yield_correction
+
+    initial_params = None
+    if params_token is not None:
+        initial_params, order = resolve_params_token(params_token, indata)
+    elif order is None:
+        # no explicit request: pick up values shipped with the input file, if any
+        aux_name = initial_params_name(model_name, process, channel)
+        initial_params, order = read_initial_params(indata, aux_name)
+        if initial_params is not None:
+            logger.info(
+                f"Using initial parameters from auxiliary bundle '{aux_name}' "
+                f"of the input file (order {order})"
+            )
+
+    return (
+        order if order is not None else 1,
+        process,
+        channel,
+        initial_params,
+        yield_correction,
+    )
 
 
 class ABCDIsoMT(ABCD):
@@ -237,11 +262,17 @@ class SmoothExtendedABCDIsoMT(SmoothExtendedABCD):
     smoothing axis; all remaining axes become outer axes.
 
     CLI syntax:
-        --paramModel SmoothExtendedABCDIsoMT [params:file.hdf5 | order:N] <process> <channel>
+        --paramModel SmoothExtendedABCDIsoMT [params:<src> | order:N] <process> <channel>
 
-    ``params:file.hdf5`` loads initial parameter values and polynomial order from a
-    file produced by setupRabbit.py --dumpSmoothingParams.  It is mutually
-    exclusive with ``order:N``.
+    ``params:<src>`` loads initial parameter values and the polynomial order,
+    either from ``params:aux:<name>`` (an auxiliary bundle in the input file) or
+    from ``params:<file.hdf5>`` (a standalone file, e.g. from WRemnants'
+    regen_smoothing_params.py).  It is mutually exclusive with ``order:N``.
+
+    With neither token given, the initial parameters are read from the auxiliary
+    bundle ``initial_params_SmoothExtendedABCDIsoMT_<process>_<channel>`` if the
+    input file carries one (WRemnants' setupRabbit.py writes it for the
+    simultaneous ABCD setup), and are left at zero otherwise.
     """
 
     def __init__(self, indata, abcd_process, channel_name, order=1, **kwargs):
@@ -277,7 +308,7 @@ class SmoothExtendedABCDIsoMT(SmoothExtendedABCD):
             channel,
             initial_params,
             yield_correction,
-        ) = _parse_isomtmt_args_with_params(tokens)
+        ) = _parse_isomtmt_args_with_params(tokens, indata, cls.__name__)
         return cls(
             indata,
             process,
