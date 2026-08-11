@@ -125,6 +125,9 @@ class Fitter:
         self.minimizer_maxiter = getattr(options, "minimizerMaxiter", None)
         self.minimizer_gtol = getattr(options, "minimizerGtol", None)
         self.minimizer_ftol = getattr(options, "minimizerFtol", None)
+        # scipy's OptimizeResult from the last fit(), so the convergence
+        # outcome can be written to the output. None if the minimizer raised.
+        self.minimizer_result = None
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
         # jitCompile accepts "auto" (the default), "on", or "off".
         # True / False from programmatic callers are accepted as
@@ -273,6 +276,10 @@ class Fitter:
             self.init_blinding_values(unblind, blinding_group)
 
         self.parms = np.concatenate([self.param_model.params, self.indata.systs])
+        # Layout changed: anything a regularizer resolved is now stale. Marked
+        # rather than re-armed here because this runs from __init__, before
+        # regularizers are attached; discharged by arm_regularizers().
+        self._regularizers_armed = False
 
         # tf tensor containing default constraint minima
         theta0default = np.zeros(self.indata.nsyst)
@@ -809,10 +816,19 @@ class Fitter:
         if self.do_blinding:
             self.set_blinding_offsets(False)
 
+        self.arm_regularizers()
+
+    def arm_regularizers(self):
+        """Tell every regularizer about the current parameter layout.
+
+        Must be called after anything that changes ``self.parms``, notably
+        ``init_fit_parms``.
+        """
         xinit = self.get_x()
         nexp0 = self.expected_yield(full=True)
         for reg in self.regularizers:
-            reg.set_expectations(xinit, nexp0)
+            reg.set_expectations(xinit, nexp0, parms=self.parms)
+        self._regularizers_armed = True
 
     def bayesassign(self):
         # Sample the parameter values from their priors: width sqrt(1/cw)
@@ -2089,6 +2105,11 @@ class Fitter:
         lbeta = self._compute_lbeta(beta, full_nll)
 
         if len(self.regularizers):
+            if not getattr(self, "_regularizers_armed", False):
+                raise RuntimeError(
+                    "Regularizers not armed against the current parameter layout; "
+                    "call arm_regularizers() (or defaultassign()) first."
+                )
             x = self.get_x()
             penalties = [
                 reg.compute_nll_penalty(x, nexpfullcentral) * tf.exp(2 * self.tau)
@@ -2314,14 +2335,33 @@ class Fitter:
             # minimizer could have called the loss or hessp functions with "random" values, so restore the
             # state from the end of the last iteration before the exception
             xval = callback.xval
+            self.minimizer_result = None
             logger.debug(ex)
         else:
             xval = res["x"]
+            self.minimizer_result = res
             logger.debug(res)
 
         self.x.assign(xval)
 
         return callback
+
+    def minimizer_status(self):
+        """Convergence outcome of the last :meth:`fit`, or None if none ran.
+
+        NB ``success`` is scipy's flag, not a convergence test on its own:
+        BFGS reports False ("precision loss") at points with EDM ~1e-17.
+        """
+        res = self.minimizer_result
+        if res is None:
+            return None
+        return {
+            "success": bool(getattr(res, "success", False)),
+            "status": int(getattr(res, "status", -1)),
+            "nit": int(getattr(res, "nit", -1)),
+            "nfev": int(getattr(res, "nfev", -1)),
+            "message": str(getattr(res, "message", "")),
+        }
 
     def minimize(self):
         if self.is_linear:

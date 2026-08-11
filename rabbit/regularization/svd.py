@@ -52,7 +52,9 @@ class SVD(Regularizer):
 
         self.paddings = [[0, 0]] + [[1, 1]] * self.ndims + [[0, 0]]
 
-    def set_expectations(self, initial_params, initial_observables):
+    def set_expectations(self, initial_params, initial_observables, parms=None):
+        # parms is unused here: this regularizer holds no per-parameter positions,
+        # it works through self.mapping, which is rebuilt from the current vector.
         # TODO: do we need to include this in autodiff for global impacts, since initial_params = (poi0, theta0)?
         nexp0 = self.mapping.compute_flat(initial_params, initial_observables)
         self.nexp0 = tf.reshape(nexp0, self.input_shape)
