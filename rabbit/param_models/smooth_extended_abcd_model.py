@@ -27,8 +27,43 @@ import itertools
 import numpy as np
 import tensorflow as tf
 
+from rabbit.auxiliary import read_initial_params
 from rabbit.param_models.abcd_model import _get_global_indices
 from rabbit.param_models.param_model import ParamModel
+
+
+def resolve_params_token(token, indata):
+    """Resolve a ``params:<spec>`` CLI token into ``(initial_params, order)``.
+
+    Supported specs:
+
+    * ``aux:<name>`` — an auxiliary bundle carried in the fit input file itself
+      (see :mod:`rabbit.auxiliary`), i.e. values shipped by whatever wrote the
+      datacard, guaranteed to match its binning;
+    * anything else — a path to a standalone ``.hdf5``/``.h5`` file (datasets
+      ``params`` and ``order``) or to a ``.npz``-style file readable by
+      ``np.load``.
+    """
+    spec = token.split(":", 1)[1]
+
+    if spec.startswith("aux:"):
+        name = spec.split(":", 1)[1]
+        initial_params, order = read_initial_params(indata, name)
+        if initial_params is None:
+            available = sorted(getattr(indata, "auxiliary", {}))
+            raise ValueError(
+                f"No auxiliary bundle '{name}' in the input file. Available: {available}"
+            )
+        return initial_params, order
+
+    if spec.endswith(".hdf5") or spec.endswith(".h5"):
+        import h5py
+
+        with h5py.File(spec, mode="r") as f:
+            return f["params"][...], int(f["order"][()])
+
+    d = np.load(spec)
+    return d["params"], int(d["order"])
 
 
 class SmoothExtendedABCD(ParamModel):
@@ -283,14 +318,17 @@ class SmoothExtendedABCD(ParamModel):
         """Parse CLI arguments for SmoothExtendedABCD.
 
         Syntax:
-            --paramModel SmoothExtendedABCD <axis> [params:file.hdf5] [order:N] \\
+            --paramModel SmoothExtendedABCD <axis> [params:<src> | order:N] \\
                          [yieldCorrection:0|1] <process> \\
                          <ch_Ax> [ax:val ...] <ch_Bx> [ax:val ...] \\
                          <ch_A>  [ax:val ...] <ch_B>  [ax:val ...] \\
                          <ch_C>  [ax:val ...] <ch_D>  [ax:val ...]
 
-        The optional ``params:file.hdf5`` token loads a numpy array as initial
-        parameter values (produced by setupRabbit.py --dumpSmoothingParams).
+        The optional ``params:<src>`` token loads initial parameter values and
+        the polynomial order, either from ``params:aux:<name>`` (an auxiliary
+        bundle stored in the input file itself) or from ``params:<file.hdf5>``
+        (a standalone file, e.g. from WRemnants' regen_smoothing_params.py).
+        It is mutually exclusive with ``order:N``.
         ``yieldCorrection`` defaults to 0 (no MC factor); pass
         ``yieldCorrection:1`` to enable the yield-level form.
         """
@@ -305,21 +343,13 @@ class SmoothExtendedABCD(ParamModel):
         tokens = list(args)
         smoothing_axis = tokens.pop(0)
 
-        # Optional params file (mutually exclusive with order:N)
+        # Optional params source (mutually exclusive with order:N)
         initial_params = None
         order = 1
         if tokens and tokens[0].startswith("params:"):
-            params_file = tokens.pop(0).split(":", 1)[1]
-            if params_file.endswith(".hdf5") or params_file.endswith(".h5"):
-                import h5py
-
-                with h5py.File(params_file, mode="r") as f:
-                    initial_params = f["params"][...]
-                    order = int(f["order"][()])
-            else:
-                d = np.load(params_file)
-                initial_params = d["params"]
-                order = int(d["order"])
+            initial_params, params_order = resolve_params_token(tokens.pop(0), indata)
+            if params_order is not None:
+                order = params_order
         elif tokens and tokens[0].startswith("order:"):
             order = int(tokens.pop(0).split(":", 1)[1])
 

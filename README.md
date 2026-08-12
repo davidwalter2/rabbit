@@ -179,8 +179,25 @@ Available Param models are:
 * `ABCD`: Data-driven background estimation with four regions; D is predicted as `C·A/B` times an MC correction factor (`npoi=0`, `npou=3·n_bins`). CLI: `--paramModel ABCD <process> <ch_A> [ax:val ...] <ch_B> [ax:val ...] <ch_C> [ax:val ...] <ch_D> [ax:val ...]`.
 * `SmoothABCD`: Like `ABCD` but one axis is parameterised with an exponential Chebyshev polynomial of configurable order (default `order=1`), reducing parameters from `3·n_bins` to `3·n_outer·(order+1)`. CLI: `--paramModel SmoothABCD <axis> [order:N] <process> <ch_A> ... <ch_D>`.
 * `ExtendedABCD`: 6-region ABCD with log-linear fake-rate extrapolation: `D = C·Ax·B² / (Bx·A²)` (`npoi=0`, `npou=5·n_bins`). CLI: `--paramModel ExtendedABCD <process> <ch_Ax> [ax:val ...] <ch_Bx> [ax:val ...] <ch_A> [ax:val ...] <ch_B> [ax:val ...] <ch_C> [ax:val ...] <ch_D> [ax:val ...]`.
-* `SmoothExtendedABCD`: Like `ExtendedABCD` but all five free-parameter regions are parameterised with an exponential Chebyshev polynomial along one smoothing axis (`npoi=0`, `npou=5·n_outer·(order+1)`). CLI: `--paramModel SmoothExtendedABCD <axis> [order:N] <process> <ch_Ax> [ax:val ...] <ch_Bx> [ax:val ...] <ch_A> [ax:val ...] <ch_B> [ax:val ...] <ch_C> [ax:val ...] <ch_D> [ax:val ...]`.
-* `ABCDIsoMT`, `ExtendedABCDIsoMT`, `SmoothABCDIsoMT`, `SmoothExtendedABCDIsoMT`: Convenience wrappers for the above models in the (mt × relIso) plane, smoothed along `pt`, that derive all region dicts from a single channel name. CLI: `--paramModel SmoothExtendedABCDIsoMT [params:file.hdf5 | order:N] <process> <channel>`.
+* `SmoothExtendedABCD`: Like `ExtendedABCD` but all five free-parameter regions are parameterised with an exponential Chebyshev polynomial along one smoothing axis (`npoi=0`, `npou=5·n_outer·(order+1)`). CLI: `--paramModel SmoothExtendedABCD <axis> [params:<src> | order:N] <process> <ch_Ax> [ax:val ...] <ch_Bx> [ax:val ...] <ch_A> [ax:val ...] <ch_B> [ax:val ...] <ch_C> [ax:val ...] <ch_D> [ax:val ...]`.
+* `ABCDIsoMT`, `ExtendedABCDIsoMT`, `SmoothABCDIsoMT`, `SmoothExtendedABCDIsoMT`: Convenience wrappers for the above models in the (mt × relIso) plane, smoothed along `pt`, that derive all region dicts from a single channel name. CLI: `--paramModel SmoothExtendedABCDIsoMT [params:<src> | order:N] <process> <channel>`.
+
+The smooth (extended) ABCD models can start the fit from pre-computed polynomial
+coefficients instead of from zero. `params:<src>` takes them either from an
+[auxiliary bundle](#auxiliary-data) of the input file (`params:aux:<name>`) or from a
+standalone file (`params:<file.hdf5>`, datasets `params` and `order`); it is mutually
+exclusive with `order:N`. With neither token, `SmoothExtendedABCDIsoMT` looks for the
+auxiliary bundle `initial_params_SmoothExtendedABCDIsoMT_<process>_<channel>` and uses
+it if the datacard carries one, so the tool that writes the datacard can ship starting
+values that are guaranteed to match its binning.
+
+### Auxiliary data
+
+`TensorWriter.add_auxiliary(name, {key: array | list[str]})` stores a named bundle of
+arbitrary arrays under a top-level `auxiliary` group. It is not used by the fit itself;
+it is a side channel for param models to carry pre-computed inputs that must stay
+consistent with the datacard. On the read side the bundles are available as
+`FitInputData.auxiliary[name]`.
 
 Custom Param models can be defined.
 They can be specified with the full path to the custom mapping e.g. `--paramModel custom_model.MyCustomModel`. 
