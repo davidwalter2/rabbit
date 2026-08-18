@@ -331,6 +331,41 @@ def test_fit_is_invariant_under_preconditioning(method):
         assert check_results("plain", plain, "preconditioned", pre)
 
 
+def test_gaussnewton_source_is_psd_and_restores_nobs():
+    """Fisher information must be PSD, and must not leave nobs modified.
+
+    It is computed by temporarily swapping the data for the prediction, so a
+    leak there would silently corrupt the fit that follows.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        filename = make_polynomial_tensor(tmp, order=6)
+        indata_obj = inputdata.FitInputData(filename)
+        param_model = load_model("Mu", indata_obj)
+        options = make_options(precondition=True, preconditionFrom="gaussnewton")
+        f = fitter.Fitter(indata_obj, param_model, options)
+        f.set_nobs(indata_obj.data_obs)
+
+        nobs_before = f.nobs.numpy().copy()
+        mat = f._reference_matrix()
+        np.testing.assert_allclose(f.nobs.numpy(), nobs_before, rtol=0, atol=0)
+
+        ev = np.linalg.eigvalsh(0.5 * (mat + mat.T))
+        assert ev.min() > -1e-8 * abs(ev).max(), f"not PSD: min eig {ev.min()}"
+
+
+@pytest.mark.parametrize("source", ["hessian", "gaussnewton"])
+def test_fit_is_invariant_for_either_reference_source(source):
+    """Both sources are only a choice of transform, so neither may move the fit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        filename = make_polynomial_tensor(tmp, order=6)
+        plain, _ = _run(filename, "trust-krylov")
+        pre, pc = _run(
+            filename, "trust-krylov", precondition=True, preconditionFrom=source
+        )
+        assert pc.enabled and pc.nblock > 1
+        assert check_results("plain", plain, f"precond[{source}]", pre)
+
+
 @pytest.mark.parametrize("method", ["trust-krylov", "trust-exact"])
 def test_fit_is_invariant_on_an_ill_conditioned_block(method):
     """The case this feature exists for: many correlated unconstrained params.

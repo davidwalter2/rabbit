@@ -71,6 +71,9 @@ class FitterCallback:
         self.t0 = time.time()
 
         self.early_stopping = early_stopping
+        # set just before raising, so fit() can tell a recoverable stall apart
+        # from a genuine error and restart instead of giving up
+        self.stopped_early = False
 
     def __call__(self, intermediate_result):
         loss = intermediate_result.fun
@@ -91,6 +94,7 @@ class FitterCallback:
             and len(self.loss_history) > self.early_stopping
             and self.loss_history[-self.early_stopping] <= loss
         ):
+            self.stopped_early = True
             raise ValueError(
                 f"No reduction in loss after {self.early_stopping} iterations, early stopping."
             )
@@ -100,6 +104,31 @@ class FitterCallback:
 
         self.xval = intermediate_result.x
         self.iiter += 1
+
+
+# Relative loss improvement below which a restart counts as having bought
+# nothing. Loss values here are O(1e4), so float64 cancellation puts genuine
+# improvements no finer than ~1e-9 relative.
+_RESTART_MIN_IMPROVEMENT = 1e-9
+
+
+def _merge_callbacks(acc, cb):
+    """Fold one restart's callback into the accumulated one.
+
+    Callers read loss_history/time_history/iiter to report on the whole fit, so
+    the restarts have to look like a single continuous run. Times are offset by
+    the elapsed time already accumulated, since each callback clocks from its
+    own construction.
+    """
+    if acc is None:
+        return cb
+    offset = acc.time_history[-1] if acc.time_history else 0.0
+    acc.loss_history.extend(cb.loss_history)
+    acc.time_history.extend(t + offset for t in cb.time_history)
+    acc.iiter += cb.iiter
+    acc.xval = cb.xval
+    acc.stopped_early = cb.stopped_early
+    return acc
 
 
 class Fitter:
@@ -134,6 +163,8 @@ class Fitter:
         # getattr so callers that build options objects by hand keep working.
         self.precondition = getattr(options, "precondition", False)
         self.precondition_params = getattr(options, "preconditionParams", None)
+        self.precondition_from = getattr(options, "preconditionFrom", "hessian")
+        self.max_restarts = getattr(options, "maxRestarts", -1)
         self.precondition_ridge = getattr(options, "preconditionRidge", 1e-8)
         # jitCompile accepts "auto" (the default), "on", or "off".
         # True / False from programmatic callers are accepted as
@@ -2270,6 +2301,52 @@ class Fitter:
 
         return val, grad, hess
 
+    def _reference_matrix(self):
+        """Reference matrix the preconditioner is built from, as a numpy array.
+
+        "hessian" is the exact Hessian at the current point, and is the default.
+        On real data it is not guaranteed positive definite -- the term
+        (1 - nobs/nexp) multiplying the second derivative of the prediction can
+        go either way -- so the Cholesky needs a ridge big enough to make it so.
+        That ridge is not a wart: it is what regularises the negative-curvature
+        directions into small positive ones, which is exactly what lets the
+        block be whitened into something the trust region can work with.
+
+        "gaussnewton" is the Fisher information, i.e. the *expected* Hessian,
+        obtained by evaluating the exact Hessian with the data replaced by the
+        current prediction: at that point (1 - nobs/nexp) vanishes, the
+        second-derivative term drops out and J^T W J + diag(cw) remains, which
+        is positive semi-definite by construction and so factorises at the
+        default ridge.
+
+        That PSD-ness is a double-edged sword, and measurement says the edge
+        usually points the wrong way. Being PSD, the Fisher matrix *cannot
+        represent negative curvature at all*. Measured on a 2112-parameter
+        in-situ efficiency block whose exact Hessian had 33 negative
+        eigenvalues at the starting point: whitening with the Gauss-Newton
+        transform left all 33 directions negative and the true Hessian at
+        kappa ~1e4 in the new coordinates, and the fit froze immediately,
+        while the ridged exact Hessian took the same fit from 145 min to
+        4.6 min. Raising the ridge on the Gauss-Newton matrix did not help,
+        so this is about the missing negative curvature, not about scaling.
+
+        So prefer "hessian" unless the exact Hessian is positive definite where
+        the fit starts -- near a minimum, or for a genuinely convex model --
+        where "gaussnewton" is the cheaper and better-conditioned choice.
+        """
+        if self.precondition_from == "gaussnewton":
+            saved_nobs = tf.identity(self.nobs)
+            saved_varnobs = tf.identity(self.varnobs) if self.chisqFit else None
+            try:
+                self.set_nobs(self.expected_yield(), variances=saved_varnobs)
+                _, _, hess = self.loss_val_grad_hess()
+                return hess.__array__()
+            finally:
+                self.set_nobs(saved_nobs, variances=saved_varnobs)
+
+        _, _, hess = self.loss_val_grad_hess()
+        return hess.__array__()
+
     def _build_preconditioner(self):
         """Preconditioner for the upcoming :meth:`fit`, or an exact no-op.
 
@@ -2289,13 +2366,12 @@ class Fitter:
             groups=self.indata.systgroups,
             group_idxs=self.indata.systgroupidxs,
         )
-        # "hessian" is the only source so far; the CLI restricts the choices.
-        # The dense [npar, npar] Hessian is the one costly part; if it cannot be
+        # The dense [npar, npar] reference matrix is the one costly part; if it
+        # cannot be
         # formed (memory, or a tracing failure on a large model) fall back to an
         # unpreconditioned fit rather than taking the whole job down.
         try:
-            _, _, hess = self.loss_val_grad_hess()
-            hess_np = hess.__array__()
+            hess_np = self._reference_matrix()
         except Exception as ex:
             logger.warning(
                 f"Could not compute the reference Hessian for preconditioning ({ex}); "
@@ -2348,8 +2424,6 @@ class Fitter:
         # transform was built.
         xval = pc.from_physical(self.x.numpy())
 
-        callback = FitterCallback(xval, self.earlyStopping)
-
         if self.minimizer_method in [
             "trust-krylov",
             "trust-ncg",
@@ -2378,27 +2452,79 @@ class Fitter:
             sci_opts["ftol"] = float(self.minimizer_ftol)
         logger.info(f"[minimize] method={self.minimizer_method} options={sci_opts}")
 
-        try:
-            res = scipy.optimize.minimize(
-                scipy_loss,
-                xval,
-                method=self.minimizer_method,
-                jac=True,
-                tol=0.0,
-                callback=callback,
-                options=sci_opts,
-                **info_minimize,
+        # Restart loop. scipy's trust-region methods shrink the trust radius by
+        # 4x on every rejected step with no lower bound, and the radius is a
+        # local of scipy's loop -- so once it has collapsed the method takes
+        # infinitesimal steps and the loss stops moving, far from any minimum.
+        # A fresh minimize() call resets the radius to initial_trust_radius,
+        # which is why restarting from a stalled point resumes progress. Loop
+        # that here instead of making the caller chain --externalPostfit by
+        # hand. Only an early-stopping stall is retried, and only while the
+        # restarts keep buying loss.
+        callback = None
+        prev_loss = None
+        attempt = 0
+        while True:
+            cb = FitterCallback(xval, self.earlyStopping)
+            try:
+                res = scipy.optimize.minimize(
+                    scipy_loss,
+                    xval,
+                    method=self.minimizer_method,
+                    jac=True,
+                    tol=0.0,
+                    callback=cb,
+                    options=sci_opts,
+                    **info_minimize,
+                )
+            except Exception as ex:
+                # minimizer could have called the loss or hessp functions with "random" values, so restore the
+                # state from the end of the last iteration before the exception
+                xval = cb.xval
+                self.minimizer_result = None
+                if not cb.stopped_early:
+                    # a real failure, not a stall: surface it rather than
+                    # letting a broken callback look like a converged fit
+                    logger.warning(f"Minimizer raised: {ex}")
+                logger.debug(ex)
+            else:
+                xval = res["x"]
+                self.minimizer_result = res
+                logger.debug(res)
+
+            callback = _merge_callbacks(callback, cb)
+            last_loss = cb.loss_history[-1] if cb.loss_history else None
+
+            if not cb.stopped_early:
+                break
+            # The only reason to stop restarting is that the last restart
+            # bought nothing: a round can never end above where it started
+            # (the trust region accepts improving steps only), so "not below
+            # the previous round" means the descent is genuinely exhausted.
+            if (
+                prev_loss is not None
+                and last_loss is not None
+                and last_loss
+                >= prev_loss - _RESTART_MIN_IMPROVEMENT * max(1.0, abs(prev_loss))
+            ):
+                logger.info(
+                    f"Restart did not reduce the loss further ({prev_loss} -> "
+                    f"{last_loss}); stopping after {attempt} restart(s)."
+                )
+                break
+            if 0 <= self.max_restarts <= attempt:
+                logger.warning(
+                    f"Minimizer still stalling at loss {last_loss} after "
+                    f"{self.max_restarts} restart(s) and the loss was still "
+                    "coming down; raise --maxRestarts to let it continue."
+                )
+                break
+            attempt += 1
+            logger.info(
+                f"Minimizer stalled at loss {last_loss}; restarting "
+                f"(#{attempt}) to reset the trust radius."
             )
-        except Exception as ex:
-            # minimizer could have called the loss or hessp functions with "random" values, so restore the
-            # state from the end of the last iteration before the exception
-            xval = callback.xval
-            self.minimizer_result = None
-            logger.debug(ex)
-        else:
-            xval = res["x"]
-            self.minimizer_result = res
-            logger.debug(res)
+            prev_loss = last_loss
 
         # xval (and callback.xval) are internal coordinates; everything outside
         # fit() expects physical parameters.

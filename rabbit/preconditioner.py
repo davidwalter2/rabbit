@@ -60,9 +60,8 @@ from wums import logging
 
 logger = logging.child_logger(__name__)
 
-# Sources for the reference matrix. Only "hessian" is implemented so far; the
-# others are accepted by the CLI layer as they land.
-PRECONDITION_SOURCES = ("hessian",)
+# Sources for the reference matrix, built by the fitter (see Fitter._reference_matrix).
+PRECONDITION_SOURCES = ("hessian", "gaussnewton")
 
 
 class Preconditioner:

@@ -188,6 +188,19 @@ def common_parser():
         help="Number of iterations with no improvement after which training will be stopped. Specify -1 to disable.",
     )
     parser.add_argument(
+        "--maxRestarts",
+        default=-1,
+        type=int,
+        help="When --earlyStopping triggers, restart the minimizer from the stalled "
+        "point instead of giving up. scipy's trust-region methods shrink the trust "
+        "radius 4x per rejected step with no lower bound, and the radius is reset by a "
+        "fresh minimize() call -- so a stall is often just a collapsed step size, and "
+        "restarting resumes the descent (the same effect as chaining --externalPostfit "
+        "by hand). -1 (default) restarts as often as the loss keeps improving and stops "
+        "only once a restart no longer reduces it; 0 disables restarting; N > 0 caps "
+        "the number of restarts.",
+    )
+    parser.add_argument(
         "--minimizerMethod",
         default="trust-krylov",
         type=str,
@@ -227,10 +240,16 @@ def common_parser():
         "--preconditionFrom",
         default="hessian",
         type=str,
-        choices=["hessian"],
-        help="Source of the reference matrix. 'hessian' takes the exact Hessian at the "
-        "starting point (one extra Hessian evaluation, roughly one trust-exact "
-        "iteration).",
+        choices=["hessian", "gaussnewton"],
+        help="Source of the reference matrix. 'hessian' (default) takes the exact "
+        "Hessian at the starting point, one extra Hessian evaluation, roughly one "
+        "trust-exact iteration. 'gaussnewton' takes the Fisher information instead: "
+        "positive semi-definite by construction, so it factorises at the default ridge, "
+        "but for that same reason it cannot represent negative curvature. Where the "
+        "exact Hessian is indefinite at the starting point, whitening with it leaves "
+        "those directions negative and the fit stalls, so 'hessian' is usually the "
+        "better choice; prefer 'gaussnewton' only where the Hessian is positive "
+        "definite anyway, e.g. near a minimum.",
     )
     parser.add_argument(
         "--preconditionRidge",
