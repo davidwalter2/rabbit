@@ -11,6 +11,7 @@ from tensorflow.python.ops.linalg.sparse import sparse_csr_matrix_ops as tf_spar
 from wums import logging
 
 from rabbit import external_likelihood, io_tools
+from rabbit import preconditioner as precond
 from rabbit import tfhelpers as tfh
 from rabbit.bbstat.bbstat import BinByBinStat
 from rabbit.impacts import (
@@ -129,6 +130,11 @@ class Fitter:
         # outcome can be written to the output. None if the minimizer raised.
         self.minimizer_result = None
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
+        # Optional parameter preconditioning (see rabbit/preconditioner.py).
+        # getattr so callers that build options objects by hand keep working.
+        self.precondition = getattr(options, "precondition", False)
+        self.precondition_params = getattr(options, "preconditionParams", None)
+        self.precondition_ridge = getattr(options, "preconditionRidge", 1e-8)
         # jitCompile accepts "auto" (the default), "on", or "off".
         # True / False from programmatic callers are accepted as
         # aliases for "on" / "off". The tri-state is resolved to the
@@ -2264,31 +2270,83 @@ class Fitter:
 
         return val, grad, hess
 
+    def _build_preconditioner(self):
+        """Preconditioner for the upcoming :meth:`fit`, or an exact no-op.
+
+        Built at the current parameter values, so the reference Hessian is the
+        one the minimizer starts from.
+        """
+        theta_ref = self.x.numpy()
+        if not self.precondition:
+            return precond.Preconditioner.identity(theta_ref)
+
+        idx = precond.select_indices(
+            self.parms,
+            self.cw.numpy(),
+            self.frozen_params_mask.numpy(),
+            expressions=self.precondition_params,
+            match_fn=match_regexp_params,
+            groups=self.indata.systgroups,
+            group_idxs=self.indata.systgroupidxs,
+        )
+        # "hessian" is the only source so far; the CLI restricts the choices.
+        # The dense [npar, npar] Hessian is the one costly part; if it cannot be
+        # formed (memory, or a tracing failure on a large model) fall back to an
+        # unpreconditioned fit rather than taking the whole job down.
+        try:
+            _, _, hess = self.loss_val_grad_hess()
+            hess_np = hess.__array__()
+        except Exception as ex:
+            logger.warning(
+                f"Could not compute the reference Hessian for preconditioning ({ex}); "
+                "running unpreconditioned."
+            )
+            return precond.Preconditioner.identity(theta_ref)
+
+        return precond.Preconditioner.from_hessian(
+            hess_np,
+            theta_ref,
+            idx,
+            ridge=self.precondition_ridge,
+        )
+
     def fit(self):
         logger.info("Perform iterative fit")
 
-        def scipy_loss(xval):
-            self.x.assign(xval)
+        # Optional reparameterisation. Built once at the starting point, it is
+        # confined to the three scipy callbacks below: self.x always holds
+        # *physical* parameters outside them, so the postfit Hessian,
+        # covariance, impacts and pulls are unaffected and need no mapping
+        # back. pc is an exact no-op when disabled, keeping one code path.
+        pc = self._build_preconditioner()
+
+        def scipy_loss(yval):
+            self.x.assign(pc.to_physical(yval))
             val, grad = self.loss_val_grad()
-            return val.__array__(), grad.__array__()
+            return val.__array__(), pc.grad_to_internal(grad.__array__())
 
-        def scipy_hessp(xval, pval):
-            self.x.assign(xval)
-            p = tf.convert_to_tensor(pval)
-            val, grad, hessp = self.loss_val_grad_hessp(p)
-            return hessp.__array__()
+        def scipy_hessp(yval, pval):
+            self.x.assign(pc.to_physical(yval))
 
-        def scipy_hess(xval):
-            self.x.assign(xval)
+            def hvp(v):
+                _, _, hessp = self.loss_val_grad_hessp(tf.convert_to_tensor(v))
+                return hessp.__array__()
+
+            return pc.hessp_to_internal(np.asarray(pval, dtype=np.float64), hvp)
+
+        def scipy_hess(yval):
+            self.x.assign(pc.to_physical(yval))
             val, grad, hess = self.loss_val_grad_hess()
             if self.diagnostics:
                 cond_number = tfh.cond_number(hess)
                 logger.info(f"  - Condition number: {cond_number}")
                 edmval = tfh.edmval(grad, hess)
                 logger.info(f"  - edmval: {edmval}")
-            return hess.__array__()
+            return pc.hess_to_internal(hess.__array__())
 
-        xval = self.x.numpy()
+        # scipy works in internal coordinates throughout; y = 0 at the point the
+        # transform was built.
+        xval = pc.from_physical(self.x.numpy())
 
         callback = FitterCallback(xval, self.earlyStopping)
 
@@ -2342,7 +2400,9 @@ class Fitter:
             self.minimizer_result = res
             logger.debug(res)
 
-        self.x.assign(xval)
+        # xval (and callback.xval) are internal coordinates; everything outside
+        # fit() expects physical parameters.
+        self.x.assign(pc.to_physical(xval))
 
         return callback
 

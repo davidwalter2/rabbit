@@ -203,6 +203,45 @@ def common_parser():
         help="Mnimizer method used in scipy.optimize.minimize for the nominal fit minimization",
     )
     parser.add_argument(
+        "--precondition",
+        action="store_true",
+        help="Reparameterise a block of parameters so the reference Hessian is the "
+        "identity there (theta = theta_ref + L^-T y). This is preconditioning of the "
+        "trust-region subproblem obtained as a change of variables, so the minimizer "
+        "itself is untouched. Helps where many unconstrained, strongly correlated "
+        "parameters make the Krylov inner solve struggle and outer steps get rejected. "
+        "Off by default; a pure reparameterisation, so results are unchanged.",
+    )
+    parser.add_argument(
+        "--preconditionParams",
+        default=None,
+        type=str,
+        nargs="+",
+        help="Parameters to precondition: exact names, regexes matched against the full "
+        "parameter name, or systematic group names. Default (flag given without this "
+        "option) is every unconstrained parameter, which is where it pays off; "
+        "constrained nuisances are already normalised by their prior. Frozen "
+        "parameters are always excluded.",
+    )
+    parser.add_argument(
+        "--preconditionFrom",
+        default="hessian",
+        type=str,
+        choices=["hessian"],
+        help="Source of the reference matrix. 'hessian' takes the exact Hessian at the "
+        "starting point (one extra Hessian evaluation, roughly one trust-exact "
+        "iteration).",
+    )
+    parser.add_argument(
+        "--preconditionRidge",
+        default=1e-8,
+        type=float,
+        help="Ridge added to the preconditioning block diagonal, relative to its largest "
+        "diagonal entry, to keep near-degenerate blocks factorisable. Escalated "
+        "automatically if the Cholesky still fails; a block that cannot be factorised "
+        "falls back to no preconditioning.",
+    )
+    parser.add_argument(
         "--hvpMethod",
         default="revrev",
         type=str,
