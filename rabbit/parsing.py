@@ -183,9 +183,14 @@ def common_parser():
     )
     parser.add_argument(
         "--earlyStopping",
-        default=-1,
+        default=20,
         type=int,
-        help="Number of iterations with no improvement after which training will be stopped. Specify -1 to disable.",
+        help="Number of iterations with no improvement after which the minimizer is "
+        "considered stalled. Paired with --maxRestarts this means 'restart here', not "
+        "'give up here'. On by default because scipy will not stop on its own: its "
+        "trust-region loop has no termination test for a collapsed trust radius, and "
+        "its maxiter defaults to 200*nparams, so a stalled fit spins for hours making "
+        "no progress rather than exiting. Specify -1 to disable.",
     )
     parser.add_argument(
         "--maxRestarts",
