@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from rabbit import fitter, inputdata
-from rabbit.fitter import FitterCallback, _merge_callbacks
+from rabbit.callbacks import FitterCallback, merge_callbacks
 from rabbit.param_models.helpers import load_model
 
 from .test_preconditioner import make_polynomial_tensor
@@ -64,7 +64,7 @@ def test_merge_callbacks_concatenates_into_one_continuous_run():
     b.iiter = 2
     b.xval = np.array([3.0, 4.0])
 
-    merged = _merge_callbacks(a, b)
+    merged = merge_callbacks(a, b)
     assert merged is a
     assert merged.loss_history == [10.0, 9.0, 8.0, 7.0]
     # second run's times offset by the first run's elapsed
@@ -75,7 +75,7 @@ def test_merge_callbacks_concatenates_into_one_continuous_run():
 
 def test_merge_callbacks_with_no_accumulator_returns_the_first():
     cb = FitterCallback(np.zeros(2), early_stopping=-1)
-    assert _merge_callbacks(None, cb) is cb
+    assert merge_callbacks(None, cb) is cb
 
 
 def _fit(filename, **kw):
@@ -150,37 +150,59 @@ def test_preconditioner_is_rebuilt_before_every_restart():
     restart must rebuild it there rather than reuse the one from the starting
     point -- otherwise the restart resets the trust radius but keeps a
     transform that no longer conditions anything.
+
+    The stall is forced rather than coaxed out of the model: whether a real fit
+    trips a given --earlyStopping threshold turns on differences far below the
+    scale of the fit, and TF's multithreaded CPU reductions are not bitwise
+    reproducible, so keying the test on that makes it flaky.
     """
+    n_restarts = 2
+
+    class StallEveryFewIterations(FitterCallback):
+        def __call__(self, intermediate_result):
+            self.iiter += 1
+            self.loss_history.append(intermediate_result.fun)
+            self.time_history.append(float(self.iiter))
+            self.xval = intermediate_result.x
+            if self.iiter >= 3:
+                self.stopped_early = True
+                raise ValueError("forced stall")
+
     with tempfile.TemporaryDirectory() as tmp:
         filename = make_polynomial_tensor(tmp, order=6)
         indata_obj = inputdata.FitInputData(filename)
         param_model = load_model("Mu", indata_obj)
-        options = make_options(earlyStopping=3, maxRestarts=3, precondition=True)
+        options = make_options(
+            earlyStopping=3, maxRestarts=n_restarts, precondition=True
+        )
         f = fitter.Fitter(indata_obj, param_model, options)
         f.set_nobs(indata_obj.data_obs)
 
-        calls = {"n": 0, "at": []}
+        built_at = []
         original = f._build_preconditioner
 
         def counting():
-            calls["n"] += 1
-            calls["at"].append(np.array(f.x.numpy(), copy=True))
+            built_at.append(np.array(f.x.numpy(), copy=True))
             return original()
 
         f._build_preconditioner = counting
-        callback = f.fit()
+        monkeyed = fitter.FitterCallback
+        fitter.FitterCallback = StallEveryFewIterations
+        try:
+            callback = f.fit()
+        finally:
+            fitter.FitterCallback = monkeyed
 
         assert callback is not None
-
-        # This model stalls under earlyStopping=3, so at least one restart is
-        # taken; without the refresh there would be exactly one build.
-        assert (
-            calls["n"] >= 2
-        ), f"expected a rebuild before the restart, saw {calls['n']} build(s)"
-
-        # and the rebuild must happen where the fit is now, not back at the
-        # point it started from
-        moved = np.linalg.norm(calls["at"][1] - calls["at"][0])
-        assert (
-            moved > 1e-6
-        ), f"rebuild happened at the same point ({moved}), so it was not a refresh"
+        # one build up front, then one before each of the forced restarts
+        assert len(built_at) == 1 + n_restarts, (
+            f"expected {1 + n_restarts} builds (1 initial + {n_restarts} "
+            f"refreshes), saw {len(built_at)}"
+        )
+        # each refresh must happen where the fit now is, not back at the start
+        for i in range(1, len(built_at)):
+            moved = np.linalg.norm(built_at[i] - built_at[i - 1])
+            assert moved > 1e-6, (
+                f"refresh {i} happened at the same point ({moved}); "
+                "the transform was reused, not rebuilt"
+            )
