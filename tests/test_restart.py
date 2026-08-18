@@ -141,3 +141,46 @@ def test_restarts_reach_at_least_as_low_a_loss_on_a_hard_model():
         stop_only = _fit(filename, earlyStopping=10, maxRestarts=0)
         restarted = _fit(filename, earlyStopping=10, maxRestarts=5)
         assert restarted["nll"] <= stop_only["nll"] + 1e-6
+
+
+def test_preconditioner_is_rebuilt_before_every_restart():
+    """The transform whitens the Hessian at the point it was built.
+
+    Once the fit has stalled somewhere else that Hessian has changed, so a
+    restart must rebuild it there rather than reuse the one from the starting
+    point -- otherwise the restart resets the trust radius but keeps a
+    transform that no longer conditions anything.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        filename = make_polynomial_tensor(tmp, order=6)
+        indata_obj = inputdata.FitInputData(filename)
+        param_model = load_model("Mu", indata_obj)
+        options = make_options(earlyStopping=3, maxRestarts=3, precondition=True)
+        f = fitter.Fitter(indata_obj, param_model, options)
+        f.set_nobs(indata_obj.data_obs)
+
+        calls = {"n": 0, "at": []}
+        original = f._build_preconditioner
+
+        def counting():
+            calls["n"] += 1
+            calls["at"].append(np.array(f.x.numpy(), copy=True))
+            return original()
+
+        f._build_preconditioner = counting
+        callback = f.fit()
+
+        assert callback is not None
+
+        # This model stalls under earlyStopping=3, so at least one restart is
+        # taken; without the refresh there would be exactly one build.
+        assert (
+            calls["n"] >= 2
+        ), f"expected a rebuild before the restart, saw {calls['n']} build(s)"
+
+        # and the rebuild must happen where the fit is now, not back at the
+        # point it started from
+        moved = np.linalg.norm(calls["at"][1] - calls["at"][0])
+        assert (
+            moved > 1e-6
+        ), f"rebuild happened at the same point ({moved}), so it was not a refresh"

@@ -2394,14 +2394,19 @@ class Fitter:
         # *physical* parameters outside them, so the postfit Hessian,
         # covariance, impacts and pulls are unaffected and need no mapping
         # back. pc is an exact no-op when disabled, keeping one code path.
-        pc = self._build_preconditioner()
+        # Held in a one-element cell because it is rebuilt at the current point
+        # before every restart (see the restart loop) and the scipy callbacks
+        # below must pick the new one up.
+        pc_cell = [self._build_preconditioner()]
 
         def scipy_loss(yval):
+            pc = pc_cell[0]
             self.x.assign(pc.to_physical(yval))
             val, grad = self.loss_val_grad()
             return val.__array__(), pc.grad_to_internal(grad.__array__())
 
         def scipy_hessp(yval, pval):
+            pc = pc_cell[0]
             self.x.assign(pc.to_physical(yval))
 
             def hvp(v):
@@ -2411,6 +2416,7 @@ class Fitter:
             return pc.hessp_to_internal(np.asarray(pval, dtype=np.float64), hvp)
 
         def scipy_hess(yval):
+            pc = pc_cell[0]
             self.x.assign(pc.to_physical(yval))
             val, grad, hess = self.loss_val_grad_hess()
             if self.diagnostics:
@@ -2422,7 +2428,7 @@ class Fitter:
 
         # scipy works in internal coordinates throughout; y = 0 at the point the
         # transform was built.
-        xval = pc.from_physical(self.x.numpy())
+        xval = pc_cell[0].from_physical(self.x.numpy())
 
         if self.minimizer_method in [
             "trust-krylov",
@@ -2526,9 +2532,18 @@ class Fitter:
             )
             prev_loss = last_loss
 
+            # Rebuild the transform at the point we are restarting from. The
+            # one built at the start whitens the Hessian *there*; by the time
+            # the fit has stalled somewhere else that Hessian has changed and
+            # the transform no longer conditions anything. Refreshing costs one
+            # Hessian evaluation and is a no-op when preconditioning is off.
+            self.x.assign(pc_cell[0].to_physical(xval))
+            pc_cell[0] = self._build_preconditioner()
+            xval = pc_cell[0].from_physical(self.x.numpy())
+
         # xval (and callback.xval) are internal coordinates; everything outside
         # fit() expects physical parameters.
-        self.x.assign(pc.to_physical(xval))
+        self.x.assign(pc_cell[0].to_physical(xval))
 
         return callback
 
