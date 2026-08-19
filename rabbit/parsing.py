@@ -242,6 +242,33 @@ def common_parser():
         "parameters are always excluded.",
     )
     parser.add_argument(
+        "--preconditionBlocks",
+        nargs="?",
+        const="auto",
+        default="auto",
+        type=str,
+        choices=["auto", "expressions", "none"],
+        help="How to group the selected parameters into blocks; the transform is "
+        "block diagonal, one Cholesky per block. 'auto' (the default, and what a "
+        "bare --preconditionBlocks selects) reads the clusters off the reference "
+        "matrix by thresholding its correlations and taking connected components: "
+        "no parameter naming needed, much cheaper since Cholesky is O(m^3), and a "
+        "singular cluster only costs its own block rather than all of them. "
+        "'expressions' makes one block per --preconditionParams entry. 'none' does "
+        "no grouping at all and factorises the whole selected scope as a single "
+        "block, which keeps every cross-correlation but is the most expensive and "
+        "fails entirely if any part of the scope is singular.",
+    )
+    parser.add_argument(
+        "--preconditionBlockThreshold",
+        default=0.1,
+        type=float,
+        help="Correlation threshold for --preconditionBlocks auto. Correlations "
+        "below it are left unpreconditioned. Too low and every parameter "
+        "percolates into a single block; too high and genuinely coupled "
+        "parameters are split apart.",
+    )
+    parser.add_argument(
         "--preconditionFrom",
         default="hessian",
         type=str,

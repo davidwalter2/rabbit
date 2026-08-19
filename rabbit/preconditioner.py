@@ -42,8 +42,24 @@ linearisation point far from where those templates were valid -- a modelling
 constraint, not a numerical-stability one. Here T is applied to exact vectors
 inside the fit, so that failure mode does not arise.
 
-Parameters outside the selected block are passed through untouched, so the
-transform is a no-op there and the block can be as small as one wants.
+Parameters outside the selected blocks are passed through untouched, so the
+transform is a no-op there and a block can be as small as one wants.
+
+FINDING THE BLOCKS. The clusters can be read off the reference matrix instead
+of being named by hand: threshold the correlation matrix and take connected
+components (see :func:`auto_blocks`). On the in-situ efficiency fit that
+recovers 239 components where the parameterisation has 240 (step, eta, charge)
+blocks, with no knowledge of parameter names, and costs ~4e4 times fewer flops
+to factorise than one joint block, since Cholesky is O(m^3).
+
+SEVERAL BLOCKS. The transform is block diagonal: each selected group of
+parameters gets its own factorisation and they are applied independently. That
+is not only cheaper (m^3 per block instead of (sum m)^3) but often the only
+thing that works -- a union of two individually well-behaved groups can be
+singular, because the groups are nearly degenerate *with each other*, and one
+joint Cholesky then fails where two separate ones succeed. The price is that
+correlations between blocks are left alone, so blocks should be chosen to be
+the strongly-correlated clusters.
 
 SCOPE. Preconditioning buys little for constrained nuisances: their unit
 Gaussian prior contributes the identity, H = I + J^T W J, so kappa is bounded.
@@ -56,6 +72,8 @@ keeps holding physical parameters in its tf.Variable, so nothing downstream
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse
+import scipy.sparse.csgraph
 from wums import logging
 
 logger = logging.child_logger(__name__)
@@ -64,81 +82,116 @@ logger = logging.child_logger(__name__)
 PRECONDITION_SOURCES = ("hessian", "gaussnewton")
 
 
-class Preconditioner:
-    """Affine reparameterisation theta = theta_ref + T y with T = L^-T.
+class Block:
+    """One factorised group of parameters: indices, L, and a cached L^-1."""
 
-    Use :meth:`identity` for the disabled case: it is an exact no-op, so the
-    fitter has a single code path whether or not preconditioning is on.
-    """
-
-    def __init__(self, theta_ref, idx=None, chol=None):
-        # Correlation condition number of the block before/after the transform,
-        # filled in by from_hessian. Kept for diagnostics and tests.
-        self.cond_before = None
-        self.cond_after = None
-        self.theta_ref = np.asarray(theta_ref, dtype=np.float64)
-        self.n = self.theta_ref.size
-        # idx None  <=> identity transform
-        self.idx = None if idx is None else np.asarray(idx, dtype=np.int64)
-        self.chol = None if chol is None else np.asarray(chol, dtype=np.float64)
+    def __init__(self, idx, chol, cond_before=None, cond_after=None, label=""):
+        self.idx = np.asarray(idx, dtype=np.int64)
+        self.chol = np.asarray(chol, dtype=np.float64)
+        if self.chol.shape != (self.idx.size,) * 2:
+            raise ValueError(
+                f"chol shape {self.chol.shape} does not match block size {self.idx.size}"
+            )
+        self.cond_before = cond_before
+        self.cond_after = cond_after
+        self.label = label
         # Explicit L^-1, formed once so the per-call transform is a dense matvec
         # (parallel GEMV) instead of a triangular solve (inherently sequential).
         # Measured at m=2112: 0.09 ms vs 1.9 ms per application. Falls back to
         # the solve if the inverse cannot be formed.
-        self._linv = None
-        if (self.idx is None) != (self.chol is None):
-            raise ValueError("idx and chol must be given together")
-        if self.chol is not None and self.chol.shape != (self.idx.size,) * 2:
-            raise ValueError(
-                f"chol shape {self.chol.shape} does not match block size {self.idx.size}"
+        self.linv = None
+        try:
+            self.linv = scipy.linalg.solve_triangular(
+                self.chol, np.eye(self.chol.shape[0]), lower=True, trans="N"
             )
-        if self.chol is not None:
-            try:
-                self._linv = scipy.linalg.solve_triangular(
-                    self.chol,
-                    np.eye(self.chol.shape[0]),
-                    lower=True,
-                    trans="N",
-                )
-            except (scipy.linalg.LinAlgError, ValueError) as ex:
-                logger.warning(
-                    f"Could not form the explicit inverse ({ex}); "
-                    "falling back to triangular solves."
-                )
-                self._linv = None
+        except (scipy.linalg.LinAlgError, ValueError) as ex:
+            logger.warning(
+                f"Could not form the explicit inverse ({ex}); "
+                "falling back to triangular solves."
+            )
+
+
+class Preconditioner:
+    """Block-diagonal affine reparameterisation theta = theta_ref + T y.
+
+    Each block contributes T = L^-T on its own indices; everything else is
+    passed through. Use :meth:`identity` for the disabled case: it is an exact
+    no-op, so the fitter has a single code path whether or not preconditioning
+    is on.
+    """
+
+    def __init__(self, theta_ref, blocks=()):
+        self.theta_ref = np.asarray(theta_ref, dtype=np.float64)
+        self.n = self.theta_ref.size
+        self.blocks = list(blocks)
 
     # -- construction ----------------------------------------------------
 
     @classmethod
     def identity(cls, theta_ref):
-        """Disabled preconditioner: y == theta - theta_ref, no block."""
+        """Disabled preconditioner: y == theta - theta_ref, no blocks."""
         return cls(theta_ref)
 
     @property
     def enabled(self):
-        return self.idx is not None
+        return bool(self.blocks)
 
     @property
     def nblock(self):
-        return 0 if self.idx is None else int(self.idx.size)
+        """Total number of preconditioned parameters, over all blocks."""
+        return int(sum(b.idx.size for b in self.blocks))
+
+    @property
+    def n_blocks(self):
+        return len(self.blocks)
+
+    @property
+    def cond_before(self):
+        c = [b.cond_before for b in self.blocks if b.cond_before is not None]
+        return max(c) if c else None
+
+    @property
+    def cond_after(self):
+        c = [b.cond_after for b in self.blocks if b.cond_after is not None]
+        return max(c) if c else None
 
     @classmethod
-    def from_hessian(cls, hess, theta_ref, idx, ridge=1e-8, max_tries=4):
-        """Build from a reference Hessian, restricted to ``idx``.
+    def from_hessian(cls, hess, theta_ref, index_blocks, ridge=1e-8, max_tries=4):
+        """Build from a reference Hessian, one factorisation per index block.
 
-        ``hess`` is the full [npar, npar] Hessian at ``theta_ref``; only the
-        ``idx`` sub-block is used. The block is symmetrised, then a ridge
-        proportional to the largest diagonal entry is added until the Cholesky
-        succeeds. A block that cannot be factorised at all falls back to the
-        identity with a warning: a preconditioner must never break a fit.
+        ``index_blocks`` is a list of index arrays (a single array is accepted
+        and treated as one block). Each block is symmetrised, then a ridge
+        proportional to its largest diagonal entry is added until the Cholesky
+        succeeds. A block that cannot be factorised is dropped -- the others
+        still apply, and a preconditioner must never break a fit.
         """
-        idx = np.asarray(idx, dtype=np.int64)
-        if idx.size == 0:
+        if isinstance(index_blocks, np.ndarray) or (
+            index_blocks and np.isscalar(index_blocks[0])
+        ):
+            index_blocks = [index_blocks]
+        blocks = []
+        for spec in index_blocks:
+            label, idx = ("", spec) if not isinstance(spec, tuple) else spec
+            blk = cls._factorise(
+                hess, np.asarray(idx, dtype=np.int64), ridge, max_tries, label
+            )
+            if blk is not None:
+                blocks.append(blk)
+        if not blocks:
             logger.warning(
-                "Preconditioning requested but the selected block is empty; "
+                "Preconditioning requested but no block could be used; "
                 "running unpreconditioned."
             )
             return cls.identity(theta_ref)
+        return cls(theta_ref, blocks)
+
+    @staticmethod
+    def _factorise(hess, idx, ridge, max_tries, label=""):
+        """One block -> a :class:`Block`, or None if it is unusable."""
+        tag = f"{label} " if label else ""
+        if idx.size == 0:
+            logger.warning(f"Preconditioning block {tag}is empty; skipping.")
+            return None
 
         block = np.asarray(hess, dtype=np.float64)[np.ix_(idx, idx)]
         # symmetrise: the autodiff Hessian is symmetric only up to roundoff
@@ -148,10 +201,10 @@ class Preconditioner:
         scale = float(np.max(diag)) if diag.size else 0.0
         if not np.isfinite(scale) or scale <= 0.0:
             logger.warning(
-                "Preconditioning block has no positive diagonal "
-                f"(max diag = {scale}); running unpreconditioned."
+                f"Preconditioning block {tag}has no positive diagonal "
+                f"(max diag = {scale}); skipping."
             )
-            return cls.identity(theta_ref)
+            return None
 
         cond_before = _cond_corr(block)
         eps = ridge
@@ -164,8 +217,8 @@ class Preconditioner:
             except scipy.linalg.LinAlgError:
                 eps = max(eps, 1e-12) * 100.0
                 logger.debug(
-                    f"Preconditioner Cholesky failed (try {itry + 1}), "
-                    f"raising ridge to {eps:.3g}"
+                    f"Preconditioner Cholesky failed for {tag}block "
+                    f"(try {itry + 1}), raising ridge to {eps:.3g}"
                 )
                 continue
             # Conditioning actually achieved: L^-1 B L^-T for the *un-ridged*
@@ -175,47 +228,47 @@ class Preconditioner:
             tb = scipy.linalg.solve_triangular(chol, tb.T, lower=True, trans="N").T
             cond_after = _cond_corr(tb)
             logger.info(
-                f"Preconditioning {idx.size} parameters from the reference Hessian "
-                f"(ridge {eps:.3g} x max|diag|): correlation condition number "
-                f"{cond_before:.3g} -> {cond_after:.3g} at the reference point"
+                f"Preconditioning {tag}block of {idx.size} parameters from the "
+                f"reference Hessian (ridge {eps:.3g} x max|diag|): correlation "
+                f"condition number {cond_before:.3g} -> {cond_after:.3g} at the "
+                "reference point"
             )
-            out = cls(theta_ref, idx=idx, chol=chol)
-            out.cond_before = cond_before
-            out.cond_after = cond_after
-            return out
+            return Block(idx, chol, cond_before, cond_after, label)
 
         logger.warning(
-            "Preconditioning block is not factorisable even with a ridge of "
-            f"{eps:.3g} x max|diag|; running unpreconditioned."
+            f"Preconditioning block {tag}is not factorisable even with a ridge of "
+            f"{eps:.3g} x max|diag|; skipping this block."
         )
-        return cls.identity(theta_ref)
+        return None
 
     # -- the transform ---------------------------------------------------
 
     def _apply_T(self, v):
-        """T v, i.e. L^-T on the block and the identity elsewhere."""
-        if self.idx is None:
+        """T v: L^-T on each block, identity elsewhere."""
+        if not self.blocks:
             return np.asarray(v, dtype=np.float64)
         out = np.array(v, dtype=np.float64, copy=True)
-        if self._linv is not None:
-            out[self.idx] = self._linv.T @ out[self.idx]
-        else:
-            out[self.idx] = scipy.linalg.solve_triangular(
-                self.chol, out[self.idx], lower=True, trans="T"
-            )
+        for b in self.blocks:
+            if b.linv is not None:
+                out[b.idx] = b.linv.T @ out[b.idx]
+            else:
+                out[b.idx] = scipy.linalg.solve_triangular(
+                    b.chol, out[b.idx], lower=True, trans="T"
+                )
         return out
 
     def _apply_TT(self, v):
-        """T^T v, i.e. L^-1 on the block and the identity elsewhere."""
-        if self.idx is None:
+        """T^T v: L^-1 on each block, identity elsewhere."""
+        if not self.blocks:
             return np.asarray(v, dtype=np.float64)
         out = np.array(v, dtype=np.float64, copy=True)
-        if self._linv is not None:
-            out[self.idx] = self._linv @ out[self.idx]
-        else:
-            out[self.idx] = scipy.linalg.solve_triangular(
-                self.chol, out[self.idx], lower=True, trans="N"
-            )
+        for b in self.blocks:
+            if b.linv is not None:
+                out[b.idx] = b.linv @ out[b.idx]
+            else:
+                out[b.idx] = scipy.linalg.solve_triangular(
+                    b.chol, out[b.idx], lower=True, trans="N"
+                )
         return out
 
     def to_physical(self, y):
@@ -223,12 +276,13 @@ class Preconditioner:
         return self.theta_ref + self._apply_T(y)
 
     def from_physical(self, theta):
-        """y = T^-1 (theta - theta_ref), i.e. L^T on the block."""
+        """y = T^-1 (theta - theta_ref), i.e. L^T on each block."""
         d = np.asarray(theta, dtype=np.float64) - self.theta_ref
-        if self.idx is None:
+        if not self.blocks:
             return d
         out = np.array(d, dtype=np.float64, copy=True)
-        out[self.idx] = self.chol.T @ d[self.idx]
+        for b in self.blocks:
+            out[b.idx] = b.chol.T @ d[b.idx]
         return out
 
     def grad_to_internal(self, grad):
@@ -242,32 +296,38 @@ class Preconditioner:
     def hess_to_internal(self, hess):
         """H_y = T^T H_theta T, for the dense-Hessian minimizers.
 
-        Done as two matrix operations rather than column by column. Note the
-        off-diagonal blocks transform too (one-sided), so a block that
-        correlates with the rest of the model is handled correctly.
+        Applied block by block: the left multiplication acts on the row index
+        and the right one on the column index, so a block's off-diagonal
+        coupling to the rest of the model transforms one-sided, as it should.
         """
-        if self.idx is None:
+        if not self.blocks:
             return np.asarray(hess, dtype=np.float64)
         out = np.array(hess, dtype=np.float64, copy=True)
-        if self._linv is not None:
-            # left: T^T acts on the row index; right: T on the column index
-            out[self.idx, :] = self._linv @ out[self.idx, :]
-            out[:, self.idx] = out[:, self.idx] @ self._linv.T
-            return out
-        out[self.idx, :] = scipy.linalg.solve_triangular(
-            self.chol, out[self.idx, :], lower=True, trans="N"
-        )
-        out[:, self.idx] = scipy.linalg.solve_triangular(
-            self.chol, out[:, self.idx].T, lower=True, trans="N"
-        ).T
+        for b in self.blocks:
+            if b.linv is not None:
+                out[b.idx, :] = b.linv @ out[b.idx, :]
+            else:
+                out[b.idx, :] = scipy.linalg.solve_triangular(
+                    b.chol, out[b.idx, :], lower=True, trans="N"
+                )
+        for b in self.blocks:
+            if b.linv is not None:
+                out[:, b.idx] = out[:, b.idx] @ b.linv.T
+            else:
+                out[:, b.idx] = scipy.linalg.solve_triangular(
+                    b.chol, out[:, b.idx].T, lower=True, trans="N"
+                ).T
         return out
 
     # -- diagnostics -----------------------------------------------------
 
     def summary(self):
-        if self.idx is None:
+        if not self.blocks:
             return "preconditioning: disabled"
-        return f"preconditioning: enabled on {self.idx.size} of {self.n} parameters"
+        return (
+            f"preconditioning: {self.n_blocks} block(s) covering "
+            f"{self.nblock} of {self.n} parameters"
+        )
 
 
 def _cond_corr(mat):
@@ -289,7 +349,57 @@ def _cond_corr(mat):
     return float(sv[0] / sv[-1]) if sv[-1] > 0 else np.inf
 
 
-def select_indices(
+def auto_blocks(hess, idx, threshold=0.1, max_fraction=0.5):
+    """Find the correlated clusters within ``idx`` from the reference matrix.
+
+    Thresholds the correlation matrix at ``threshold`` and returns the connected
+    components as blocks. Parameters correlate strongly with the others in their
+    cluster and negligibly across clusters, which is exactly the structure a
+    block-diagonal transform wants, and the components are far smaller than the
+    union so each Cholesky is cheaper and likelier to succeed.
+
+    ``threshold`` matters: too low and everything percolates into one component,
+    too high and genuinely coupled parameters are split apart. Correlations below
+    it are left unpreconditioned, which is the deliberate approximation. A
+    component covering more than ``max_fraction`` of the parameters is warned
+    about, since that usually means percolation.
+
+    Parameters with a non-positive diagonal cannot be normalised and are
+    returned as singletons, i.e. effectively left alone.
+    """
+    idx = np.asarray(idx, dtype=np.int64)
+    if idx.size == 0:
+        return []
+    sub = np.asarray(hess, dtype=np.float64)[np.ix_(idx, idx)]
+    sub = 0.5 * (sub + sub.T)
+    d = np.diag(sub)
+    good = d > 0
+    n = idx.size
+    corr = np.zeros((n, n))
+    if np.any(good):
+        g = np.where(good)[0]
+        dd = np.sqrt(d[g])
+        corr[np.ix_(g, g)] = np.abs(sub[np.ix_(g, g)] / np.outer(dd, dd))
+    np.fill_diagonal(corr, 0.0)
+
+    adj = scipy.sparse.csr_matrix(corr > threshold)
+    ncomp, labels = scipy.sparse.csgraph.connected_components(adj, directed=False)
+    sizes = np.bincount(labels, minlength=ncomp)
+    biggest = int(sizes.max())
+    if biggest > max_fraction * n:
+        logger.warning(
+            f"Auto-blocking at |rho| > {threshold} produced a component with "
+            f"{biggest} of {n} parameters: the threshold is probably below the "
+            "percolation point, so the blocks are not really separated."
+        )
+    logger.info(
+        f"Auto-blocking {n} parameters at |rho| > {threshold}: {ncomp} block(s), "
+        f"largest {biggest}, median {int(np.median(sizes))}"
+    )
+    return [(f"auto{c}", idx[np.where(labels == c)[0]]) for c in range(ncomp)]
+
+
+def select_index_blocks(
     parms,
     cw,
     frozen_mask,
@@ -298,11 +408,18 @@ def select_indices(
     groups=None,
     group_idxs=None,
 ):
-    """Indices of the parameters to precondition.
+    """Parameter blocks to precondition, as a list of ``(label, indices)``.
 
-    ``expressions`` may name parameters exactly, be regexes matched against the
-    full parameter name (via ``match_fn``, the fitter's existing matcher), or
-    name a systematic group. With no expressions the default scope is every
+    One block per entry in ``expressions``, which is what makes the transform
+    block diagonal: each expression is expected to name a cluster of parameters
+    that are correlated with each other. Grouping them into one factorisation
+    instead is both more expensive and more fragile -- the union of two
+    individually fine groups can be singular because the groups are nearly
+    degenerate with each other.
+
+    An entry may name parameters exactly, be a regex matched against the full
+    parameter name (via ``match_fn``, the fitter's existing matcher), or name a
+    systematic group. With no expressions there is a single block of every
     *unconstrained* parameter (cw == 0), which is where preconditioning helps.
 
     Frozen parameters are always excluded: a dense transform would otherwise
@@ -312,33 +429,36 @@ def select_indices(
     n = parms.size
     frozen_mask = np.asarray(frozen_mask, dtype=bool)
 
-    if expressions:
+    if not expressions:
+        sel = (np.asarray(cw) == 0.0) & ~frozen_mask
+        logger.info(
+            "No --preconditionParams given; defaulting to a single block of the "
+            "unconstrained parameters (constraint weight 0)."
+        )
+        return [("unconstrained", np.where(sel)[0])]
+
+    # NB explicit None checks: groups/group_idxs arrive as numpy arrays,
+    # for which `groups or []` raises on the truth-value test.
+    gnames = [] if groups is None else list(groups)
+    gidxs = [] if group_idxs is None else list(group_idxs)
+    by_group = {
+        (k.decode() if isinstance(k, bytes) else str(k)): v
+        for k, v in zip(gnames, gidxs)
+    }
+
+    out = []
+    for expr in expressions:
         sel = np.zeros(n, dtype=bool)
-        leftover = []
-        # NB explicit None checks: groups/group_idxs arrive as numpy arrays,
-        # for which `groups or []` raises on the truth-value test.
-        gnames = [] if groups is None else list(groups)
-        gidxs = [] if group_idxs is None else list(group_idxs)
-        by_group = {
-            (k.decode() if isinstance(k, bytes) else str(k)): v
-            for k, v in zip(gnames, gidxs)
-        }
-        for expr in expressions:
-            if expr in by_group:
-                sel[np.asarray(by_group[expr], dtype=np.int64)] = True
-            else:
-                leftover.append(expr)
-        if leftover:
+        if expr in by_group:
+            sel[np.asarray(by_group[expr], dtype=np.int64)] = True
+        else:
             if match_fn is None:
                 raise ValueError("no matcher available for regex selection")
-            names = match_fn(leftover, parms)
-            sel |= np.isin(parms, names)
-    else:
-        sel = np.asarray(cw) == 0.0
-        logger.info(
-            "No --preconditionParams given; defaulting to the unconstrained "
-            "parameters (constraint weight 0)."
-        )
-
-    sel &= ~frozen_mask
-    return np.where(sel)[0]
+            sel |= np.isin(parms, match_fn([expr], parms))
+        sel &= ~frozen_mask
+        idx = np.where(sel)[0]
+        if idx.size == 0:
+            logger.warning(f"--preconditionParams '{expr}' matched no parameters")
+            continue
+        out.append((expr, idx))
+    return out

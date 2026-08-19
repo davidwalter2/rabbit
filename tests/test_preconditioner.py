@@ -15,7 +15,11 @@ import pytest
 
 from rabbit import fitter, inputdata
 from rabbit.param_models.helpers import load_model
-from rabbit.preconditioner import Preconditioner, select_indices
+from rabbit.preconditioner import (
+    Preconditioner,
+    auto_blocks,
+    select_index_blocks,
+)
 
 from .test_sparse_fit import check_results, make_options, make_test_tensor
 
@@ -144,8 +148,8 @@ def test_explicit_inverse_and_triangular_fallback_agree():
     idx = np.arange(1, 8)
     fast = Preconditioner.from_hessian(h, np.zeros(n), idx, ridge=0.0)
     slow = Preconditioner.from_hessian(h, np.zeros(n), idx, ridge=0.0)
-    assert fast._linv is not None
-    slow._linv = None  # force the triangular-solve path
+    assert fast.blocks[0].linv is not None
+    slow.blocks[0].linv = None  # force the triangular-solve path
 
     rng = np.random.default_rng(12)
     v = rng.normal(size=n)
@@ -188,20 +192,21 @@ def test_empty_block_falls_back_to_identity():
 # -- unit tests: scope selection ----------------------------------------
 
 
-def test_default_scope_is_the_unconstrained_parameters():
+def test_default_scope_is_one_block_of_unconstrained_parameters():
     parms = np.array(["poi", "a", "b", "c"])
     cw = np.array([0.0, 1.0, 0.0, 1.0])
     frozen = np.zeros(4, dtype=bool)
-    idx = select_indices(parms, cw, frozen)
-    np.testing.assert_array_equal(idx, [0, 2])
+    blocks = select_index_blocks(parms, cw, frozen)
+    assert len(blocks) == 1
+    np.testing.assert_array_equal(blocks[0][1], [0, 2])
 
 
 def test_frozen_parameters_are_always_excluded():
     parms = np.array(["poi", "a", "b", "c"])
     cw = np.zeros(4)
     frozen = np.array([False, True, False, False])
-    idx = select_indices(parms, cw, frozen)
-    np.testing.assert_array_equal(idx, [0, 2, 3])
+    blocks = select_index_blocks(parms, cw, frozen)
+    np.testing.assert_array_equal(blocks[0][1], [0, 2, 3])
 
 
 def test_selection_by_regex_and_by_group():
@@ -214,10 +219,12 @@ def test_selection_by_regex_and_by_group():
 
         return [n for n in names if any(re.fullmatch(e, n) for e in exprs)]
 
-    idx = select_indices(parms, cw, frozen, expressions=["eff_.*"], match_fn=match_fn)
-    np.testing.assert_array_equal(idx, [1, 2])
+    blocks = select_index_blocks(
+        parms, cw, frozen, expressions=["eff_.*"], match_fn=match_fn
+    )
+    np.testing.assert_array_equal(blocks[0][1], [1, 2])
 
-    idx = select_indices(
+    blocks = select_index_blocks(
         parms,
         cw,
         frozen,
@@ -226,7 +233,15 @@ def test_selection_by_regex_and_by_group():
         groups=["mygroup"],
         group_idxs=[[3]],
     )
-    np.testing.assert_array_equal(idx, [3])
+    np.testing.assert_array_equal(blocks[0][1], [3])
+
+    # one block per expression -> block-diagonal transform
+    blocks = select_index_blocks(
+        parms, cw, frozen, expressions=["eff_.*", "other"], match_fn=match_fn
+    )
+    assert [b[0] for b in blocks] == ["eff_.*", "other"]
+    np.testing.assert_array_equal(blocks[0][1], [1, 2])
+    np.testing.assert_array_equal(blocks[1][1], [3])
 
 
 # -- the invariance test -------------------------------------------------
@@ -384,3 +399,173 @@ def test_fit_is_invariant_on_an_ill_conditioned_block(method):
         assert pc.cond_before > 1e3
         assert pc.cond_after < 1e2
         assert check_results("plain", plain, "preconditioned", pre)
+
+
+# -- several blocks ------------------------------------------------------
+
+
+def test_two_blocks_are_factorised_independently():
+    """Block-diagonal transform: each block whitened, no cross-block mixing."""
+    n = 12
+    h = np.zeros((n, n))
+    h[:6, :6] = _spd(6, seed=21, cond=1e6)
+    h[6:, 6:] = _spd(6, seed=22, cond=1e4)
+    a, b = np.arange(0, 6), np.arange(6, 12)
+    pc = Preconditioner.from_hessian(h, np.zeros(n), [("a", a), ("b", b)], ridge=0.0)
+    assert pc.enabled and pc.n_blocks == 2 and pc.nblock == 12
+    hy = pc.hess_to_internal(h)
+    np.testing.assert_allclose(hy[np.ix_(a, a)], np.eye(6), atol=1e-8)
+    np.testing.assert_allclose(hy[np.ix_(b, b)], np.eye(6), atol=1e-8)
+
+
+def test_a_singular_block_does_not_disable_the_others():
+    """The reason for blocks: a union can be unusable while its parts are fine."""
+    n = 10
+    h = np.zeros((n, n))
+    h[:5, :5] = _spd(5, seed=23)
+    # second block is entirely degenerate
+    good, bad = np.arange(0, 5), np.arange(5, 10)
+    pc = Preconditioner.from_hessian(h, np.zeros(n), [("good", good), ("bad", bad)])
+    assert pc.enabled, "the usable block must survive"
+    assert pc.n_blocks == 1 and pc.nblock == 5
+    np.testing.assert_array_equal(pc.blocks[0].idx, good)
+
+
+def test_all_blocks_unusable_falls_back_to_identity():
+    n = 6
+    pc = Preconditioner.from_hessian(
+        np.zeros((n, n)), np.zeros(n), [("x", np.arange(3)), ("y", np.arange(3, 6))]
+    )
+    assert not pc.enabled
+
+
+def test_block_diagonal_transform_is_still_a_reparameterisation():
+    """Round trip must hold with several blocks."""
+    n = 14
+    h = np.zeros((n, n))
+    h[:7, :7] = _spd(7, seed=24)
+    h[7:, 7:] = _spd(7, seed=25)
+    pc = Preconditioner.from_hessian(
+        h, np.linspace(-1, 1, n), [("a", np.arange(7)), ("b", np.arange(7, 14))]
+    )
+    rng = np.random.default_rng(26)
+    y = rng.normal(size=n)
+    np.testing.assert_allclose(pc.from_physical(pc.to_physical(y)), y, atol=1e-9)
+
+
+# -- automatic block discovery -------------------------------------------
+
+
+def _block_diag_hessian(sizes, seed=0, cond=1e5, coupling=0.0):
+    """Block-diagonal SPD matrix, optionally with weak inter-block coupling."""
+    rng = np.random.default_rng(seed)
+    n = sum(sizes)
+    H = np.zeros((n, n))
+    at = 0
+    for i, m in enumerate(sizes):
+        H[at : at + m, at : at + m] = _spd(m, seed=seed + i, cond=cond)
+        at += m
+    if coupling:
+        # small symmetric off-block perturbation, kept well below the diagonal
+        P = rng.normal(size=(n, n)) * coupling * np.mean(np.diag(H))
+        P = 0.5 * (P + P.T)
+        mask = np.ones((n, n), dtype=bool)
+        at = 0
+        for m in sizes:
+            mask[at : at + m, at : at + m] = False
+            at += m
+        H = H + P * mask
+    return H
+
+
+def test_auto_blocks_recovers_a_known_block_structure():
+    """The point of the feature: find the clusters without being told them."""
+    sizes = [6, 6, 6, 6, 6]
+    H = _block_diag_hessian(sizes, seed=31, coupling=0.0)
+    blocks = auto_blocks(H, np.arange(sum(sizes)), threshold=0.1)
+    assert len(blocks) == len(sizes)
+    found = sorted(sorted(idx.tolist()) for _, idx in blocks)
+    expect = []
+    at = 0
+    for m in sizes:
+        expect.append(list(range(at, at + m)))
+        at += m
+    assert found == sorted(expect)
+
+
+def test_auto_blocks_ignores_weak_coupling_but_merges_strong():
+    sizes = [5, 5]
+    H = _block_diag_hessian(sizes, seed=32, coupling=1e-4)
+    assert len(auto_blocks(H, np.arange(10), threshold=0.1)) == 2
+    # a strong link between the two groups must merge them
+    H2 = H.copy()
+    scale = np.sqrt(H2[0, 0] * H2[5, 5])
+    H2[0, 5] = H2[5, 0] = 0.8 * scale
+    assert len(auto_blocks(H2, np.arange(10), threshold=0.1)) == 1
+
+
+def test_auto_blocks_percolates_at_a_low_threshold():
+    """Documented failure mode: below the percolation point it is one block."""
+    H = _block_diag_hessian([5, 5, 5], seed=33, coupling=1e-3)
+    assert len(auto_blocks(H, np.arange(15), threshold=1e-9)) == 1
+
+
+def test_auto_blocks_isolates_parameters_with_no_curvature():
+    """A zero-diagonal parameter cannot be normalised; it must not poison a block."""
+    H = _block_diag_hessian([4, 4], seed=34)
+    H[3, :] = 0.0
+    H[:, 3] = 0.0
+    blocks = auto_blocks(H, np.arange(8), threshold=0.1)
+    singleton = [idx for _, idx in blocks if idx.tolist() == [3]]
+    assert singleton, f"expected index 3 alone, got {[i.tolist() for _, i in blocks]}"
+
+
+def test_auto_blocks_on_empty_scope():
+    assert auto_blocks(_spd(4), np.array([], dtype=int)) == []
+
+
+def test_auto_blocking_is_the_default():
+    from types import SimpleNamespace
+
+    from rabbit import fitter as fitter_mod
+
+    o = SimpleNamespace()
+    f = fitter_mod.Fitter.__new__(fitter_mod.Fitter)
+    assert getattr(o, "preconditionBlocks", "auto") == "auto"
+    assert getattr(o, "preconditionBlockThreshold", 0.1) == 0.1
+    del f
+
+
+@pytest.mark.parametrize("blocks", ["auto", "expressions", "none"])
+def test_fit_is_invariant_for_either_blocking(blocks):
+    """Blocking only changes how the transform is grouped, never the answer."""
+    with tempfile.TemporaryDirectory() as tmp:
+        filename = make_polynomial_tensor(tmp, order=6)
+        plain, _ = _run(filename, "trust-krylov")
+        pre, pc = _run(
+            filename, "trust-krylov", precondition=True, preconditionBlocks=blocks
+        )
+        assert pc.enabled
+        assert check_results("plain", plain, f"precond[{blocks}]", pre)
+
+
+def test_blocks_none_is_a_single_factorisation_over_the_scope():
+    """'none' keeps every cross-correlation, at the cost of one big Cholesky."""
+    with tempfile.TemporaryDirectory() as tmp:
+        filename = make_polynomial_tensor(tmp, order=6)
+        indata_obj = inputdata.FitInputData(filename)
+        param_model = load_model("Mu", indata_obj)
+        options = make_options(precondition=True, preconditionBlocks="none")
+        f = fitter.Fitter(indata_obj, param_model, options)
+        f.set_nobs(indata_obj.data_obs)
+        pc = f._build_preconditioner()
+        assert pc.enabled
+        assert pc.n_blocks == 1, f"expected one joint block, got {pc.n_blocks}"
+
+        # and 'auto' on the same model may split it into more than one
+        options_auto = make_options(precondition=True, preconditionBlocks="auto")
+        f2 = fitter.Fitter(indata_obj, param_model, options_auto)
+        f2.set_nobs(indata_obj.data_obs)
+        pc2 = f2._build_preconditioner()
+        assert pc2.enabled
+        assert pc2.nblock == pc.nblock, "same scope, only the grouping differs"

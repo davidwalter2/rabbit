@@ -98,6 +98,10 @@ class Fitter:
         self.precondition = getattr(options, "precondition", False)
         self.precondition_params = getattr(options, "preconditionParams", None)
         self.precondition_from = getattr(options, "preconditionFrom", "hessian")
+        self.precondition_blocks = getattr(options, "preconditionBlocks", "auto")
+        self.precondition_block_threshold = getattr(
+            options, "preconditionBlockThreshold", 0.1
+        )
         self.max_restarts = getattr(options, "maxRestarts", -1)
         self.precondition_ridge = getattr(options, "preconditionRidge", 1e-8)
         # jitCompile accepts "auto" (the default), "on", or "off".
@@ -2291,7 +2295,7 @@ class Fitter:
         if not self.precondition:
             return precond.Preconditioner.identity(theta_ref)
 
-        idx = precond.select_indices(
+        index_blocks = precond.select_index_blocks(
             self.parms,
             self.cw.numpy(),
             self.frozen_params_mask.numpy(),
@@ -2313,10 +2317,29 @@ class Fitter:
             )
             return precond.Preconditioner.identity(theta_ref)
 
+        if not index_blocks:
+            logger.warning(
+                "Preconditioning requested but no parameters were selected; "
+                "running unpreconditioned."
+            )
+            return precond.Preconditioner.identity(theta_ref)
+
+        if self.precondition_blocks in ("auto", "none"):
+            # the expressions only set the scope
+            scope = np.unique(np.concatenate([idx for _, idx in index_blocks]))
+            if self.precondition_blocks == "auto":
+                # the blocks come from the reference matrix itself
+                index_blocks = precond.auto_blocks(
+                    hess_np, scope, threshold=self.precondition_block_threshold
+                )
+            else:
+                # no grouping: one factorisation over the whole scope
+                index_blocks = [("all", scope)]
+
         return precond.Preconditioner.from_hessian(
             hess_np,
             theta_ref,
-            idx,
+            index_blocks,
             ridge=self.precondition_ridge,
         )
 
