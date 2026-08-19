@@ -207,18 +207,45 @@ class Preconditioner:
             return None
 
         cond_before = _cond_corr(block)
-        eps = ridge
+        # Ridge schedule: try the caller's value first, since for a positive
+        # definite block that is all that is needed and the Cholesky is cheap.
+        # Only if that fails is the spectrum worth the extra O(m^3): the ridge
+        # required to restore definiteness is set by the most negative
+        # eigenvalue, so it can be computed rather than guessed. Escalating by
+        # powers of a hundred instead used to overshoot badly -- blocks needing
+        # 0.03 were skipped after 1e-4 failed and 1e-2 was tried next.
+        schedule = [ridge]
         for itry in range(max_tries):
+            if itry >= len(schedule):
+                if itry == 1:
+                    w = np.linalg.eigvalsh(block)
+                    lam_min, lam_max = float(w[0]), float(w[-1])
+                    if lam_min < 0.0:
+                        # enough to make it positive definite, plus a margin so
+                        # the smallest eigenvalue is not left at zero
+                        need = abs(lam_min) + max(
+                            0.1 * abs(lam_min), 1e-8 * abs(lam_max)
+                        )
+                        schedule.append(need / scale)
+                        logger.debug(
+                            f"{tag}block has lam_min={lam_min:.3g} "
+                            f"(max|diag|={scale:.3g}); ridge from the spectrum: "
+                            f"{schedule[-1]:.3g} x max|diag|"
+                        )
+                    else:
+                        schedule.append(max(schedule[-1], 1e-12) * 100.0)
+                else:
+                    schedule.append(max(schedule[-1], 1e-12) * 100.0)
+            eps = schedule[itry]
             trial = block.copy()
             if eps > 0.0:
                 trial[np.diag_indices_from(trial)] += eps * scale
             try:
                 chol = scipy.linalg.cholesky(trial, lower=True)
             except scipy.linalg.LinAlgError:
-                eps = max(eps, 1e-12) * 100.0
                 logger.debug(
                     f"Preconditioner Cholesky failed for {tag}block "
-                    f"(try {itry + 1}), raising ridge to {eps:.3g}"
+                    f"with ridge {eps:.3g} x max|diag| (try {itry + 1})"
                 )
                 continue
             # Conditioning actually achieved: L^-1 B L^-T for the *un-ridged*
@@ -236,8 +263,8 @@ class Preconditioner:
             return Block(idx, chol, cond_before, cond_after, label)
 
         logger.warning(
-            f"Preconditioning block {tag}is not factorisable even with a ridge of "
-            f"{eps:.3g} x max|diag|; skipping this block."
+            f"Preconditioning block {tag}is not factorisable; the largest ridge "
+            f"tried was {max(schedule):.3g} x max|diag|. Skipping this block."
         )
         return None
 

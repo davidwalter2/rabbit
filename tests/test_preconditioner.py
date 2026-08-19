@@ -175,6 +175,29 @@ def test_singular_block_falls_back_to_identity():
     assert not pc.enabled
 
 
+def test_mildly_indefinite_block_is_ridged_from_its_spectrum():
+    """A block needing a ridge between the old ladder's rungs must still work.
+
+    The escalation used to go 1e-8 -> 1e-6 -> 1e-4 -> 1e-2, so a block whose
+    smallest eigenvalue sat at a few percent of max|diag| was skipped: 1e-4 was
+    too small and 1e-2 was tried only after. Two such blocks were dropped from a
+    real fit that way. The ridge is now computed from lam_min instead.
+    """
+    n = 40
+    h = _spd(n, seed=41, cond=1e3)
+    w, V = np.linalg.eigh(h)
+    # push a few eigenvalues to ~-3% of the largest diagonal entry
+    target = -0.03 * np.max(np.diag(h))
+    w[:5] = target
+    h = V @ np.diag(w) @ V.T
+    h = 0.5 * (h + h.T)
+    assert np.linalg.eigvalsh(h).min() < 0, "test matrix must be indefinite"
+
+    pc = Preconditioner.from_hessian(h, np.zeros(n), [("mild", np.arange(n))])
+    assert pc.enabled, "a mildly indefinite block must not be skipped"
+    assert pc.nblock == n
+
+
 def test_rank_deficient_block_is_ridged_into_shape():
     n = 5
     h = _spd(n, seed=9)
