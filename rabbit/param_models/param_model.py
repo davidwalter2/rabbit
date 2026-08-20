@@ -3,6 +3,9 @@ import itertools
 
 import numpy as np
 import tensorflow as tf
+from wums import logging
+
+logger = logging.child_logger(__name__)
 
 
 class ParamModel:
@@ -376,14 +379,26 @@ class Mixture(ParamModel):
 
 class SaturatedProjectModel(ParamModel):
     """
-    For computing the saturated test statistic of a projection.
-    Add one free parameter for each projected bin
+    For computing the saturated test statistic of a mapping that is a selection and a
+    summation of input bins, e.g. a 'Select' or a 'Project' mapping.
+    Add one free parameter for each bin of the mapping output, applied to all bins of the
+    input data contributing to it. Bins that do not enter the mapping are left at one.
+
+    Parameters
+    ----------
+    channel_info : dict
+        Channel info of the mapping, used to name the parameters.
+    indices : dict
+        For each channel of the input data that enters the mapping, the flat index of the
+        output bin each of its bins contributes to, and -1 for bins that are not used,
+        as returned by 'Mapping.output_indices()'.
     """
 
     def __init__(
         self,
         indata,
         channel_info,
+        indices,
         expectSignal=None,
         allowNegativeParam=False,
         **kwargs,
@@ -391,21 +406,40 @@ class SaturatedProjectModel(ParamModel):
         self.indata = indata
         self.channel_info_mapping = channel_info
 
-        self.npoi = int(
-            np.sum(
-                [
-                    np.prod([a.size for a in v["axes"]]) if len(v["axes"]) else 1
-                    for v in channel_info.values()
-                ]
-            )
-        )
+        self.indices = {k: np.asarray(v) for k, v in indices.items()}
+        self.nbins_channel = {k: int(v.max()) + 1 for k, v in self.indices.items()}
+
+        for k, v in self.indices.items():
+            n_empty = self.nbins_channel[k] - len(np.unique(v[v >= 0]))
+            if n_empty:
+                logger.warning(
+                    f"{n_empty} bins of the mapping output in channel '{k}' have no "
+                    "contribution from the input data, their saturated parameters are "
+                    "unconstrained and the number of degrees of freedom is overestimated"
+                )
+
+        self.npoi = int(sum(self.nbins_channel.values()))
         self.npou = 0
 
+        # bins of the input data that are not used by the mapping point to one extra
+        #   parameter that is kept at one
+        self.gather_indices = {
+            k: tf.constant(np.where(v >= 0, v, self.nbins_channel[k]))
+            for k, v in self.indices.items()
+        }
+
         names = []
-        for k, v in self.channel_info_mapping.items():
-            for idxs in itertools.product(*[range(a.size) for a in v["axes"]]):
-                label = "_".join(f"{a.name}{i}" for a, i in zip(v["axes"], idxs))
-                names.append(f"saturated_{k}_{label}".encode())
+        for k, nbins in self.nbins_channel.items():
+            axes = channel_info[k]["axes"]
+            if int(np.prod([a.size for a in axes])) == nbins:
+                labels = [
+                    "_".join(f"{a.name}{i}" for a, i in zip(axes, idxs))
+                    for idxs in itertools.product(*[range(a.size) for a in axes])
+                ]
+            else:
+                # e.g. channels with flow bins, where the axes sizes don't span the output
+                labels = [str(i) for i in range(nbins)]
+            names.extend([f"saturated_{k}_{label}".encode() for label in labels])
 
         self.params = np.array(names)
 
@@ -421,23 +455,21 @@ class SaturatedProjectModel(ParamModel):
         for k, v in self.indata.channel_info.items():
             if v["masked"] and not full:
                 continue
-            shape_input = [a.size for a in v["axes"]]
 
-            irnorm = tf.ones(shape_input, dtype=self.indata.dtype)
-            if k in self.channel_info_mapping.keys():
-                mapping_axes = self.channel_info_mapping[k]["axes"]
-                shape_mapping = [a.size if a in mapping_axes else 1 for a in v["axes"]]
-                n_mapping_params = np.prod([a.size for a in mapping_axes])
-                iparam = param[start : start + n_mapping_params]
-                irnorm *= tf.reshape(iparam, shape_mapping)
-                start += n_mapping_params
+            if k in self.indices.keys():
+                nbins = self.nbins_channel[k]
+                iparam = tf.concat(
+                    [
+                        param[start : start + nbins],
+                        tf.ones([1], dtype=self.indata.dtype),
+                    ],
+                    axis=0,
+                )
+                irnorm = tf.gather(iparam, self.gather_indices[k])
+                start += nbins
+            else:
+                irnorm = tf.ones([v["stop"] - v["start"]], dtype=self.indata.dtype)
 
-            irnorm = tf.reshape(
-                irnorm,
-                [
-                    -1,
-                ],
-            )
             rnorms.append(irnorm)
 
         rnorm = tf.concat(rnorms, axis=0)

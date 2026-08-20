@@ -48,6 +48,14 @@ class Mapping:
     def compute_flat_per_process(self, params, observables=None):
         return self.compute_flat(params, observables)
 
+    # For mappings that are a linear selection and summation of the input bins, the flat
+    #    index of the output bin each input bin contributes to, per channel of the input data,
+    #    and -1 for input bins that do not enter the output.
+    #    Needed to build a saturated model of the output, e.g. for goodness of fit tests.
+    #    Mappings that are not of this form return None.
+    def output_indices(self):
+        return None
+
     # generic version which should not need to be overridden
     @tf.function
     def get_data(self, *args, **kwargs):
@@ -156,6 +164,8 @@ class ChannelMapping(Mapping):
     Abstract mapping to process a specific channel
     """
 
+    normalize = False  # if the result is normalized to the integral of the selection
+
     def __init__(
         self,
         indata,
@@ -166,6 +176,8 @@ class ChannelMapping(Mapping):
     ):
         super().__init__(indata, key)
 
+        self.channel = channel
+        self.processes = processes
         self.term = helpers.Term(indata, channel, processes, **kwargs)
 
         channel_info = indata.channel_info[channel]
@@ -187,13 +199,13 @@ class ChannelMapping(Mapping):
         return self.compute(params, observables)
 
     def compute_flat(self, params, observables):
-        exp = self.term.select(observables, inclusive=True)
+        exp = self.term.select(observables, normalize=self.normalize, inclusive=True)
         exp = self.compute(params, exp)
         exp = tf.reshape(exp, [-1])  # flatten again
         return exp
 
     def compute_flat_per_process(self, params, observables):
-        exp = self.term.select(observables, inclusive=False)
+        exp = self.term.select(observables, normalize=self.normalize, inclusive=False)
         exp = self.compute_per_process(params, exp)
         # flatten again
         flat_shape = (-1, exp.shape[-1])
@@ -257,3 +269,10 @@ class Select(ChannelMapping):
 
     def compute_per_process(self, params, observables):
         return self.compute(params, observables)
+
+    def output_indices(self):
+        if self.normalize or len(self.processes):
+            # the output is not a plain sum of input bins
+            return None
+
+        return {self.channel: self.term.output_indices()}

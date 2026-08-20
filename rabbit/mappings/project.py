@@ -1,85 +1,97 @@
+import numpy as np
 import tensorflow as tf
 
-from rabbit.mappings.mapping import ChannelMapping
+from rabbit.mappings.mapping import Select
 
 
-class Project(ChannelMapping):
+class Project(Select):
     """
-    A class to project a histogram to lower dimensions.
-    The normalization is done to the integral of all processes or data.
+    A class to project a histogram to lower dimensions, i.e. all axes of the channel
+    that are not kept are summed. The output axes are in the order they are requested.
 
     Parameters
     ----------
-    channel_name : str
+    channel : str
         Name of the channel. Required.
     axes_names : list of str, optional
         Names of the axes to keep. If empty, the histogram will be projected to a single bin.
     """
 
-    def __init__(self, indata, key, channel, *axes_names):
-        super().__init__(indata, key, channel)
-        self.channel = channel
+    def __init__(self, indata, key, channel, *axes_names, **kwargs):
+        channel_axes_names = [a.name for a in indata.channel_info[channel]["axes"]]
 
-        info = indata.channel_info[channel]
-        channel_axes = {a.name: a for a in info["axes"]}
-
-        if len([n for n in axes_names if n not in channel_axes]) > 0:
+        missing = [n for n in axes_names if n not in channel_axes_names]
+        if len(missing):
             raise RuntimeError(
-                f"Axes {[n for n in axes_names if n not in channel_axes]} not found. Available axes are {[channel_axes.keys()]}"
-            )
-        hist_axes = [channel_axes[n] for n in axes_names]
-
-        if len(hist_axes) != len(axes_names):
-            raise ValueError(
-                f"Hist axes {[h.name for h in hist_axes]} != {axes_names} not found"
+                f"Axes {missing} not found. Available axes are {channel_axes_names}"
             )
 
-        channel_axes_names = [axis.name for axis in channel_axes.values()]
+        # a projection is a selection of the channel where all axes that are not kept are summed
+        super().__init__(
+            indata,
+            key,
+            channel,
+            sum_axes=[n for n in channel_axes_names if n not in axes_names],
+            **kwargs,
+        )
 
-        axis_idxs = [channel_axes_names.index(axis) for axis in axes_names]
+        # the axes that are kept are in the order of the channel, the result is transposed
+        #   into the order in which the axes were requested
+        kept_axes_names = [n for n in channel_axes_names if n in axes_names]
+        self.transpose_idxs = [kept_axes_names.index(n) for n in axes_names]
 
-        self.proj_idxs = [i for i in range(len(channel_axes)) if i not in axis_idxs]
+        info = self.channel_info[channel]
+        info["axes"] = [info["axes"][i] for i in self.transpose_idxs]
 
-        post_proj_axes_names = [
-            axis for axis in channel_axes_names if axis in axes_names
-        ]
+    @classmethod
+    def parse_args(cls, indata, channel, *axes_names):
+        """
+        parsing the input arguments into the constructor, it has to be called as
+        -m Project <ch> <axis_0> <axis_1> ...
 
-        self.transpose_idxs = [post_proj_axes_names.index(axis) for axis in axes_names]
+        All axes of the channel that are not listed are summed,
+        listing no axis at all gives the total yield.
+        """
+        key = " ".join([cls.__name__, channel, *axes_names])
 
-        self.has_data = not info.get("masked", False)
+        return cls(indata, key, channel, *axes_names)
 
-        self.channel_info = {
-            channel: {
-                "axes": hist_axes,
-                "flow": info.get("flow", False),
-                "processes": indata.procs,
-            }
-        }
+    def output_indices(self):
+        indices = super().output_indices()
+        if indices is None or self.transpose_idxs == sorted(self.transpose_idxs):
+            # axes are already in the requested order
+            return indices
 
-    def project(self, values):
-        exp = tf.reduce_sum(values, axis=self.proj_idxs)
+        # index of each bin of the projection before the transposition in the transposed output
+        out_shape = self.term.out_shape
+        transposed = np.transpose(
+            np.arange(int(np.prod(out_shape))).reshape(out_shape), self.transpose_idxs
+        )
+        remap = np.empty(transposed.size, dtype=np.int64)
+        remap[transposed.reshape(-1)] = np.arange(transposed.size)
+
+        idxs = indices[self.channel]
+        indices[self.channel] = np.where(idxs >= 0, remap[idxs], -1)
+
+        return indices
+
+    def compute(self, params, observables):
+        if self.transpose_idxs == sorted(self.transpose_idxs):
+            # axes are already in the requested order
+            return observables
+
         perm = self.transpose_idxs[:]
-        if len(exp.shape) > len(self.transpose_idxs):
+        if len(observables.shape) > len(perm):
             # last is process axis
-            perm += list(range(len(self.transpose_idxs), len(exp.shape)))
-        exp = tf.transpose(exp, perm=perm)
-        return exp
+            perm += list(range(len(perm), len(observables.shape)))
 
-    def compute(self, param, observables):
-        return self.project(observables)
+        return tf.transpose(observables, perm=perm)
 
 
 class Normalize(Project):
     """
-    Same as project but also normalize
+    Same as Project but the result is normalized to its integral, summed over all processes
     """
 
     ndf_reduction = 1
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def project(self, values, *args):
-        norm = tf.reduce_sum(values)
-        out = values / norm
-        return super().project(out, *args)
+    normalize = True
