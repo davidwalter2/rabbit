@@ -183,6 +183,21 @@ class Preconditioner:
                 "running unpreconditioned."
             )
             return cls.identity(theta_ref)
+
+        # One summary rather than a line per block: auto-blocking routinely
+        # finds hundreds, and the per-block detail is at debug level.
+        n_req = len(index_blocks)
+        npar = sum(b.idx.size for b in blocks)
+        conds = [b.cond_before for b in blocks if b.cond_before is not None]
+        summary = f"Preconditioned {len(blocks)} of {n_req} block(s), {npar} parameters"
+        if conds:
+            summary += (
+                f"; correlation condition number median {np.median(conds):.3g}, "
+                f"worst {max(conds):.3g} -> 1 at the reference point"
+            )
+        if len(blocks) < n_req:
+            summary += f" ({n_req - len(blocks)} block(s) not factorisable, skipped)"
+        logger.info(summary)
         return cls(theta_ref, blocks)
 
     @staticmethod
@@ -254,7 +269,7 @@ class Preconditioner:
             tb = scipy.linalg.solve_triangular(chol, block, lower=True, trans="N")
             tb = scipy.linalg.solve_triangular(chol, tb.T, lower=True, trans="N").T
             cond_after = _cond_corr(tb)
-            logger.info(
+            logger.debug(
                 f"Preconditioning {tag}block of {idx.size} parameters from the "
                 f"reference Hessian (ridge {eps:.3g} x max|diag|): correlation "
                 f"condition number {cond_before:.3g} -> {cond_after:.3g} at the "
@@ -458,9 +473,13 @@ def select_index_blocks(
 
     if not expressions:
         sel = (np.asarray(cw) == 0.0) & ~frozen_mask
-        logger.info(
-            "No --preconditionParams given; defaulting to a single block of the "
-            "unconstrained parameters (constraint weight 0)."
+        # debug, not info: this repeats identically on every restart's rebuild,
+        # and the summary from from_hessian already reports how many parameters
+        # ended up preconditioned
+        logger.debug(
+            f"No --preconditionParams given; selecting all {int(sel.sum())} "
+            "unconstrained parameters (constraint weight 0). How they are grouped "
+            "into blocks is set by --preconditionBlocks."
         )
         return [("unconstrained", np.where(sel)[0])]
 
