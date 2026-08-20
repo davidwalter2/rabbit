@@ -28,7 +28,6 @@ from scipy.stats import chi2
 from rabbit import fitter, inputdata, parsing, workspace
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
-from rabbit.mappings import project
 from rabbit.param_models import helpers as ph
 from rabbit.param_models import param_model
 from rabbit.regularization import helpers as rh
@@ -161,7 +160,8 @@ def make_parser():
         "--computeSaturatedProjectionTests",
         default=False,
         action="store_true",
-        help="Compute the saturated likelihood test for Project mappings",
+        help="Compute the saturated likelihood test for mappings that are a selection "
+        "and a summation of input bins, e.g. 'Select' and 'Project' mappings",
     )
     parser.add_argument(
         "--noChi2",
@@ -394,15 +394,21 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
 
                 ws.add_chi2(chi2val, ndf, prefit, mapping)
 
-            if (
-                not prefit
-                and type(mapping) == project.Project
-                and args.computeSaturatedProjectionTests
-            ):
+            # the saturated model is only defined for mappings that are a selection and a
+            #   summation of input bins, and needs data to compare the prediction against
+            saturated_indices = (
+                mapping.output_indices()
+                if args.computeSaturatedProjectionTests
+                and not prefit
+                and mapping.has_data
+                else None
+            )
+
+            if saturated_indices is not None:
                 # saturated likelihood test
 
                 saturated_model = param_model.SaturatedProjectModel(
-                    fitter.indata, mapping.channel_info
+                    fitter.indata, mapping.channel_info, saturated_indices
                 )
                 composite_model = param_model.CompositeParamModel(
                     [fitter.param_model, saturated_model]
@@ -450,12 +456,20 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 fitter_saturated.arm_regularizers()
                 cb = fitter_saturated.minimize()
                 cov_saturated = None
+                edmval = None
                 if not args.noHessian:
                     _, grad, hess = fitter_saturated.loss_val_grad_hess()
-                    edmval, cov_saturated = fitter_saturated.edmval_cov(grad, hess)
-                    logger.info(f"edmval: {edmval}")
-                else:
-                    edmval = None
+                    try:
+                        edmval, cov_saturated = fitter_saturated.edmval_cov(grad, hess)
+                        logger.info(f"edmval: {edmval}")
+                    except (ValueError, np.linalg.LinAlgError) as e:
+                        # the saturated parameters can be degenerate with parameters of the
+                        #   original model, e.g. if a parameter only affects bins that are
+                        #   made free by the saturated model. The test statistic itself does
+                        #   not need the hessian and stays valid.
+                        logger.warning(
+                            f"Could not compute the covariance of the saturated fit for '{mapping.key}': {e}"
+                        )
 
                 nllvalreduced = fitter_saturated.reduced_nll().numpy()
 

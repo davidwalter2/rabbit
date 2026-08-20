@@ -98,8 +98,10 @@ class Term:
 
         self.has_data = not info.get("masked", False) and len(processes) == 0
 
-        flow = info.get("flow", False)
-        self.exp_shape = tuple([a.extent if flow else a.size for a in channel_axes])
+        self.flow = info.get("flow", False)
+        self.exp_shape = tuple(
+            [a.extent if self.flow else a.size for a in channel_axes]
+        )
 
         if processes is not None:
             if any(p not in indata.procs.astype(str) for p in processes):
@@ -160,6 +162,47 @@ class Term:
         self.sum_idxs = [i for i, n in enumerate(h.axes.name) if n in sum_axes]
 
         self.channel_axes = channel_axes
+
+    @property
+    def out_shape(self):
+        """shape of the output of 'select'"""
+        return tuple(a.extent if self.flow else a.size for a in self.channel_axes)
+
+    def output_indices(self):
+        """
+        For each bin of the channel, the flat index of the bin in the output of 'select'
+        it contributes to, and -1 for bins that do not enter the output at all.
+        Mirrors the operations of 'select' for the inclusive case,
+        i.e. sum(values[indices == i]) == select(values).flat[i]
+        """
+        # coordinate of each bin along each axis in the output, -1 for bins that are dropped
+        coords = []
+        sizes = []
+        for i, n in enumerate(self.exp_shape):
+            c = np.full(n, -1, dtype=np.int64)
+            s = self.selections[i] if self.selections is not None else slice(None)
+            c[s] = np.arange(len(c[s]))
+            size = len(c[s])
+            if i in self.segment_ids:
+                segment_ids = self.segment_ids[i].numpy()
+                selected = c >= 0
+                c[selected] = segment_ids[c[selected]]
+                size = self.num_segments[i]
+            coords.append(c)
+            sizes.append(size)
+
+        # ravel the coordinates of the axes that are kept, bins that are dropped
+        #   along any of the axes do not enter the output
+        indices = np.zeros(self.exp_shape, dtype=np.int64)
+        selected = np.ones(self.exp_shape, dtype=bool)
+        for i, c in enumerate(coords):
+            shape = [-1 if j == i else 1 for j in range(len(self.exp_shape))]
+            c = c.reshape(shape)
+            selected &= c >= 0
+            if i not in self.sum_idxs:
+                indices = indices * sizes[i] + np.where(c >= 0, c, 0)
+
+        return np.where(selected, indices, -1).reshape(-1)
 
     def select(self, values, normalize=False, inclusive=True):
         values = values[self.start : self.stop]

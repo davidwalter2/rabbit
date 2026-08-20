@@ -1,3 +1,4 @@
+import numpy as np
 import tensorflow as tf
 
 from rabbit.mappings.mapping import Select
@@ -54,6 +55,25 @@ class Project(Select):
         key = " ".join([cls.__name__, channel, *axes_names])
 
         return cls(indata, key, channel, *axes_names)
+
+    def output_indices(self):
+        indices = super().output_indices()
+        if indices is None or self.transpose_idxs == sorted(self.transpose_idxs):
+            # axes are already in the requested order
+            return indices
+
+        # index of each bin of the projection before the transposition in the transposed output
+        out_shape = self.term.out_shape
+        transposed = np.transpose(
+            np.arange(int(np.prod(out_shape))).reshape(out_shape), self.transpose_idxs
+        )
+        remap = np.empty(transposed.size, dtype=np.int64)
+        remap[transposed.reshape(-1)] = np.arange(transposed.size)
+
+        idxs = indices[self.channel]
+        indices[self.channel] = np.where(idxs >= 0, remap[idxs], -1)
+
+        return indices
 
     def compute(self, params, observables):
         if self.transpose_idxs == sorted(self.transpose_idxs):
