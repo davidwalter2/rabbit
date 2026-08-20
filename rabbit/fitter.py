@@ -11,8 +11,14 @@ from tensorflow.python.ops.linalg.sparse import sparse_csr_matrix_ops as tf_spar
 from wums import logging
 
 from rabbit import external_likelihood, io_tools
+from rabbit import preconditioner as precond
 from rabbit import tfhelpers as tfh
 from rabbit.bbstat.bbstat import BinByBinStat
+from rabbit.callbacks import (
+    RESTART_MIN_IMPROVEMENT,
+    FitterCallback,
+    merge_callbacks,
+)
 from rabbit.impacts import (
     asym_impacts,
     global_asym_impacts,
@@ -59,48 +65,6 @@ def match_regexp_params(regular_expressions, parameter_names):
     return matched
 
 
-class FitterCallback:
-    def __init__(self, xv, early_stopping=-1):
-        self.iiter = 0
-        self.xval = xv
-
-        self.loss_history = []
-        self.time_history = []
-
-        self.t0 = time.time()
-
-        self.early_stopping = early_stopping
-
-    def __call__(self, intermediate_result):
-        loss = intermediate_result.fun
-
-        elapsed = time.time() - self.t0
-        prev = self.time_history[-1] if self.time_history else 0.0
-        dt = elapsed - prev
-
-        logger.debug(
-            f"Iteration {self.iiter}: loss {loss}  "
-            f"[dt={dt:.2f}s elapsed={elapsed:.2f}s]"
-        )
-        if np.isnan(loss):
-            raise ValueError(f"Loss value is NaN at iteration {self.iiter}")
-
-        if (
-            self.early_stopping > 0
-            and len(self.loss_history) > self.early_stopping
-            and self.loss_history[-self.early_stopping] <= loss
-        ):
-            raise ValueError(
-                f"No reduction in loss after {self.early_stopping} iterations, early stopping."
-            )
-
-        self.loss_history.append(loss)
-        self.time_history.append(elapsed)
-
-        self.xval = intermediate_result.x
-        self.iiter += 1
-
-
 class Fitter:
     valid_systematic_types = ["log_normal", "normal"]
 
@@ -129,6 +93,17 @@ class Fitter:
         # outcome can be written to the output. None if the minimizer raised.
         self.minimizer_result = None
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
+        # Optional parameter preconditioning (see rabbit/preconditioner.py).
+        # getattr so callers that build options objects by hand keep working.
+        self.precondition = getattr(options, "precondition", False)
+        self.precondition_params = getattr(options, "preconditionParams", None)
+        self.precondition_from = getattr(options, "preconditionFrom", "hessian")
+        self.precondition_blocks = getattr(options, "preconditionBlocks", "auto")
+        self.precondition_block_threshold = getattr(
+            options, "preconditionBlockThreshold", 0.1
+        )
+        self.max_restarts = getattr(options, "maxRestarts", -1)
+        self.precondition_ridge = getattr(options, "preconditionRidge", 1e-8)
         # jitCompile accepts "auto" (the default), "on", or "off".
         # True / False from programmatic callers are accepted as
         # aliases for "on" / "off". The tri-state is resolved to the
@@ -2264,33 +2239,153 @@ class Fitter:
 
         return val, grad, hess
 
+    def _reference_matrix(self):
+        """Reference matrix the preconditioner is built from, as a numpy array.
+
+        "hessian" is the exact Hessian at the current point, and is the default.
+        On real data it is not guaranteed positive definite -- the term
+        (1 - nobs/nexp) multiplying the second derivative of the prediction can
+        go either way -- so the Cholesky needs a ridge big enough to make it so.
+        That ridge is not a wart: it is what regularises the negative-curvature
+        directions into small positive ones, which is exactly what lets the
+        block be whitened into something the trust region can work with.
+
+        "gaussnewton" is the Fisher information, i.e. the *expected* Hessian,
+        obtained by evaluating the exact Hessian with the data replaced by the
+        current prediction: at that point (1 - nobs/nexp) vanishes, the
+        second-derivative term drops out and J^T W J + diag(cw) remains, which
+        is positive semi-definite by construction and so factorises at the
+        default ridge.
+
+        That PSD-ness is a double-edged sword, and measurement says the edge
+        usually points the wrong way. Being PSD, the Fisher matrix *cannot
+        represent negative curvature at all*. Measured on a 2112-parameter
+        in-situ efficiency block whose exact Hessian had 33 negative
+        eigenvalues at the starting point: whitening with the Gauss-Newton
+        transform left all 33 directions negative and the true Hessian at
+        kappa ~1e4 in the new coordinates, and the fit froze immediately,
+        while the ridged exact Hessian took the same fit from 145 min to
+        4.6 min. Raising the ridge on the Gauss-Newton matrix did not help,
+        so this is about the missing negative curvature, not about scaling.
+
+        So prefer "hessian" unless the exact Hessian is positive definite where
+        the fit starts -- near a minimum, or for a genuinely convex model --
+        where "gaussnewton" is the cheaper and better-conditioned choice.
+        """
+        if self.precondition_from == "gaussnewton":
+            saved_nobs = tf.identity(self.nobs)
+            saved_varnobs = tf.identity(self.varnobs) if self.chisqFit else None
+            try:
+                self.set_nobs(self.expected_yield(), variances=saved_varnobs)
+                _, _, hess = self.loss_val_grad_hess()
+                return hess.__array__()
+            finally:
+                self.set_nobs(saved_nobs, variances=saved_varnobs)
+
+        _, _, hess = self.loss_val_grad_hess()
+        return hess.__array__()
+
+    def _build_preconditioner(self):
+        """Preconditioner for the upcoming :meth:`fit`, or an exact no-op.
+
+        Built at the current parameter values, so the reference Hessian is the
+        one the minimizer starts from.
+        """
+        theta_ref = self.x.numpy()
+        if not self.precondition:
+            return precond.Preconditioner.identity(theta_ref)
+
+        index_blocks = precond.select_index_blocks(
+            self.parms,
+            self.cw.numpy(),
+            self.frozen_params_mask.numpy(),
+            expressions=self.precondition_params,
+            match_fn=match_regexp_params,
+            groups=self.indata.systgroups,
+            group_idxs=self.indata.systgroupidxs,
+        )
+        # The dense [npar, npar] reference matrix is the one costly part; if it
+        # cannot be
+        # formed (memory, or a tracing failure on a large model) fall back to an
+        # unpreconditioned fit rather than taking the whole job down.
+        try:
+            hess_np = self._reference_matrix()
+        except Exception as ex:
+            logger.warning(
+                f"Could not compute the reference Hessian for preconditioning ({ex}); "
+                "running unpreconditioned."
+            )
+            return precond.Preconditioner.identity(theta_ref)
+
+        if not index_blocks:
+            logger.warning(
+                "Preconditioning requested but no parameters were selected; "
+                "running unpreconditioned."
+            )
+            return precond.Preconditioner.identity(theta_ref)
+
+        if self.precondition_blocks in ("auto", "none"):
+            # the expressions only set the scope
+            scope = np.unique(np.concatenate([idx for _, idx in index_blocks]))
+            if self.precondition_blocks == "auto":
+                # the blocks come from the reference matrix itself
+                index_blocks = precond.auto_blocks(
+                    hess_np, scope, threshold=self.precondition_block_threshold
+                )
+            else:
+                # no grouping: one factorisation over the whole scope
+                index_blocks = [("all", scope)]
+
+        return precond.Preconditioner.from_hessian(
+            hess_np,
+            theta_ref,
+            index_blocks,
+            ridge=self.precondition_ridge,
+        )
+
     def fit(self):
         logger.info("Perform iterative fit")
 
-        def scipy_loss(xval):
-            self.x.assign(xval)
+        # Optional reparameterisation. Built once at the starting point, it is
+        # confined to the three scipy callbacks below: self.x always holds
+        # *physical* parameters outside them, so the postfit Hessian,
+        # covariance, impacts and pulls are unaffected and need no mapping
+        # back. pc is an exact no-op when disabled, keeping one code path.
+        # Held in a one-element cell because it is rebuilt at the current point
+        # before every restart (see the restart loop) and the scipy callbacks
+        # below must pick the new one up.
+        pc_cell = [self._build_preconditioner()]
+
+        def scipy_loss(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
             val, grad = self.loss_val_grad()
-            return val.__array__(), grad.__array__()
+            return val.__array__(), pc.grad_to_internal(grad.__array__())
 
-        def scipy_hessp(xval, pval):
-            self.x.assign(xval)
-            p = tf.convert_to_tensor(pval)
-            val, grad, hessp = self.loss_val_grad_hessp(p)
-            return hessp.__array__()
+        def scipy_hessp(yval, pval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
 
-        def scipy_hess(xval):
-            self.x.assign(xval)
+            def hvp(v):
+                _, _, hessp = self.loss_val_grad_hessp(tf.convert_to_tensor(v))
+                return hessp.__array__()
+
+            return pc.hessp_to_internal(np.asarray(pval, dtype=np.float64), hvp)
+
+        def scipy_hess(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
             val, grad, hess = self.loss_val_grad_hess()
             if self.diagnostics:
                 cond_number = tfh.cond_number(hess)
                 logger.info(f"  - Condition number: {cond_number}")
                 edmval = tfh.edmval(grad, hess)
                 logger.info(f"  - edmval: {edmval}")
-            return hess.__array__()
+            return pc.hess_to_internal(hess.__array__())
 
-        xval = self.x.numpy()
-
-        callback = FitterCallback(xval, self.earlyStopping)
+        # scipy works in internal coordinates throughout; y = 0 at the point the
+        # transform was built.
+        xval = pc_cell[0].from_physical(self.x.numpy())
 
         if self.minimizer_method in [
             "trust-krylov",
@@ -2320,29 +2415,92 @@ class Fitter:
             sci_opts["ftol"] = float(self.minimizer_ftol)
         logger.info(f"[minimize] method={self.minimizer_method} options={sci_opts}")
 
-        try:
-            res = scipy.optimize.minimize(
-                scipy_loss,
-                xval,
-                method=self.minimizer_method,
-                jac=True,
-                tol=0.0,
-                callback=callback,
-                options=sci_opts,
-                **info_minimize,
-            )
-        except Exception as ex:
-            # minimizer could have called the loss or hessp functions with "random" values, so restore the
-            # state from the end of the last iteration before the exception
-            xval = callback.xval
-            self.minimizer_result = None
-            logger.debug(ex)
-        else:
-            xval = res["x"]
-            self.minimizer_result = res
-            logger.debug(res)
+        # Restart loop. scipy's trust-region methods shrink the trust radius by
+        # 4x on every rejected step with no lower bound, and the radius is a
+        # local of scipy's loop -- so once it has collapsed the method takes
+        # infinitesimal steps and the loss stops moving, far from any minimum.
+        # A fresh minimize() call resets the radius to initial_trust_radius,
+        # which is why restarting from a stalled point resumes progress. Loop
+        # that here instead of making the caller chain --externalPostfit by
+        # hand. Only an early-stopping stall is retried, and only while the
+        # restarts keep buying loss.
+        callback = None
+        prev_loss = None
+        attempt = 0
+        while True:
+            cb = FitterCallback(xval, self.earlyStopping)
+            try:
+                res = scipy.optimize.minimize(
+                    scipy_loss,
+                    xval,
+                    method=self.minimizer_method,
+                    jac=True,
+                    tol=0.0,
+                    callback=cb,
+                    options=sci_opts,
+                    **info_minimize,
+                )
+            except Exception as ex:
+                # minimizer could have called the loss or hessp functions with "random" values, so restore the
+                # state from the end of the last iteration before the exception
+                xval = cb.xval
+                self.minimizer_result = None
+                if not cb.stopped_early:
+                    # a real failure, not a stall: surface it rather than
+                    # letting a broken callback look like a converged fit
+                    logger.warning(f"Minimizer raised: {ex}")
+                logger.debug(ex)
+            else:
+                xval = res["x"]
+                self.minimizer_result = res
+                logger.debug(res)
 
-        self.x.assign(xval)
+            callback = merge_callbacks(callback, cb)
+            last_loss = cb.loss_history[-1] if cb.loss_history else None
+
+            if not cb.stopped_early:
+                break
+            # The only reason to stop restarting is that the last restart
+            # bought nothing: a round can never end above where it started
+            # (the trust region accepts improving steps only), so "not below
+            # the previous round" means the descent is genuinely exhausted.
+            if (
+                prev_loss is not None
+                and last_loss is not None
+                and last_loss
+                >= prev_loss - RESTART_MIN_IMPROVEMENT * max(1.0, abs(prev_loss))
+            ):
+                logger.info(
+                    f"Restart did not reduce the loss further ({prev_loss} -> "
+                    f"{last_loss}); stopping after {attempt} restart(s)."
+                )
+                break
+            if 0 <= self.max_restarts <= attempt:
+                logger.warning(
+                    f"Minimizer still stalling at loss {last_loss} after "
+                    f"{self.max_restarts} restart(s) and the loss was still "
+                    "coming down; raise --maxRestarts to let it continue."
+                )
+                break
+            attempt += 1
+            logger.info(
+                f"Minimizer stalled at loss {last_loss}; restarting "
+                f"(#{attempt}) to reset the trust radius."
+            )
+            prev_loss = last_loss
+
+            # Rebuild the transform at the point we are restarting from. The
+            # one built at the start whitens the Hessian *there*; by the time
+            # the fit has stalled somewhere else that Hessian has changed and
+            # the transform no longer conditions anything. Refreshing costs one
+            # Hessian evaluation and is a no-op when preconditioning is off.
+            self.x.assign(pc_cell[0].to_physical(xval))
+            pc_cell[0] = self._build_preconditioner()
+            xval = pc_cell[0].from_physical(self.x.numpy())
+
+        # xval (and callback.xval) are internal coordinates; everything outside
+        # fit() expects physical parameters.
+        self.x.assign(pc_cell[0].to_physical(xval))
 
         return callback
 

@@ -183,9 +183,27 @@ def common_parser():
     )
     parser.add_argument(
         "--earlyStopping",
+        default=20,
+        type=int,
+        help="Number of iterations with no improvement after which the minimizer is "
+        "considered stalled. Paired with --maxRestarts this means 'restart here', not "
+        "'give up here'. On by default because scipy will not stop on its own: its "
+        "trust-region loop has no termination test for a collapsed trust radius, and "
+        "its maxiter defaults to 200*nparams, so a stalled fit spins for hours making "
+        "no progress rather than exiting. Specify -1 to disable.",
+    )
+    parser.add_argument(
+        "--maxRestarts",
         default=-1,
         type=int,
-        help="Number of iterations with no improvement after which training will be stopped. Specify -1 to disable.",
+        help="When --earlyStopping triggers, restart the minimizer from the stalled "
+        "point instead of giving up. scipy's trust-region methods shrink the trust "
+        "radius 4x per rejected step with no lower bound, and the radius is reset by a "
+        "fresh minimize() call -- so a stall is often just a collapsed step size, and "
+        "restarting resumes the descent (the same effect as chaining --externalPostfit "
+        "by hand). -1 (default) restarts as often as the loss keeps improving and stops "
+        "only once a restart no longer reduces it; 0 disables restarting; N > 0 caps "
+        "the number of restarts.",
     )
     parser.add_argument(
         "--minimizerMethod",
@@ -201,6 +219,78 @@ def common_parser():
             "dogleg",
         ],
         help="Mnimizer method used in scipy.optimize.minimize for the nominal fit minimization",
+    )
+    parser.add_argument(
+        "--precondition",
+        action="store_true",
+        help="Reparameterise a block of parameters so the reference Hessian is the "
+        "identity there (theta = theta_ref + L^-T y). This is preconditioning of the "
+        "trust-region subproblem obtained as a change of variables, so the minimizer "
+        "itself is untouched. Helps where many unconstrained, strongly correlated "
+        "parameters make the Krylov inner solve struggle and outer steps get rejected. "
+        "Off by default; a pure reparameterisation, so results are unchanged.",
+    )
+    parser.add_argument(
+        "--preconditionParams",
+        default=None,
+        type=str,
+        nargs="+",
+        help="Parameters to precondition: exact names, regexes matched against the full "
+        "parameter name, or systematic group names. Default (flag given without this "
+        "option) is every unconstrained parameter, which is where it pays off; "
+        "constrained nuisances are already normalised by their prior. Frozen "
+        "parameters are always excluded.",
+    )
+    parser.add_argument(
+        "--preconditionBlocks",
+        nargs="?",
+        const="auto",
+        default="auto",
+        type=str,
+        choices=["auto", "expressions", "none"],
+        help="How to group the selected parameters into blocks; the transform is "
+        "block diagonal, one Cholesky per block. 'auto' (the default, and what a "
+        "bare --preconditionBlocks selects) reads the clusters off the reference "
+        "matrix by thresholding its correlations and taking connected components: "
+        "no parameter naming needed, much cheaper since Cholesky is O(m^3), and a "
+        "singular cluster only costs its own block rather than all of them. "
+        "'expressions' makes one block per --preconditionParams entry. 'none' does "
+        "no grouping at all and factorises the whole selected scope as a single "
+        "block, which keeps every cross-correlation but is the most expensive and "
+        "fails entirely if any part of the scope is singular.",
+    )
+    parser.add_argument(
+        "--preconditionBlockThreshold",
+        default=0.1,
+        type=float,
+        help="Correlation threshold for --preconditionBlocks auto. Correlations "
+        "below it are left unpreconditioned. Too low and every parameter "
+        "percolates into a single block; too high and genuinely coupled "
+        "parameters are split apart.",
+    )
+    parser.add_argument(
+        "--preconditionFrom",
+        default="hessian",
+        type=str,
+        choices=["hessian", "gaussnewton"],
+        help="Source of the reference matrix. 'hessian' (default) takes the exact "
+        "Hessian at the starting point, one extra Hessian evaluation, roughly one "
+        "trust-exact iteration. 'gaussnewton' takes the Fisher information instead: "
+        "positive semi-definite by construction, so it factorises at the default ridge, "
+        "but for that same reason it cannot represent negative curvature. Where the "
+        "exact Hessian is indefinite at the starting point, whitening with it leaves "
+        "those directions negative and the fit stalls, so 'hessian' is usually the "
+        "better choice; prefer 'gaussnewton' only where the Hessian is positive "
+        "definite anyway, e.g. near a minimum.",
+    )
+    parser.add_argument(
+        "--preconditionRidge",
+        default=1e-8,
+        type=float,
+        help="Ridge added to the preconditioning block diagonal, relative to its largest "
+        "diagonal entry, to keep near-degenerate blocks factorisable. Escalated "
+        "automatically if the Cholesky still fails; a block that cannot be factorised "
+        "falls back to no preconditioning.",
     )
     parser.add_argument(
         "--hvpMethod",

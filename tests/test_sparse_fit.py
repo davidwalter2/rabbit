@@ -154,6 +154,7 @@ def make_options(**kwargs):
         setConstraintMinimum=[],
         unblind=[],
         blindingGroup=[],
+        maxRestarts=-1,
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
