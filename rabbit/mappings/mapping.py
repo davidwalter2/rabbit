@@ -156,6 +156,8 @@ class ChannelMapping(Mapping):
     Abstract mapping to process a specific channel
     """
 
+    normalize = False  # if the result is normalized to the integral of the selection
+
     def __init__(
         self,
         indata,
@@ -187,13 +189,13 @@ class ChannelMapping(Mapping):
         return self.compute(params, observables)
 
     def compute_flat(self, params, observables):
-        exp = self.term.select(observables, inclusive=True)
+        exp = self.term.select(observables, normalize=self.normalize, inclusive=True)
         exp = self.compute(params, exp)
         exp = tf.reshape(exp, [-1])  # flatten again
         return exp
 
     def compute_flat_per_process(self, params, observables):
-        exp = self.term.select(observables, inclusive=False)
+        exp = self.term.select(observables, normalize=self.normalize, inclusive=False)
         exp = self.compute_per_process(params, exp)
         # flatten again
         flat_shape = (-1, exp.shape[-1])

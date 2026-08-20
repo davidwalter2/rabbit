@@ -74,10 +74,6 @@ def parse_axis_selection(selection_str):
             if sl is not None:
                 sel[k] = sl
 
-        for s in selections:
-            if k not in sel.keys():
-                sel[k] = slice(None)
-
     return sel, rebin_axes, sum_axes
 
 
@@ -127,12 +123,8 @@ class Term:
                     for i, n in enumerate(channel_axes_names)
                 ]
             )
-            self.selection_idxs = [
-                i for i, n in enumerate(channel_axes_names) if n in selections.keys()
-            ]
         else:
             self.selections = None
-            self.selection_idxs = None
 
         # make dummy histogram to perform rebinning
         h = hist.Hist(*channel_axes)
