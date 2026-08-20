@@ -148,8 +148,8 @@ The first argument is the mapping name followed by arguments passed into the map
 Available mappings are:
  * `BaseMapping`: Compute histograms in all bins and all channels.
  * `Select`: To select histograms of a channel, and perform a selection of processes and bins, supporting rebinning.
- * `Project`: To project histograms to lower dimensions, respecting the covariance matrix across bins.
- * `Normalize`: To normalize histograms to their sum (and project them) e.g. to compute normalized differential cross sections.
+ * `Project`: To project histograms to lower dimensions, respecting the covariance matrix across bins. It is a `Select` where all axes of the channel that are not listed are summed, but the resulting axes follow the order in which they are requested.
+ * `Normalize`: Same as `Project` but the result is normalized to its integral e.g. to compute normalized differential cross sections.
  * `Ratio`: To compute the ratio between channels, processes, or histogram bins.
  * `Normratio`: To compute the ratio of normalized histograms.
 

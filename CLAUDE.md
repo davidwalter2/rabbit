@@ -92,6 +92,7 @@ Custom models are loaded by providing a dotted Python path (e.g. `--paramModel m
 
 ### Mappings: `rabbit/mappings/`
 Base class `Mapping` in `mapping.py` defines `compute_flat(params, observables)`, which is a differentiable transformation of the flat bin vector. The framework propagates uncertainties through it via automatic differentiation (`tf.GradientTape`). Built-in mappings (`Select`, `Project`, `Normalize`, `Ratio`, `Normratio`) live in `project.py` and `ratio.py`. Custom mappings follow the same pattern as param models.
+Mappings that are a plain selection and summation of input bins (`Select`, `Project`) also implement `output_indices()`, returning the flat output-bin index each input bin contributes to (`-1` if unused). This is what `--computeSaturatedProjectionTests` uses to build a `SaturatedProjectModel` (one free parameter per output bin, applied to the input bins feeding it); mappings that are not of this form return `None` and are skipped.
 
 ### Bin scripts: `bin/`
 Entry points registered in `pyproject.toml`. The main one is `rabbit_fit.py`; others are diagnostic/plotting scripts. All use `rabbit/parsing.py` for shared CLI arguments.
