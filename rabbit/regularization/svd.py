@@ -8,7 +8,7 @@ class SVD(Regularizer):
     Singular Value Decomposition (SVD) see: https://arxiv.org/abs/hep-ph/9509307
     """
 
-    def __init__(self, mapping, dtype):
+    def __init__(self, mapping, dtype, indata=None):
         if len(mapping.channel_info) > 1:
             raise NotImplementedError(
                 "Regularization currently only works for 1 channel at a time; use multiple regularizers if you want to penalize multiple channels."
