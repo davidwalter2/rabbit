@@ -96,6 +96,42 @@ def estimate_smallest_singular_value(L):
     return s_min, z_min
 
 
+def estimate_smallest_singular_value_device(L, iters=8):
+    """Device-side counterpart of :func:`estimate_smallest_singular_value`.
+
+    Inverse iteration on L L^T: z <- (L L^T)^-1 z, normalized -- each pass
+    two O(n^2) triangular solves on the device, so nothing but two scalars
+    and one n-vector ever cross to the host, where the Cline et al.
+    recurrence above is inherently sequential and needs the full factor
+    downloaded (measured ~1 s/outer-iteration at n=4000 over PCIe).
+
+    Convergence is governed by the eigenvalue separation of L L^T, which is
+    extreme precisely in the near-singular regime the trust-region hard
+    case lives in -- there a couple of iterations give machine-accurate
+    estimates. Far from singularity the estimate is only an upper bound on
+    sigma_min; every use in the solver is safe against that: the lambda_lb
+    update only becomes looser, and the hard-case acceptance is guarded by
+    an explicit model-value comparison at the call site.
+
+    Returns (s_min, z_min) as (python float, numpy [n]) with ||z_min|| = 1.
+    """
+    n = tf.shape(L)[0]
+    # deterministic start with broad spectral support (no randomness in
+    # graphs; resume/reproducibility)
+    z = tf.where(
+        tf.range(n) % 2 == 0,
+        tf.ones([n], dtype=L.dtype),
+        -tf.ones([n], dtype=L.dtype),
+    )
+    z = z / tf.norm(z)
+    for _ in range(iters):
+        z = tf.squeeze(tf.linalg.cholesky_solve(L, z[:, None]), axis=-1)
+        z = z / tf.norm(z)
+    # Rayleigh quotient: sigma_min^2 ~ z.(L L^T)z = ||L^T z||^2
+    s_min = float(tf.norm(tf.linalg.matvec(L, z, transpose_a=True)))
+    return s_min, z.__array__()
+
+
 def get_boundaries_intersections(z, d, trust_radius):
     """Solve ||z + t d|| == trust_radius for t; return [t_low, t_high]."""
     a = float(np.dot(d, d))
@@ -305,7 +341,7 @@ class IterativeSubproblem:
 
                 if p_norm < tr_radius:
                     # inside the boundary with lambda > 0: hard-case territory
-                    s_min, z_min = estimate_smallest_singular_value(L.__array__())
+                    s_min, z_min = estimate_smallest_singular_value_device(L)
 
                     p_np = p.__array__()
                     ta, tb = get_boundaries_intersections(p_np, z_min, tr_radius)
@@ -321,8 +357,17 @@ class IterativeSubproblem:
                         quadratic_term + lambda_current * tr_radius**2
                     )
                     if relative_error <= self.k_hard:
-                        p = p_np + step_len * z_min
-                        break
+                        # Guard: only accept the corrected step if it actually
+                        # lowers the model. The stop criterion trusts s_min,
+                        # and any estimator (the LINPACK recurrence included)
+                        # can be off far from singularity -- accepting a junk
+                        # correction hands the outer loop a poor step it then
+                        # rejects, which showed up as a doubled outer
+                        # iteration count on GPU rounding.
+                        p_hat = p_np + step_len * z_min
+                        if self.model_value(p_hat) <= self.model_value(p_np):
+                            p = p_hat
+                            break
 
                     lambda_ub = lambda_current
                     lambda_lb = max(lambda_lb, lambda_current - s_min**2)
@@ -356,15 +401,18 @@ class IterativeSubproblem:
                     hits_boundary = False
                     break
 
-                s_min, z_min = estimate_smallest_singular_value(L.__array__())
+                s_min, z_min = estimate_smallest_singular_value_device(L)
                 step_len = tr_radius
 
                 if (
                     step_len**2 * s_min**2
                     <= self.k_hard * lambda_current * tr_radius**2
                 ):
-                    p = step_len * z_min
-                    break
+                    # same guard as above: the step must descend the model
+                    p_hat = step_len * z_min
+                    if self.model_value(p_hat) <= self.fun:
+                        p = p_hat
+                        break
 
                 lambda_ub = lambda_current
                 lambda_lb = max(lambda_lb, lambda_current - s_min**2)

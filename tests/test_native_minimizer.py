@@ -12,6 +12,7 @@ Three layers, from unit to integration:
    same tensor.
 """
 
+import math
 import tempfile
 
 import numpy as np
@@ -524,3 +525,32 @@ def test_trust_krylov_rosenbrock():
     x0 = np.array([1.3, 0.7, 0.8, 1.9, 1.2])
     res = minimize_trust_krylov(fun, closure, _hvp, set_point, x0.copy())
     np.testing.assert_allclose(res.x, np.ones(n), atol=1e-5)
+
+
+def test_device_smallest_singular_estimator():
+    """Inverse-iteration estimator vs the true sigma_min: near-singular
+    matrices (the regime the hard case uses it in) must be essentially
+    exact; well-conditioned ones need only a safe same-order upper bound."""
+    from rabbit.minimizer.exact import estimate_smallest_singular_value_device
+
+    rng = np.random.default_rng(5)
+    for gap in (1e-8, 1e-4, 1e-1):
+        for n in (10, 50):
+            Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+            eigs = np.linspace(1.0, 10.0, n)
+            eigs[0] = gap  # smallest eigenvalue of L L^T = sigma_min^2
+            A = Q @ np.diag(eigs) @ Q.T
+            L = tf.constant(np.linalg.cholesky(A))
+            s_est, z_est = estimate_smallest_singular_value_device(L)
+            s_true = math.sqrt(gap)
+            # Rayleigh quotient is an upper bound on sigma_min
+            assert s_est >= s_true * (1 - 1e-9)
+            if gap <= 1e-4:
+                # strong separation: inverse iteration is converged
+                assert s_est <= s_true * (1 + 1e-6)
+                # and z is the bottom eigenvector
+                overlap = abs(z_est @ Q[:, 0])
+                assert overlap > 1 - 1e-8
+            else:
+                assert s_est <= s_true * 10  # same order even when hard
+            assert abs(np.linalg.norm(z_est) - 1) < 1e-12
