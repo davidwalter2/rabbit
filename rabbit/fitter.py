@@ -14,11 +14,7 @@ from rabbit import external_likelihood, io_tools
 from rabbit import preconditioner as precond
 from rabbit import tfhelpers as tfh
 from rabbit.bbstat.bbstat import BinByBinStat
-from rabbit.callbacks import (
-    RESTART_MIN_IMPROVEMENT,
-    FitterCallback,
-    merge_callbacks,
-)
+from rabbit.callbacks import RESTART_MIN_IMPROVEMENT, FitterCallback, merge_callbacks
 from rabbit.impacts import (
     asym_impacts,
     global_asym_impacts,
@@ -26,6 +22,7 @@ from rabbit.impacts import (
     nonprofiled_impacts,
     traditional_impacts,
 )
+from rabbit.minimizer import minimize_trust_exact
 from rabbit.tfhelpers import edmval_cov
 
 logger = logging.child_logger(__name__)
@@ -2383,6 +2380,29 @@ class Fitter:
                 logger.info(f"  - edmval: {edmval}")
             return pc.hess_to_internal(hess.__array__())
 
+        # Native (TF) minimizer counterparts of the callbacks above. Same
+        # contract and the same internal coordinates, but the gradient and
+        # Hessian stay tf tensors: with preconditioning off they never leave
+        # the device, and the subproblem factorizes there either way.
+        def native_loss(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
+            return float(self.loss_val())
+
+        def native_closure(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
+            val, grad, hess = self.loss_val_grad_hess()
+            if self.diagnostics:
+                cond_number = tfh.cond_number(hess)
+                logger.info(f"  - Condition number: {cond_number}")
+                edmval = tfh.edmval(grad, hess)
+                logger.info(f"  - edmval: {edmval}")
+            if pc.enabled:
+                grad = tf.constant(pc.grad_to_internal(grad.__array__()))
+                hess = tf.constant(pc.hess_to_internal(hess.__array__()))
+            return float(val), grad, hess
+
         # scipy works in internal coordinates throughout; y = 0 at the point the
         # transform was built.
         xval = pc_cell[0].from_physical(self.x.numpy())
@@ -2430,16 +2450,26 @@ class Fitter:
         while True:
             cb = FitterCallback(xval, self.earlyStopping)
             try:
-                res = scipy.optimize.minimize(
-                    scipy_loss,
-                    xval,
-                    method=self.minimizer_method,
-                    jac=True,
-                    tol=0.0,
-                    callback=cb,
-                    options=sci_opts,
-                    **info_minimize,
-                )
+                if self.minimizer_method == "tf-trust-exact":
+                    res = minimize_trust_exact(
+                        native_loss,
+                        native_closure,
+                        xval,
+                        gtol=sci_opts.get("gtol", 0.0),
+                        maxiter=sci_opts.get("maxiter"),
+                        callback=cb,
+                    )
+                else:
+                    res = scipy.optimize.minimize(
+                        scipy_loss,
+                        xval,
+                        method=self.minimizer_method,
+                        jac=True,
+                        tol=0.0,
+                        callback=cb,
+                        options=sci_opts,
+                        **info_minimize,
+                    )
             except Exception as ex:
                 # minimizer could have called the loss or hessp functions with "random" values, so restore the
                 # state from the end of the last iteration before the exception

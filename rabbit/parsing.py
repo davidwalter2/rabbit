@@ -212,13 +212,18 @@ def common_parser():
         choices=[
             "trust-krylov",
             "trust-exact",
+            "tf-trust-exact",
             "BFGS",
             "L-BFGS-B",
             "CG",
             "trust-ncg",
             "dogleg",
         ],
-        help="Mnimizer method used in scipy.optimize.minimize for the nominal fit minimization",
+        help="Minimizer method used for the nominal fit minimization. All but "
+        "'tf-trust-exact' are dispatched to scipy.optimize.minimize; "
+        "'tf-trust-exact' is a native TensorFlow port of trust-exact that keeps "
+        "the Hessian and the subproblem's Cholesky factorizations on the "
+        "TensorFlow device instead of round-tripping through LAPACK",
     )
     parser.add_argument(
         "--precondition",

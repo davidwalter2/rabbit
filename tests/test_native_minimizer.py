@@ -1,0 +1,251 @@
+"""Tests for the native TF trust-region minimizer (tf-trust-exact).
+
+Three layers, from unit to integration:
+
+1. the subproblem against scipy's private ``IterativeSubproblem`` on random
+   quadratic models -- positive-definite and indefinite Hessians, interior
+   and boundary radii. The lambda searches differ slightly (we do not use
+   the potrf failure index, see rabbit/minimizer/exact.py), so steps are
+   compared by model value, not bitwise.
+2. the full minimizer against scipy trust-exact on standard problems.
+3. a full fit through the Fitter against the scipy trust-exact fit on the
+   same tensor.
+"""
+
+import tempfile
+
+import numpy as np
+import pytest
+import tensorflow as tf
+
+from rabbit import fitter, inputdata
+from rabbit.minimizer import minimize_trust_exact
+from rabbit.minimizer.exact import IterativeSubproblem
+from rabbit.param_models.helpers import load_model
+
+from .test_sparse_fit import make_options, make_test_tensor, run_fit
+
+# --- 1. subproblem vs scipy ----------------------------------------------
+
+
+def _random_model(n, rng, definite):
+    A = rng.standard_normal((n, n))
+    Q, _ = np.linalg.qr(A)
+    if definite:
+        eigs = rng.uniform(0.1, 10.0, n)
+    else:
+        eigs = rng.uniform(-5.0, 10.0, n)
+        eigs[0] = -abs(eigs[0]) - 0.1  # guarantee indefiniteness
+    H = Q @ np.diag(eigs) @ Q.T
+    g = rng.standard_normal(n)
+    return g, H
+
+
+def _exact_subproblem_solution(g, H, tr_radius):
+    """Exact trust-region step by eigendecomposition + bisection on the
+    secular equation. Reference for both solvers (hard case not handled;
+    the random g used here is never orthogonal to the leading eigenvector).
+    """
+    eigval, eigvec = np.linalg.eigh(H)
+    gt = eigvec.T @ g
+
+    def p_of(lam):
+        return -eigvec @ (gt / (eigval + lam))
+
+    lam_min = max(0.0, -eigval[0])
+    if lam_min == 0.0 and np.linalg.norm(p_of(0.0)) <= tr_radius:
+        return p_of(0.0)
+
+    lo, hi = lam_min + 1e-14, lam_min + 1.0
+    while np.linalg.norm(p_of(hi)) > tr_radius:
+        hi *= 2
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if np.linalg.norm(p_of(mid)) > tr_radius:
+            lo = mid
+        else:
+            hi = mid
+    return p_of(hi)
+
+
+@pytest.mark.parametrize("definite", [True, False])
+@pytest.mark.parametrize("tr_radius", [0.01, 1.0, 100.0])
+def test_subproblem_matches_scipy(definite, tr_radius):
+    from scipy.optimize._trustregion_exact import IterativeSubproblem as ScipySubproblem
+
+    rng = np.random.default_rng(1234)
+    for trial in range(5):
+        g, H = _random_model(10, rng, definite)
+
+        m_tf = IterativeSubproblem(
+            0.0, tf.constant(g, tf.float64), tf.constant(H, tf.float64)
+        )
+        p_tf, hb_tf = m_tf.solve(tr_radius)
+
+        m_sp = ScipySubproblem(
+            x=np.zeros(10), fun=lambda x: 0.0, jac=lambda x: g, hess=lambda x: H
+        )
+        p_sp, hb_sp = m_sp.solve(tr_radius)
+
+        def model(p):
+            return g @ p + 0.5 * p @ H @ p
+
+        p_exact = _exact_subproblem_solution(g, H, tr_radius)
+        best = model(p_exact)
+        assert best < 0
+
+        # Both solvers stop within the k_easy/k_hard bands of the exact
+        # optimum, so steps differ slightly, and the boundary criterion
+        # |norm(p) - radius|/radius <= k_easy allows up to a 10% overshoot
+        # of the radius (scipy returns such steps too). What must hold is
+        # that band plus achieving ~all of the optimal model reduction.
+        assert np.linalg.norm(p_tf) <= tr_radius * (1 + m_tf.k_easy + 1e-6)
+        assert model(p_tf) <= 0.95 * best  # >= 95% of the exact reduction
+        assert model(p_sp) <= 0.95 * best  # scipy meets the same bar
+        if hb_tf != hb_sp:
+            # can only disagree when the interior/boundary distinction is
+            # marginal, i.e. the unconstrained step ~ on the boundary
+            assert abs(np.linalg.norm(p_exact) - tr_radius) / tr_radius < 0.15
+
+
+# --- 2. minimizer vs scipy trust-exact ------------------------------------
+
+
+def _tf_problem(f_tf, n):
+    """Compiled (fun, closure) pair for the native minimizer plus numpy
+    (f, g, h) for scipy, all from one TF definition of the objective."""
+    xv = tf.Variable(tf.zeros(n, dtype=tf.float64))
+
+    @tf.function
+    def _val(x):
+        xv.assign(x)
+        return f_tf(xv)
+
+    @tf.function
+    def _vgh(x):
+        xv.assign(x)
+        with tf.GradientTape() as t2:
+            with tf.GradientTape() as t1:
+                v = f_tf(xv)
+            grad = t1.gradient(v, xv)
+        hess = t2.jacobian(grad, xv)
+        return v, grad, hess
+
+    def fun(x):
+        return float(_val(tf.constant(x, tf.float64)))
+
+    def closure(x):
+        v, grad, hess = _vgh(tf.constant(x, tf.float64))
+        return float(v), grad, hess
+
+    def f_np(x):
+        return fun(x)
+
+    def g_np(x):
+        _, grad, _ = _vgh(tf.constant(x, tf.float64))
+        return grad.numpy()
+
+    def h_np(x):
+        _, _, hess = _vgh(tf.constant(x, tf.float64))
+        return hess.numpy()
+
+    return fun, closure, f_np, g_np, h_np
+
+
+def test_rosenbrock_matches_scipy():
+    import scipy.optimize
+
+    def rosen(x):
+        return tf.reduce_sum(100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1 - x[:-1]) ** 2)
+
+    x0 = np.array([-1.2, 1.0, -0.5, 2.0, 0.3])
+    fun, closure, f_np, g_np, h_np = _tf_problem(rosen, 5)
+
+    res = minimize_trust_exact(fun, closure, x0)
+    ref = scipy.optimize.minimize(
+        f_np, x0, jac=g_np, hess=h_np, method="trust-exact", tol=0.0
+    )
+
+    np.testing.assert_allclose(res.x, np.ones(5), atol=1e-6)
+    np.testing.assert_allclose(res.x, ref.x, atol=1e-6)
+    assert res.fun <= ref.fun + 1e-10
+
+
+def test_ill_conditioned_quadratic():
+    rng = np.random.default_rng(42)
+    n = 30
+    Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    H = Q @ np.diag(np.logspace(-4, 2, n)) @ Q.T
+    b = rng.standard_normal(n)
+    Ht = tf.constant(H)
+    bt = tf.constant(b)
+
+    def quad(x):
+        return 0.5 * tf.tensordot(x, tf.linalg.matvec(Ht, x), 1) + tf.tensordot(
+            bt, x, 1
+        )
+
+    fun, closure, *_ = _tf_problem(quad, n)
+    res = minimize_trust_exact(fun, closure, np.zeros(n))
+
+    x_exact = -np.linalg.solve(H, b)
+    np.testing.assert_allclose(res.x, x_exact, atol=1e-6, rtol=1e-6)
+
+
+def test_callback_and_early_stopping():
+    """The fitter's callback contract: called per iteration with .x/.fun,
+    and a raise must propagate (that is how early stopping works)."""
+
+    def rosen(x):
+        return tf.reduce_sum(100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1 - x[:-1]) ** 2)
+
+    fun, closure, *_ = _tf_problem(rosen, 3)
+
+    seen = []
+
+    def cb(intermediate_result):
+        seen.append((intermediate_result.fun, intermediate_result.x.copy()))
+        if len(seen) >= 4:
+            raise ValueError("stop")
+
+    with pytest.raises(ValueError):
+        minimize_trust_exact(fun, closure, np.array([-1.2, 1.0, 0.5]), callback=cb)
+    assert len(seen) == 4
+    assert all(np.isfinite(f) for f, _ in seen)
+
+
+# --- 3. full fit through the Fitter ---------------------------------------
+
+
+def run_fit_native(filename):
+    indata_obj = inputdata.FitInputData(filename)
+    param_model = load_model("Mu", indata_obj)
+
+    options = make_options(minimizerMethod="tf-trust-exact")
+    f = fitter.Fitter(indata_obj, param_model, options)
+    f.set_nobs(indata_obj.data_obs)
+    f.minimize()
+
+    val, grad, hess = f.loss_val_grad_hess()
+    from rabbit.tfhelpers import edmval_cov
+
+    edmval, cov = edmval_cov(grad, hess)
+    return {
+        "x": f.x.numpy(),
+        "loss": float(val),
+        "edmval": float(edmval),
+        "status": f.minimizer_status(),
+    }
+
+
+def test_fit_matches_scipy():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = make_test_tensor(tmpdir)
+
+        res_native = run_fit_native(fname)
+        res_ref = run_fit(fname)  # trust-krylov: same likelihood, same minimum
+
+        x_ref = np.concatenate([res_ref["param"], res_ref["theta"]])
+        np.testing.assert_allclose(res_native["x"], x_ref, atol=1e-5, rtol=1e-4)
+        assert res_native["edmval"] < 1e-4
+        assert res_native["status"]["nit"] > 0
