@@ -1620,26 +1620,44 @@ class Fitter:
         return expvars
 
     def _init_logk_scaled(self):
-        """Build an internal copy of indata.logk for the yield-computation
-        hot path, pre-multiplied per (bin, proc) by the param-model factor
-        evaluated at xparamdefault.
+        """Prepare the param-model scaling of the systematic variations for
+        the yield-computation hot path.
 
         For systematic_type == "log_normal" the multiplicative form
         ``rnorm * exp(θ·logk) * norm`` already carries the param-model
-        scaling through to the variation, so no copy is needed and
+        scaling through to the variation, so nothing is needed and
         self.logk / self.logk_csr alias the indata tensors.
 
         For systematic_type == "normal" the linearized variation
-        ``rnorm * norm + θ·logk`` does not scale with rnorm. We absorb a
-        constant rnorm_init = param_model.compute(xparamdefault) into logk
-        once, so the relative size of an additive variation matches the
-        multiplicative case at the linearization point. The scaling is a
-        constant, so the hot path remains strictly linear in θ.
+        ``rnorm * norm + θ·logk`` does not scale with rnorm, so a constant
+        rnorm_init = param_model.compute(xparamdefault) has to be absorbed
+        into the variation, so that the relative size of an additive
+        variation matches the multiplicative case at the linearization
+        point.
+
+        rnorm_init carries no systematic index, so it factors out of the
+        contraction over systematics:
+
+            sum_s (rnorm_init[b,p] * logk[b,p,s]) * theta[s]
+              == rnorm_init[b,p] * sum_s logk[b,p,s] * theta[s]
+
+        We therefore keep logk aliased and apply the factor to the
+        [nbins, nproc] contraction *result* instead of to the
+        [nbins, nproc, nsyst] input. This is exactly equivalent, and avoids
+        allocating a second full-size copy of logk (and, in sparse mode,
+        rebuilding the CSR matrix) at construction time. The scaling is
+        still a constant, so the hot path remains strictly linear in θ.
         """
+        # scaling factors applied to the contraction result; None when the
+        # multiplicative form already carries the param-model scaling
+        self.rnorm_init = None
+        self.rnorm_init_at_norm = None
+
+        self.logk = self.indata.logk
+        if self.indata.sparse:
+            self.logk_csr = self.indata.logk_csr
+
         if self.indata.systematic_type != "normal" or self.param_model.nparams == 0:
-            self.logk = self.indata.logk
-            if self.indata.sparse:
-                self.logk_csr = self.indata.logk_csr
             return
 
         rnorm_init = self.param_model.compute(self.param_model.xparamdefault, full=True)
@@ -1648,27 +1666,14 @@ class Fitter:
         )
 
         if self.indata.sparse:
-            # logk dense shape is [norm_nnz, nsyst_or_2nsyst]; each value
-            # at logk.indices[i] = (norm_pos, syst_pos) corresponds to the
-            # (bin, proc) pair stored at norm.indices[norm_pos]. Gather
-            # rnorm_init through this two-level mapping.
-            rnorm_at_norm = tf.gather_nd(rnorm_init, self.indata.norm.indices)
-            scale_per_logk = tf.gather(rnorm_at_norm, self.indata.logk.indices[:, 0])
-            new_values = self.indata.logk.values * scale_per_logk
-            self.logk = tf.SparseTensor(
-                self.indata.logk.indices,
-                new_values,
-                self.indata.logk.dense_shape,
-            )
-            self.logk_csr = tf_sparse_csr.CSRSparseMatrix(self.logk)
+            # The CSR contraction returns one value per non-zero of norm, so
+            # the factor is gathered onto the same [norm_nnz] layout. This is
+            # much smaller than the per-logk-entry scaling it replaces.
+            self.rnorm_init_at_norm = tf.gather_nd(rnorm_init, self.indata.norm.indices)
         else:
-            # Dense logk: [nbinsfull, nproc, nsyst] symmetric, or
-            # [nbinsfull, nproc, 2, nsyst] asymmetric. Broadcast rnorm_init
-            # over the trailing axes.
-            if self.indata.symmetric_tensor:
-                self.logk = self.indata.logk * rnorm_init[..., None]
-            else:
-                self.logk = self.indata.logk * rnorm_init[..., None, None]
+            # Dense: logsnorm is [nbins, nproc], matching rnorm_init directly
+            # (sliced to nbins when masked channels are excluded).
+            self.rnorm_init = rnorm_init
 
     def _compute_yields_noBBB(self, full=True, compute_norm=True):
         # full: compute yields inclduing masked channels
@@ -1725,6 +1730,11 @@ class Fitter:
                 snormnorm_sparse = snormnorm_sparse * rnorm
             else:  # "normal"
                 # values[i] = norm[i] * rnorm[bin, proc] + logsnorm[i]
+                # rnorm_init factors out of the contraction (see
+                # _init_logk_scaled), so it is applied here rather than
+                # being baked into logk.
+                if self.rnorm_init_at_norm is not None:
+                    logsnorm = logsnorm * self.rnorm_init_at_norm
                 snormnorm_sparse = self.indata.norm * rnorm
                 snormnorm_sparse = snormnorm_sparse.with_values(
                     snormnorm_sparse.values + logsnorm
@@ -1778,6 +1788,11 @@ class Fitter:
                 snormnorm = snorm * norm
                 normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
+                # rnorm_init factors out of the contraction (see
+                # _init_logk_scaled), so it is applied here rather than
+                # being baked into logk.
+                if self.rnorm_init is not None:
+                    logsnorm = logsnorm * self.rnorm_init[:nbins]
                 normcentral = norm * rnorm + logsnorm
 
             nexpcentral = tf.reduce_sum(normcentral, axis=-1)
