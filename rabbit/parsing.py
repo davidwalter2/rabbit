@@ -214,6 +214,7 @@ def common_parser():
             "trust-exact",
             "tf-trust-exact",
             "tf-trust-ncg",
+            "tf-trust-krylov",
             "BFGS",
             "L-BFGS-B",
             "CG",
@@ -229,7 +230,11 @@ def common_parser():
         "counterpart (the same subproblem as scipy's trust-ncg, and the "
         "practical stand-in for trust-krylov) with the whole CG inner loop "
         "compiled as one TF graph call, i.e. no python round trip per "
-        "Hessian-vector product",
+        "Hessian-vector product; 'tf-trust-krylov' is a native GLTR (the "
+        "trust-krylov algorithm): Lanczos on device with the subproblem "
+        "solved to optimality within the Krylov subspace via host-side "
+        "tridiagonal solves, reusing the radius-independent Krylov data "
+        "across re-solves after rejected steps",
     )
     parser.add_argument(
         "--precondition",

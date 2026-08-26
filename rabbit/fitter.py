@@ -22,7 +22,11 @@ from rabbit.impacts import (
     nonprofiled_impacts,
     traditional_impacts,
 )
-from rabbit.minimizer import minimize_trust_exact, minimize_trust_ncg
+from rabbit.minimizer import (
+    minimize_trust_exact,
+    minimize_trust_krylov,
+    minimize_trust_ncg,
+)
 from rabbit.tfhelpers import edmval_cov
 
 logger = logging.child_logger(__name__)
@@ -2494,6 +2498,17 @@ class Fitter:
                     )
                 elif self.minimizer_method == "tf-trust-ncg":
                     res = minimize_trust_ncg(
+                        native_loss,
+                        native_grad_closure,
+                        native_hessp(),
+                        native_set_point,
+                        xval,
+                        gtol=sci_opts.get("gtol", 0.0),
+                        maxiter=sci_opts.get("maxiter"),
+                        callback=cb,
+                    )
+                elif self.minimizer_method == "tf-trust-krylov":
+                    res = minimize_trust_krylov(
                         native_loss,
                         native_grad_closure,
                         native_hessp(),

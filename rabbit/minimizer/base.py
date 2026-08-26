@@ -28,6 +28,7 @@ from scipy.optimize import OptimizeResult
 from wums import logging
 
 from .exact import IterativeSubproblem
+from .gltr import GLTRSolver, GLTRSubproblem
 from .krylov import CGSteihaugSubproblem, SteihaugCGSolver
 
 logger = logging.child_logger(__name__)
@@ -244,6 +245,46 @@ def minimize_trust_ncg(
         closure2,
         x0,
         subproblem_cls=CGSteihaugSubproblem,
+        gtol=gtol,
+        maxiter=maxiter,
+        callback=callback,
+        subproblem_kwargs=dict(
+            solver=solver, set_point=set_point, cg_maxiter=cg_maxiter
+        ),
+    )
+
+
+def minimize_trust_krylov(
+    fun,
+    closure,
+    hessp,
+    set_point,
+    x0,
+    gtol=0.0,
+    maxiter=None,
+    callback=None,
+    cg_maxiter=None,
+):
+    """Native GLTR trust-region minimization (cf. scipy trust-krylov).
+
+    Same contract as :func:`minimize_trust_ncg`; the subproblem is solved
+    to optimality within the Krylov subspace (Lanczos on device,
+    tridiagonal solves on host) instead of truncated at the boundary, and
+    re-solves after rejected steps reuse the radius-independent Krylov
+    data, often costing no new Hessian-vector products.
+    """
+    solver = GLTRSolver(hessp, kmax=cg_maxiter)
+
+    def closure2(x):
+        out = closure(x)
+        x_pinned = np.array(x, dtype=np.float64, copy=True)
+        return out[0], out[1], x_pinned
+
+    return _minimize_trust_region(
+        fun,
+        closure2,
+        x0,
+        subproblem_cls=GLTRSubproblem,
         gtol=gtol,
         maxiter=maxiter,
         callback=callback,
