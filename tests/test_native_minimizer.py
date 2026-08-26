@@ -554,3 +554,30 @@ def test_device_smallest_singular_estimator():
             else:
                 assert s_est <= s_true * 10  # same order even when hard
             assert abs(np.linalg.norm(z_est) - 1) < 1e-12
+
+
+def test_nan_proposal_does_not_freeze_the_radius():
+    """A proposal whose objective overflows must shrink the trust radius.
+
+    With IEEE comparisons a NaN rho neither shrinks nor accepts, freezing
+    the loop at a fixed radius until early stopping gives up far from the
+    minimum -- observed in preconditioned coordinates where an internal
+    step of norm 1 is an enormous physical step. The objective here is
+    quadratic near the origin but NaN outside |x| < 3, so the minimizer
+    must reject-and-shrink its way back inside."""
+
+    H = np.diag([1.0, 4.0])
+    b = np.array([1.0, -2.0])
+    Ht, bt = tf.constant(H), tf.constant(b)
+
+    def f_tf(x):
+        quad = 0.5 * tf.tensordot(x, tf.linalg.matvec(Ht, x), 1) + tf.tensordot(
+            bt, x, 1
+        )
+        bad = tf.reduce_max(tf.abs(x)) >= 3.0
+        return tf.where(bad, tf.constant(float("nan"), tf.float64), quad)
+
+    fun, closure, *_ = _tf_problem(f_tf, 2)
+    res = minimize_trust_exact(fun, closure, np.array([2.0, -2.0]))
+    x_exact = -np.linalg.solve(H, b)
+    np.testing.assert_allclose(res.x, x_exact, atol=1e-8)

@@ -117,8 +117,14 @@ def _minimize_trust_region(
             warnflag = 2
             break
         rho = actual_reduction / predicted_reduction
-        # NaN rho (NaN proposal value) compares False everywhere: the step is
-        # rejected and the radius shrinks, as in scipy
+        # A non-finite proposal value must count as a hard rejection. IEEE
+        # comparisons on a NaN rho are all False, which would neither shrink
+        # the radius nor accept the step -- freezing the loop at a fixed
+        # radius until early stopping gives up far from the minimum.
+        # Observed with preconditioned coordinates, where an internal step
+        # of norm 1 can be an enormous physical step whose loss overflows.
+        if not np.isfinite(rho):
+            rho = -np.inf
 
         if rho < 0.25:
             trust_radius *= 0.25
