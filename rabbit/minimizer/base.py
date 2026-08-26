@@ -28,6 +28,7 @@ from scipy.optimize import OptimizeResult
 from wums import logging
 
 from .exact import IterativeSubproblem
+from .krylov import CGSteihaugSubproblem, SteihaugCGSolver
 
 logger = logging.child_logger(__name__)
 
@@ -195,4 +196,58 @@ def minimize_trust_exact(fun, closure, x0, gtol=0.0, maxiter=None, callback=None
         gtol=gtol,
         maxiter=maxiter,
         callback=callback,
+    )
+
+
+def minimize_trust_ncg(
+    fun,
+    closure,
+    hessp,
+    set_point,
+    x0,
+    gtol=0.0,
+    maxiter=None,
+    callback=None,
+    cg_maxiter=None,
+):
+    """Native matrix-free trust-region minimization (cf. scipy trust-ncg).
+
+    Same outer loop as :func:`minimize_trust_exact`, with the Steihaug-CG
+    subproblem running as one TF graph call per solve. ``closure`` here only
+    needs (float, grad); the Hessian never materializes.
+
+    Parameters
+    ----------
+    fun : callable
+        x (numpy) -> float, judges proposed steps.
+    closure : callable
+        x (numpy) -> (float, grad[, ...]) with the gradient a tf tensor in
+        the same coordinates as ``hessp``. Called once per accepted step.
+    hessp : callable
+        Graph-compatible v -> H @ v at the fitter's current point.
+    set_point : callable or None
+        x (numpy) -> None; re-pins the fitter state to the subproblem's
+        linearization point before HVPs run (``fun`` evaluations at proposed
+        points move that state in between).
+    cg_maxiter : int or None
+        Cap on CG iterations per solve (None: the dimension).
+    """
+    solver = SteihaugCGSolver(hessp)
+
+    def closure2(x):
+        out = closure(x)
+        x_pinned = np.array(x, dtype=np.float64, copy=True)
+        return out[0], out[1], x_pinned
+
+    return _minimize_trust_region(
+        fun,
+        closure2,
+        x0,
+        subproblem_cls=CGSteihaugSubproblem,
+        gtol=gtol,
+        maxiter=maxiter,
+        callback=callback,
+        subproblem_kwargs=dict(
+            solver=solver, set_point=set_point, cg_maxiter=cg_maxiter
+        ),
     )

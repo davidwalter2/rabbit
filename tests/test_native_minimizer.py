@@ -217,11 +217,14 @@ def test_callback_and_early_stopping():
 # --- 3. full fit through the Fitter ---------------------------------------
 
 
-def run_fit_native(filename):
+def run_fit_native(filename, method="tf-trust-exact", precondition=False):
     indata_obj = inputdata.FitInputData(filename)
     param_model = load_model("Mu", indata_obj)
 
-    options = make_options(minimizerMethod="tf-trust-exact")
+    kwargs = dict(minimizerMethod=method)
+    if precondition:
+        kwargs.update(precondition=True, preconditionParams=[".*"])
+    options = make_options(**kwargs)
     f = fitter.Fitter(indata_obj, param_model, options)
     f.set_nobs(indata_obj.data_obs)
     f.minimize()
@@ -238,14 +241,142 @@ def run_fit_native(filename):
     }
 
 
-def test_fit_matches_scipy():
+@pytest.mark.parametrize("method", ["tf-trust-exact", "tf-trust-ncg"])
+@pytest.mark.parametrize("precondition", [False, True])
+def test_fit_matches_scipy(method, precondition):
     with tempfile.TemporaryDirectory() as tmpdir:
         fname = make_test_tensor(tmpdir)
 
-        res_native = run_fit_native(fname)
+        res_native = run_fit_native(fname, method, precondition)
         res_ref = run_fit(fname)  # trust-krylov: same likelihood, same minimum
 
         x_ref = np.concatenate([res_ref["param"], res_ref["theta"]])
         np.testing.assert_allclose(res_native["x"], x_ref, atol=1e-5, rtol=1e-4)
         assert res_native["edmval"] < 1e-4
         assert res_native["status"]["nit"] > 0
+
+
+# --- 4. Steihaug-CG (tf-trust-ncg) ----------------------------------------
+
+
+@pytest.mark.parametrize("definite", [True, False])
+@pytest.mark.parametrize("tr_radius", [0.01, 1.0, 100.0])
+def test_cg_subproblem_matches_scipy(definite, tr_radius):
+    """Same algorithm as scipy's CGSteihaugSubproblem, so unlike the
+    nearly-exact solver the iterates are deterministic and the steps must
+    agree to float precision."""
+    from scipy.optimize._trustregion_ncg import CGSteihaugSubproblem as ScipyCG
+
+    from rabbit.minimizer.krylov import CGSteihaugSubproblem, SteihaugCGSolver
+
+    rng = np.random.default_rng(4321)
+    for trial in range(5):
+        g, H = _random_model(10, rng, definite)
+        Ht = tf.constant(H, tf.float64)
+
+        solver = SteihaugCGSolver(lambda v: tf.linalg.matvec(Ht, v))
+        m_tf = CGSteihaugSubproblem(
+            0.0, tf.constant(g, tf.float64), np.zeros(10), solver
+        )
+        p_tf, hb_tf = m_tf.solve(tr_radius)
+
+        m_sp = ScipyCG(
+            x=np.zeros(10),
+            fun=lambda x: 0.0,
+            jac=lambda x: g,
+            hess=None,
+            hessp=lambda x, v: H @ v,
+        )
+        p_sp, hb_sp = m_sp.solve(tr_radius)
+
+        np.testing.assert_allclose(p_tf, p_sp, atol=1e-9, rtol=1e-7)
+        assert hb_tf == hb_sp
+
+        # the cached model value handed to the outer loop must price the step
+        def model(p):
+            return g @ p + 0.5 * p @ H @ p
+
+        assert abs(m_tf.model_value(p_tf) - model(p_tf)) < 1e-9 * (1 + abs(model(p_tf)))
+
+
+def test_trust_ncg_rosenbrock():
+    import scipy.optimize
+
+    from rabbit.minimizer import minimize_trust_ncg
+
+    def rosen(x):
+        return tf.reduce_sum(100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1 - x[:-1]) ** 2)
+
+    n = 5
+    xv = tf.Variable(tf.zeros(n, dtype=tf.float64))
+
+    @tf.function
+    def _val(x):
+        xv.assign(x)
+        return rosen(xv)
+
+    @tf.function
+    def _vg(x):
+        xv.assign(x)
+        with tf.GradientTape() as t:
+            v = rosen(xv)
+        return v, t.gradient(v, xv)
+
+    @tf.function
+    def _hvp(p):
+        with tf.autodiff.ForwardAccumulator(xv, p) as acc:
+            with tf.GradientTape() as t:
+                v = rosen(xv)
+            g = t.gradient(v, xv)
+        return acc.jvp(g)
+
+    def fun(x):
+        return float(_val(tf.constant(x, tf.float64)))
+
+    def closure(x):
+        v, g = _vg(tf.constant(x, tf.float64))
+        return float(v), g
+
+    def set_point(x):
+        xv.assign(tf.constant(x, tf.float64))
+
+    x0 = np.array([-1.2, 1.0, -0.5, 2.0, 0.3])
+    res = minimize_trust_ncg(fun, closure, _hvp, set_point, x0.copy())
+    np.testing.assert_allclose(res.x, np.ones(n), atol=1e-5)
+
+    ref = scipy.optimize.minimize(
+        fun,
+        x0.copy(),
+        jac=lambda x: _vg(tf.constant(x, tf.float64))[1].numpy(),
+        hessp=lambda x, v: (
+            set_point(x),
+            _hvp(tf.constant(v, tf.float64)).numpy(),
+        )[1],
+        method="trust-ncg",
+        tol=0.0,
+    )
+    np.testing.assert_allclose(res.x, ref.x, atol=1e-5)
+
+
+def test_pc_tf_transforms_match_numpy():
+    """The TF-graph preconditioner application must reproduce the numpy one
+    (it runs inside the CG loop where numpy cannot)."""
+    from rabbit import preconditioner as precond
+
+    rng = np.random.default_rng(99)
+    n = 20
+    A = rng.standard_normal((n, n))
+    H = A @ A.T + n * np.eye(n)
+    blocks = [("a", np.arange(0, 7)), ("b", np.arange(10, 16))]
+    pc = precond.Preconditioner.from_hessian(H, np.zeros(n), blocks)
+    assert pc.enabled
+
+    apply_T, apply_TT = pc.tf_transforms()
+    for _ in range(3):
+        v = rng.standard_normal(n)
+        np.testing.assert_allclose(
+            apply_T(tf.constant(v)).numpy(), pc._apply_T(v), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            apply_TT(tf.constant(v)).numpy(), pc._apply_TT(v), atol=1e-12
+        )

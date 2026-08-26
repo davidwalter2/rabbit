@@ -22,7 +22,7 @@ from rabbit.impacts import (
     nonprofiled_impacts,
     traditional_impacts,
 )
-from rabbit.minimizer import minimize_trust_exact
+from rabbit.minimizer import minimize_trust_exact, minimize_trust_ncg
 from rabbit.tfhelpers import edmval_cov
 
 logger = logging.child_logger(__name__)
@@ -2403,6 +2403,39 @@ class Fitter:
                 hess = tf.constant(pc.hess_to_internal(hess.__array__()))
             return float(val), grad, hess
 
+        def native_grad_closure(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
+            val, grad = self.loss_val_grad()
+            if pc.enabled:
+                grad = tf.constant(pc.grad_to_internal(grad.__array__()))
+            return float(val), grad
+
+        def native_set_point(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
+
+        def native_hessp():
+            # internal-coordinate HVP, graph-compatible: the pc transform runs
+            # inside the compiled CG loop (numpy per CG iteration would defeat
+            # the on-device solve). Rebuilt per restart along with pc.
+            pc = pc_cell[0]
+            transforms = pc.tf_transforms()
+            if transforms is None:
+
+                def hessp(v):
+                    _, _, hp = self.loss_val_grad_hessp(v)
+                    return hp
+
+            else:
+                apply_T, apply_TT = transforms
+
+                def hessp(v):
+                    _, _, hp = self.loss_val_grad_hessp(apply_T(v))
+                    return apply_TT(hp)
+
+            return hessp
+
         # scipy works in internal coordinates throughout; y = 0 at the point the
         # transform was built.
         xval = pc_cell[0].from_physical(self.x.numpy())
@@ -2454,6 +2487,17 @@ class Fitter:
                     res = minimize_trust_exact(
                         native_loss,
                         native_closure,
+                        xval,
+                        gtol=sci_opts.get("gtol", 0.0),
+                        maxiter=sci_opts.get("maxiter"),
+                        callback=cb,
+                    )
+                elif self.minimizer_method == "tf-trust-ncg":
+                    res = minimize_trust_ncg(
+                        native_loss,
+                        native_grad_closure,
+                        native_hessp(),
+                        native_set_point,
                         xval,
                         gtol=sci_opts.get("gtol", 0.0),
                         maxiter=sci_opts.get("maxiter"),

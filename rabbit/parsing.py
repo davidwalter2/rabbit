@@ -213,17 +213,23 @@ def common_parser():
             "trust-krylov",
             "trust-exact",
             "tf-trust-exact",
+            "tf-trust-ncg",
             "BFGS",
             "L-BFGS-B",
             "CG",
             "trust-ncg",
             "dogleg",
         ],
-        help="Minimizer method used for the nominal fit minimization. All but "
-        "'tf-trust-exact' are dispatched to scipy.optimize.minimize; "
-        "'tf-trust-exact' is a native TensorFlow port of trust-exact that keeps "
-        "the Hessian and the subproblem's Cholesky factorizations on the "
-        "TensorFlow device instead of round-tripping through LAPACK",
+        help="Minimizer method used for the nominal fit minimization. The "
+        "'tf-' prefixed methods are native TensorFlow implementations, the rest "
+        "are dispatched to scipy.optimize.minimize. 'tf-trust-exact' ports "
+        "trust-exact keeping the Hessian and the subproblem's Cholesky "
+        "factorizations on the TensorFlow device instead of round-tripping "
+        "through LAPACK; 'tf-trust-ncg' is the matrix-free Steihaug-CG "
+        "counterpart (the same subproblem as scipy's trust-ncg, and the "
+        "practical stand-in for trust-krylov) with the whole CG inner loop "
+        "compiled as one TF graph call, i.e. no python round trip per "
+        "Hessian-vector product",
     )
     parser.add_argument(
         "--precondition",
