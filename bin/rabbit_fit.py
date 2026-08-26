@@ -873,7 +873,9 @@ def main():
     )
     blinded_fits = [f == 0 or (f > 0 and args.toysDataMode == "observed") for f in fits]
 
-    indata = inputdata.FitInputData(args.filename, args.pseudoData)
+    indata = inputdata.FitInputData(
+        args.filename, args.pseudoData, host_memory=args.nDevices > 1
+    )
 
     model_specs = args.paramModel or [["Mu"]]
     param_model = ph.load_models(model_specs, indata, **vars(args))

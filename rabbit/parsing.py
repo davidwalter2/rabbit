@@ -237,6 +237,18 @@ def common_parser():
         "across re-solves after rejected steps",
     )
     parser.add_argument(
+        "--nDevices",
+        default=1,
+        type=int,
+        help="Shard the likelihood over this many devices (bins-sharded "
+        "data parallelism, GPUs preferred). The main motivation is memory: "
+        "every large tensor in the fit is bins-proportional and gets split "
+        "across the devices, so models that exceed a single GPU's memory "
+        "become fittable; compute also scales when each shard is large "
+        "enough to saturate its device. Only the dense-tensor Poisson/chi2 "
+        "likelihoods are supported (no sparse mode, no --covarianceFit).",
+    )
+    parser.add_argument(
         "--precondition",
         action="store_true",
         help="Reparameterise a block of parameters so the reference Hessian is the "
