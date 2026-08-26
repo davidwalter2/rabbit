@@ -12,6 +12,7 @@ from wums import logging
 
 from rabbit import external_likelihood, io_tools
 from rabbit import preconditioner as precond
+from rabbit import sharding
 from rabbit import tfhelpers as tfh
 from rabbit.bbstat.bbstat import BinByBinStat
 from rabbit.callbacks import RESTART_MIN_IMPROVEMENT, FitterCallback, merge_callbacks
@@ -194,6 +195,12 @@ class Fitter:
         # All BBB state is owned by the BinByBinStat helper. Constructed
         # here, before init_fit_parms, because init_fit_parms's is_linear
         # computation reads self.bbstat.enabled.
+        # Retained for constructing per-shard BinByBinStat instances in
+        # multi-device mode (see _build_shards).
+        self._options = options
+        self.n_devices = int(getattr(options, "nDevices", 1) or 1)
+        self.shards = []
+
         self.bbstat = BinByBinStat(
             indata,
             options,
@@ -449,6 +456,13 @@ class Fitter:
                     tf.function(val.python_function.__get__(self, type(self))),
                 )
 
+        # Multi-device mode: (re)build the per-shard evaluators against the
+        # current parameter layout before the tf.functions that close over
+        # them. Everything the shards borrow (logk, bbstat options, blinding
+        # offsets, frozen mask) exists by this point.
+        if self.n_devices > 1:
+            self._build_shards()
+
         # (re)build instance-level tf.function wrappers for loss/grad/HVP, which
         # are constructed dynamically so that jit_compile and the HVP autodiff
         # mode can be controlled via fit options.
@@ -473,6 +487,12 @@ class Fitter:
             "loss_val_grad_hessp",
             "loss_val_grad_hessp_fwdrev",
             "loss_val_grad_hessp_revrev",
+            # multi-device machinery: shard evaluators hold bound methods and
+            # traced functions; rebuilt from scratch on the copy
+            "shards",
+            "_shard_graph_fns",
+            "_global_view",
+            "_global_graph_fns",
         }
         skip = jit_overrides | dynamic_tf_funcs
         state = {k: v for k, v in self.__dict__.items() if k not in skip}
@@ -481,6 +501,9 @@ class Fitter:
         memo[id(self)] = obj
         for k, v in state.items():
             setattr(obj, k, copy.deepcopy(v, memo))
+        obj.shards = []
+        if obj.n_devices > 1:
+            obj._build_shards()
         obj._make_tf_functions()
         return obj
 
@@ -767,6 +790,13 @@ class Fitter:
         # the offset is chosen to give the saturated likelihood
         nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
         self.lognobs.assign(tf.math.log(nobssafe))
+
+        for shard in self.shards:
+            a, b = shard.indata.start, shard.indata.stop
+            shard.nobs.assign(values[a:b])
+            shard.lognobs.assign(tf.math.log(nobssafe[a:b]))
+            if shard.varnobs is not None:
+                shard.varnobs.assign(self.varnobs[a:b])
 
     def x0defaultassign(self):
         # reset all constraint centers
@@ -2133,7 +2163,365 @@ class Fitter:
     def _compute_loss(self, profile=True):
         return self._compute_nll(profile=profile)
 
+    # Fitter methods that also run per shard: the shard evaluators are
+    # duck-typed stand-ins (see rabbit.sharding), and binding the class's own
+    # unbound methods onto them shares the yields/NLL mathematics -- both
+    # interpolation forms, both systematic types, the BBB machinery -- with
+    # the single-device path by construction.
+    _SHARD_BORROWED_METHODS = (
+        "get_poi",
+        "get_model_nui",
+        "get_theta",
+        "get_x",
+        "_compute_yields_noBBB",
+        "_compute_yields_with_beta",
+        "_compute_ln",
+        "_compute_lbeta",
+        "_compute_lc",
+    )
+
+    def _build_shards(self):
+        """Construct the per-device shard evaluators (multi-device mode).
+
+        Shards partition the observed bins contiguously; each holds its
+        slice of logk / norm / nobs / sumw(2) and its own BinByBinStat
+        (beta and kstat are per-bin, so BBB shards along with everything
+        else). Parameter-level state (x, frozen mask, blinding offsets,
+        param model) is shared -- those tensors are [nparams]-sized and
+        cross devices for kilobytes per evaluation.
+        """
+        if self.indata.sparse:
+            raise NotImplementedError(
+                "Multi-device fits (--nDevices > 1) are not supported in "
+                "sparse mode."
+            )
+        if self.covarianceFit:
+            raise NotImplementedError(
+                "Multi-device fits are not supported with --covarianceFit "
+                "(the dense data covariance couples all bins)."
+            )
+
+        devices = sharding.select_devices(self.n_devices)
+        edges = sharding.shard_edges(self.indata.nbins, self.n_devices)
+        logger.info(
+            f"Sharding {self.indata.nbins} bins over {self.n_devices} "
+            f"device(s): {[f'{d}:[{a},{b})' for d, (a, b) in zip(devices, edges)]}"
+        )
+
+        self.shards = []
+        for device, (a, b) in zip(devices, edges):
+            view = sharding.ShardIndataView(self.indata, a, b, device)
+            shard = sharding.ShardEvaluator(device, view)
+            with tf.device(device):
+                shard.logk = tf.identity(self.logk[a:b])
+                shard.nobs = tf.Variable(
+                    tf.zeros([b - a], dtype=self.indata.dtype),
+                    trainable=False,
+                    name=f"nobs_shard{a}",
+                )
+                shard.lognobs = tf.Variable(
+                    tf.zeros([b - a], dtype=self.indata.dtype),
+                    trainable=False,
+                    name=f"lognobs_shard{a}",
+                )
+                shard.varnobs = (
+                    tf.Variable(
+                        tf.ones([b - a], dtype=self.indata.dtype),
+                        trainable=False,
+                        name=f"varnobs_shard{a}",
+                    )
+                    if self.chisqFit
+                    else None
+                )
+                shard.bbstat = BinByBinStat(
+                    view,
+                    self._options,
+                    chisqFit=self.chisqFit,
+                    covarianceFit=False,
+                    data_cov_inv=None,
+                    nobs_template=shard.nobs,
+                )
+            # seed from the current observation state: init_fit_parms (and
+            # thus shard construction) can re-run after set_nobs
+            shard.nobs.assign(self.nobs[a:b])
+            shard.lognobs.assign(self.lognobs[a:b])
+            if shard.varnobs is not None:
+                shard.varnobs.assign(self.varnobs[a:b])
+            shard.param_model = sharding.ShardParamModel(self.param_model, a, b)
+            # Parameter-level state. NB the fitter's tf.Variables
+            # (frozen_params_mask, blinding offsets) must NOT be captured
+            # here: XLA-compiled functions cannot read a Variable resident
+            # on a different device, so their *values* are threaded into the
+            # per-shard functions as arguments instead (see
+            # _make_sharded_tf_functions), the same way x is.
+            shard.do_blinding = self.do_blinding
+            shard.chisqFit = self.chisqFit
+            shard.covarianceFit = False
+            shard.data_cov_inv = None
+            for name in self._SHARD_BORROWED_METHODS:
+                setattr(shard, name, getattr(Fitter, name).__get__(shard))
+            self.shards.append(shard)
+
+        # the parameter-level NLL terms (constraints + external likelihood
+        # terms), evaluated once per call on the first device via the same
+        # borrowed-method pattern
+        gview = sharding.ShardEvaluator(devices[0], self.indata)
+        gview.param_model = self.param_model
+        gview.frozen_params_mask = self.frozen_params_mask
+        gview.do_blinding = self.do_blinding
+        if self.do_blinding:
+            gview._blinding_offsets_poi = self._blinding_offsets_poi
+            gview._blinding_offsets_theta = self._blinding_offsets_theta
+        gview.cw = self.cw
+        gview.x0 = self.x0
+        for name in ("get_poi", "get_model_nui", "get_theta", "get_x", "_compute_lc"):
+            setattr(gview, name, getattr(Fitter, name).__get__(gview))
+        self._global_view = gview
+
+    def _make_sharded_tf_functions(self):
+        """Multi-device counterparts of the loss/grad/HVP/Hessian wrappers.
+
+        The per-shard functions are jit-compiled on their own device and
+        differentiate with respect to their local x copy (one tape per
+        shard); the combiners below are plain graphs that broadcast x,
+        collect the [nparams]-sized partials and sum them. See
+        rabbit/sharding.py for why both choices are load-bearing.
+        """
+        jit = self.jit_compile
+
+        def make_shard_fns(shard):
+            # aux = (frozen_params_mask value[, blinding offsets]) -- Variable
+            # values threaded in as tensors because XLA cannot read a
+            # Variable on another device
+            def _pin(x, aux):
+                shard.x = x
+                shard.frozen_params_mask = aux[0]
+                if shard.do_blinding:
+                    shard._blinding_offsets_poi = aux[1]
+                    shard._blinding_offsets_theta = aux[2]
+
+            def nll_local(x, aux):
+                _pin(x, aux)
+                nexp, _, beta = shard._compute_yields_with_beta(
+                    profile=True, compute_norm=False, full=False
+                )
+                ln = shard._compute_ln(nexp[: shard.indata.nbins], full_nll=False)
+                lbeta = shard._compute_lbeta(beta, full_nll=False)
+                return ln + lbeta if lbeta is not None else ln
+
+            def vg(x, aux):
+                with tf.GradientTape() as t:
+                    t.watch(x)
+                    v = nll_local(x, aux)
+                g = t.gradient(v, x, unconnected_gradients=tf.UnconnectedGradients.ZERO)
+                return v, g
+
+            def vgp(x, aux, p):
+                p = tf.stop_gradient(p)
+                with tf.GradientTape() as t2:
+                    t2.watch(x)
+                    with tf.GradientTape() as t1:
+                        t1.watch(x)
+                        v = nll_local(x, aux)
+                    g = t1.gradient(
+                        v, x, unconnected_gradients=tf.UnconnectedGradients.ZERO
+                    )
+                hp = t2.gradient(
+                    g,
+                    x,
+                    output_gradients=p,
+                    unconnected_gradients=tf.UnconnectedGradients.ZERO,
+                )
+                return v, g, hp
+
+            def vgh(x, aux):
+                with tf.GradientTape() as t2:
+                    t2.watch(x)
+                    with tf.GradientTape() as t1:
+                        t1.watch(x)
+                        v = nll_local(x, aux)
+                    g = t1.gradient(
+                        v, x, unconnected_gradients=tf.UnconnectedGradients.ZERO
+                    )
+                h = t2.jacobian(g, x)
+                return v, g, h
+
+            def beta_local(x, aux):
+                _pin(x, aux)
+                _, _, beta = shard._compute_yields_with_beta(
+                    profile=True, compute_norm=False, full=False
+                )
+                return beta
+
+            return (
+                tf.function(nll_local, jit_compile=jit),
+                tf.function(vg, jit_compile=jit),
+                tf.function(vgp, jit_compile=jit),
+                tf.function(vgh, jit_compile=jit),
+                tf.function(beta_local, jit_compile=jit),
+            )
+
+        self._shard_graph_fns = [make_shard_fns(shard) for shard in self.shards]
+
+        gview = self._global_view
+
+        def gnll_local(x):
+            gview.x = x
+            l = gview._compute_lc(full_nll=False)
+            lext = external_likelihood.compute_external_nll(
+                self.external_terms, x, self.indata.dtype, full_nll=False
+            )
+            return l + lext if lext is not None else l
+
+        def gvg(x):
+            with tf.GradientTape() as t:
+                t.watch(x)
+                v = gnll_local(x)
+            g = t.gradient(v, x, unconnected_gradients=tf.UnconnectedGradients.ZERO)
+            return v, g
+
+        def gvgp(x, p):
+            p = tf.stop_gradient(p)
+            with tf.GradientTape() as t2:
+                t2.watch(x)
+                with tf.GradientTape() as t1:
+                    t1.watch(x)
+                    v = gnll_local(x)
+                g = t1.gradient(
+                    v, x, unconnected_gradients=tf.UnconnectedGradients.ZERO
+                )
+            hp = t2.gradient(
+                g,
+                x,
+                output_gradients=p,
+                unconnected_gradients=tf.UnconnectedGradients.ZERO,
+            )
+            return v, g, hp
+
+        def gvgh(x):
+            with tf.GradientTape() as t2:
+                t2.watch(x)
+                with tf.GradientTape() as t1:
+                    t1.watch(x)
+                    v = gnll_local(x)
+                g = t1.gradient(
+                    v, x, unconnected_gradients=tf.UnconnectedGradients.ZERO
+                )
+            h = t2.jacobian(g, x)
+            return v, g, h
+
+        self._global_graph_fns = tuple(
+            tf.function(f, jit_compile=jit) for f in (gnll_local, gvg, gvgp, gvgh)
+        )
+
+        def _read_aux():
+            aux = [tf.identity(self.frozen_params_mask)]
+            if self.do_blinding:
+                aux.append(tf.identity(self._blinding_offsets_poi))
+                aux.append(tf.identity(self._blinding_offsets_theta))
+            return tuple(aux)
+
+        def _to_device(aux):
+            return tuple(tf.identity(a) for a in aux)
+
+        def _loss_val():
+            x0 = tf.identity(self.x)
+            aux = _read_aux()
+            parts = []
+            for shard, fns in zip(self.shards, self._shard_graph_fns):
+                with tf.device(shard.device):
+                    parts.append(fns[0](tf.identity(x0), _to_device(aux)))
+            with tf.device(self.shards[0].device):
+                parts.append(self._global_graph_fns[0](tf.identity(x0)))
+            return tf.add_n(parts)
+
+        def _loss_val_grad():
+            x0 = tf.identity(self.x)
+            aux = _read_aux()
+            vs, gs = [], []
+            for shard, fns in zip(self.shards, self._shard_graph_fns):
+                with tf.device(shard.device):
+                    v, g = fns[1](tf.identity(x0), _to_device(aux))
+                vs.append(v)
+                gs.append(g)
+            with tf.device(self.shards[0].device):
+                v, g = self._global_graph_fns[1](tf.identity(x0))
+            vs.append(v)
+            gs.append(g)
+            return tf.add_n(vs), tf.add_n(gs)
+
+        def _loss_val_grad_hessp(p):
+            x0 = tf.identity(self.x)
+            aux = _read_aux()
+            vs, gs, hs = [], [], []
+            for shard, fns in zip(self.shards, self._shard_graph_fns):
+                with tf.device(shard.device):
+                    v, g, hp = fns[2](tf.identity(x0), _to_device(aux), tf.identity(p))
+                vs.append(v)
+                gs.append(g)
+                hs.append(hp)
+            with tf.device(self.shards[0].device):
+                v, g, hp = self._global_graph_fns[2](tf.identity(x0), tf.identity(p))
+            vs.append(v)
+            gs.append(g)
+            hs.append(hp)
+            return tf.add_n(vs), tf.add_n(gs), tf.add_n(hs)
+
+        def _loss_val_grad_hess(profile=True):
+            if not profile:
+                raise NotImplementedError(
+                    "profile=False Hessians are not supported in multi-device "
+                    "mode (--nDevices > 1)."
+                )
+            x0 = tf.identity(self.x)
+            aux = _read_aux()
+            vs, gs, hs = [], [], []
+            for shard, fns in zip(self.shards, self._shard_graph_fns):
+                with tf.device(shard.device):
+                    v, g, h = fns[3](tf.identity(x0), _to_device(aux))
+                vs.append(v)
+                gs.append(g)
+                hs.append(h)
+            with tf.device(self.shards[0].device):
+                v, g, h = self._global_graph_fns[3](tf.identity(x0))
+            vs.append(v)
+            gs.append(g)
+            hs.append(h)
+            return tf.add_n(vs), tf.add_n(gs), tf.add_n(hs)
+
+        def _profile_beta_sharded():
+            x0 = tf.identity(self.x)
+            aux = _read_aux()
+            betas = []
+            for shard, fns in zip(self.shards, self._shard_graph_fns):
+                with tf.device(shard.device):
+                    beta = fns[4](tf.identity(x0), _to_device(aux))
+                shard.bbstat.beta.assign(beta)
+                betas.append(beta)
+            # mirror into the fitter-level beta variable, whose masked-bin
+            # tail (never touched by the sharded loss) keeps its prior value
+            nbins = self.indata.nbins
+            full = tf.concat(betas + [self.bbstat.beta[nbins:]], axis=0)
+            self.bbstat.beta.assign(full)
+
+        self.loss_val = tf.function(_loss_val)
+        self.loss_val_grad = tf.function(_loss_val_grad)
+        self.loss_val_grad_hessp_revrev = tf.function(_loss_val_grad_hessp)
+        if self.hvp_method == "fwdrev":
+            logger.warning(
+                "fwdrev HVP is not supported in multi-device mode; "
+                "falling back to revrev."
+            )
+        self.loss_val_grad_hessp_fwdrev = self.loss_val_grad_hessp_revrev
+        self.loss_val_grad_hessp = self.loss_val_grad_hessp_revrev
+        # instance override of the class-level @tf.function
+        self.loss_val_grad_hess = _loss_val_grad_hess
+        if self.bbstat.enabled:
+            self._profile_beta = tf.function(_profile_beta_sharded)
+
     def _make_tf_functions(self):
+        if self.shards:
+            return self._make_sharded_tf_functions()
         # Build tf.function wrappers at instance construction time so that
         # jit_compile and the HVP autodiff mode can be controlled via fit
         # options without redefining the class. self.jit_compile has
