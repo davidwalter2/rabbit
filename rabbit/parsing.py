@@ -249,6 +249,14 @@ def common_parser():
         "likelihoods are supported (no sparse mode, no --covarianceFit).",
     )
     parser.add_argument(
+        "--devices",
+        default=None,
+        type=int,
+        nargs="+",
+        help="Explicit physical GPU indices to use (overrides the automatic "
+        "least-occupied selection). The number given should match --nDevices.",
+    )
+    parser.add_argument(
         "--precondition",
         action="store_true",
         help="Reparameterise a block of parameters so the reference Hessian is the "
