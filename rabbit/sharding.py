@@ -232,13 +232,13 @@ class MultiDeviceFitter(Fitter):
         "_global_graph_fns",
     }
 
-    def __init__(self, indata, param_model, options, do_blinding=False):
+    def __init__(self, indata, param_model, options, **kwargs):
         # set before super().__init__: the base constructor ends in
         # init_fit_parms -> _make_tf_functions, which builds the shards
         self.n_devices = int(getattr(options, "nDevices", 1) or 1)
         self._options = options
         self.shards = []
-        super().__init__(indata, param_model, options, do_blinding=do_blinding)
+        super().__init__(indata, param_model, options, **kwargs)
 
     _SHARD_BORROWED_METHODS = (
         "get_poi",
