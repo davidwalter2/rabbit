@@ -895,7 +895,7 @@ def main():
     model_specs = args.paramModel or [["Mu"]]
     param_model = ph.load_models(model_specs, indata, **vars(args))
 
-    ifitter = fitter.Fitter(
+    ifitter = fitter.make_fitter(
         indata,
         param_model,
         args,
