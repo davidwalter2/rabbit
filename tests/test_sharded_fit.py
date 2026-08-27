@@ -27,7 +27,11 @@ def _make_fitter(filename, ndevices=1, **kw):
     indata_obj = inputdata.FitInputData(filename, host_memory=ndevices > 1)
     param_model = load_model("Mu", indata_obj)
     options = make_options(nDevices=ndevices, **kw)
-    f = fitter.make_fitter(indata_obj, param_model, options)
+    # pass the kwargs rabbit_fit passes, so the factory can never silently
+    # drop one again (it did once: globalImpactsFromJVP)
+    f = fitter.make_fitter(
+        indata_obj, param_model, options, do_blinding=False, globalImpactsFromJVP=True
+    )
     f.set_nobs(indata_obj.data_obs)
     return f
 
