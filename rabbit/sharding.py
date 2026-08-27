@@ -41,6 +41,62 @@ from wums import logging
 logger = logging.child_logger(__name__)
 
 
+def pick_physical_gpus(n, explicit=None):
+    """Choose which physical GPUs to make visible, before TF initializes.
+
+    ``explicit`` (a list of indices, from --devices) wins outright.
+    Otherwise, when the node has more GPUs than requested, prefer the
+    least-occupied ones by current memory use (via nvidia-smi), so a fit
+    started on an interactively shared node lands next to nobody. Falls
+    back to the first n on any query failure. NB nvidia-smi orders by PCI
+    bus while CUDA defaults to fastest-first; on the homogeneous nodes
+    here the orders coincide, and --devices remains the explicit escape
+    hatch.
+    """
+    gpus = tf.config.list_physical_devices("GPU")
+    if not gpus:
+        return None
+    if explicit is not None:
+        try:
+            return [gpus[int(i)] for i in explicit]
+        except IndexError:
+            raise ValueError(
+                f"--devices {explicit} out of range: {len(gpus)} GPU(s) visible"
+            )
+    if len(gpus) <= n:
+        return gpus
+
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout
+        usage = {}
+        for line in out.strip().splitlines():
+            idx, used = line.split(",")
+            usage[int(idx)] = int(used)
+        order = sorted(range(len(gpus)), key=lambda i: usage.get(i, 0))
+        chosen = sorted(order[:n])
+        logger.info(
+            f"Selecting GPU(s) {chosen} by occupancy " f"(memory used per GPU: {usage})"
+        )
+        return [gpus[i] for i in chosen]
+    except Exception as ex:
+        logger.warning(
+            f"Could not query GPU occupancy ({ex}); using the first {n} GPU(s)."
+        )
+        return gpus[:n]
+
+
 def select_devices(n):
     """Names of the n devices to shard over.
 
