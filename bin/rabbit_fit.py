@@ -920,8 +920,15 @@ def main():
     ifitter.tau.assign(args.regularizationStrength)
     regularizers = []
     for margs in args.regularization:
-        mapping = mh.load_mapping(margs[1], indata, *margs[2:])
-        regularizer = rh.load_regularizer(margs[0], mapping, dtype=indata.dtype)
+        # 'key=value' tokens configure the regularizer; the rest name a mapping.
+        # A penalty on the parameters rather than on a mapping output takes no
+        # mapping at all, so the mapping tokens are optional.
+        kwargs = dict(t.split("=", 1) for t in margs[1:] if "=" in t)
+        tokens = [t for t in margs[1:] if "=" not in t]
+        mapping = mh.load_mapping(tokens[0], indata, *tokens[1:]) if tokens else None
+        regularizer = rh.load_regularizer(
+            margs[0], mapping, dtype=indata.dtype, indata=indata, **kwargs
+        )
         regularizers.append(regularizer)
     ifitter.regularizers = regularizers
 
