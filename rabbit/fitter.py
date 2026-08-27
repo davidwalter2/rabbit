@@ -66,20 +66,22 @@ def match_regexp_params(regular_expressions, parameter_names):
     return matched
 
 
-def make_fitter(indata, param_model, options, do_blinding=False):
+def make_fitter(indata, param_model, options, **kwargs):
     """Construct the Fitter appropriate for the requested device count.
 
     The device layout is fixed at initialization, so the choice is a
     static one: --nDevices > 1 returns the bins-sharded
     :class:`rabbit.sharding.MultiDeviceFitter` subclass, anything else the
     plain single-device Fitter. Imported lazily to avoid a module cycle
-    (sharding subclasses Fitter).
+    (sharding subclasses Fitter). All keyword arguments are forwarded
+    verbatim, so this wrapper cannot drift from Fitter.__init__'s
+    signature.
     """
     if int(getattr(options, "nDevices", 1) or 1) > 1:
         from rabbit.sharding import MultiDeviceFitter
 
-        return MultiDeviceFitter(indata, param_model, options, do_blinding=do_blinding)
-    return Fitter(indata, param_model, options, do_blinding=do_blinding)
+        return MultiDeviceFitter(indata, param_model, options, **kwargs)
+    return Fitter(indata, param_model, options, **kwargs)
 
 
 class Fitter:
