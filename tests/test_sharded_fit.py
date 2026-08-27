@@ -27,7 +27,7 @@ def _make_fitter(filename, ndevices=1, **kw):
     indata_obj = inputdata.FitInputData(filename, host_memory=ndevices > 1)
     param_model = load_model("Mu", indata_obj)
     options = make_options(nDevices=ndevices, **kw)
-    f = fitter.Fitter(indata_obj, param_model, options)
+    f = fitter.make_fitter(indata_obj, param_model, options)
     f.set_nobs(indata_obj.data_obs)
     return f
 
@@ -117,7 +117,7 @@ def test_sharded_rejects_unsupported():
         param_model = load_model("Mu", indata_obj)
         options = make_options(nDevices=2)
         with pytest.raises(NotImplementedError):
-            fitter.Fitter(indata_obj, param_model, options)
+            fitter.make_fitter(indata_obj, param_model, options)
 
 
 def test_sharded_fitter_deepcopy():
@@ -165,7 +165,7 @@ def test_sharded_across_logical_cpu_devices():
             def build(nd):
                 indata = inputdata.FitInputData({fname!r}, host_memory=nd > 1)
                 pm = load_model("Mu", indata)
-                f = fitter.Fitter(indata, pm, make_options(nDevices=nd))
+                f = fitter.make_fitter(indata, pm, make_options(nDevices=nd))
                 f.set_nobs(indata.data_obs)
                 return f
 
