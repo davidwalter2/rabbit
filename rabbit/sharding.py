@@ -29,9 +29,14 @@ and asymmetric interpolation, both systematic types, and the full
 bin-by-bin-stat machinery are shared with the single-device path by
 construction.
 
-Not supported in sharded mode (checked at construction): sparse tensors,
---covarianceFit (dense cross-bin data covariance), regularizers (need
-full=True yields), and the fwdrev HVP (falls back to revrev).
+Not supported in sharded mode: sparse tensors and --covarianceFit
+(checked at construction), regularizers whose penalty reads the predicted
+yields (needs_observables=True -- no device holds the full yield vector;
+checked in arm_regularizers, since self.regularizers is still empty when
+the constructor runs), --fullNll, and the fwdrev HVP (falls back to
+revrev). Parameter-only regularizers ARE supported: their penalty is a
+function of the parameter vector, which every device has in full, and it
+is evaluated once in the global term.
 """
 
 import numpy as np
@@ -228,6 +233,7 @@ class MultiDeviceFitter(Fitter):
     _DYNAMIC_TF_FUNCS = Fitter._DYNAMIC_TF_FUNCS | {
         "shards",
         "_shard_graph_fns",
+        "_hessp_batch_sharded",
         "_global_view",
         "_global_graph_fns",
     }
@@ -284,8 +290,17 @@ class MultiDeviceFitter(Fitter):
         for device, (a, b) in zip(devices, edges):
             view = ShardIndataView(self.indata, a, b, device)
             shard = ShardEvaluator(device, view)
+            # Slice on the host, then copy only the shard to the device. Doing
+            # the slice inside the tf.device block places the StridedSlice on
+            # the GPU, which requires its *input* -- the full [nbins, 9, nsyst]
+            # tensor -- to be copied there first, defeating the host pinning in
+            # FitInputData and exhausting the card before any shard exists (a
+            # 92144-bin, 4618-systematic model needs 30.6 GB for that one
+            # tensor, against 7.66 GB for the shard actually wanted).
+            with tf.device("/CPU:0"):
+                logk_shard = tf.identity(self.logk[a:b])
             with tf.device(device):
-                shard.logk = tf.identity(self.logk[a:b])
+                shard.logk = tf.identity(logk_shard)
                 shard.nobs = tf.Variable(
                     tf.zeros([b - a], dtype=self.indata.dtype),
                     trainable=False,
@@ -315,10 +330,18 @@ class MultiDeviceFitter(Fitter):
                 )
             # seed from the current observation state: init_fit_parms (and
             # thus shard construction) can re-run after set_nobs
-            shard.nobs.assign(self.nobs[a:b])
-            shard.lognobs.assign(self.lognobs[a:b])
+            with tf.device("/CPU:0"):
+                nobs_shard = tf.identity(self.nobs[a:b])
+                lognobs_shard = tf.identity(self.lognobs[a:b])
+                varnobs_shard = (
+                    tf.identity(self.varnobs[a:b])
+                    if shard.varnobs is not None
+                    else None
+                )
+            shard.nobs.assign(nobs_shard)
+            shard.lognobs.assign(lognobs_shard)
             if shard.varnobs is not None:
-                shard.varnobs.assign(self.varnobs[a:b])
+                shard.varnobs.assign(varnobs_shard)
             shard.param_model = ShardParamModel(self.param_model, a, b)
             # Parameter-level state. NB the fitter's tf.Variables
             # (frozen_params_mask, blinding offsets) must NOT be captured
@@ -349,6 +372,140 @@ class MultiDeviceFitter(Fitter):
         for name in ("get_poi", "get_model_nui", "get_theta", "get_x", "_compute_lc"):
             setattr(gview, name, getattr(Fitter, name).__get__(gview))
         self._global_view = gview
+
+    def _hessp_batch_dispatch(self, P):
+        return self._hessp_batch_sharded(P)
+
+    def _reference_matrix(self):
+        """Preconditioner reference Hessian, built unsharded on the host.
+
+        The sharded path cannot produce this. A per-shard jacobian vectorises
+        the Hessian over every parameter at once, so it needs one
+        [nbins_shard, 9] intermediate per parameter *on its own device* -- 70 GB
+        for a 6538-parameter model with 23036 bins per shard. The build then
+        fails and the fit silently falls back to running unpreconditioned, which
+        is easy to miss because the fit itself proceeds normally.
+
+        Chunking it instead turns the vectorised pfor into a while_loop, which
+        XLA unrolls: compilation never finishes. And pinning the *call* to the
+        host does not help either, because the shard graphs carry their own
+        device placement.
+
+        So bypass the shard machinery: MultiDeviceFitter does not override the
+        base likelihood methods, which still operate on the full (host-resident,
+        see FitInputData(host_memory=True)) tensors. Running those on the CPU
+        needs ~43 GB of host RAM, which is plentiful, and happens once per
+        preconditioner build rather than inside the minimiser loop.
+        """
+        # Assembled from the already-sharded HVPs, so the work distributes over
+        # the GPUs and the peak memory is one [k, npar] batch rather than the
+        # [npar, nbins, 9] the vectorised jacobian needs. Building it on the
+        # host with the base (unsharded) likelihood was the obvious
+        # alternative and does not work either: the same pfor intermediates
+        # reached 161 GB of RSS on a 187 GB node before producing anything.
+        return self.hessian_from_hvps()
+
+    def arm_regularizers(self):
+        """Accept parameter-only regularizers; refuse yield-dependent ones.
+
+        A penalty that reads the predicted yields cannot work here: it needs
+        the full (masked-channel-inclusive) yield vector and no single device
+        holds one. A penalty on the parameters alone has no such problem --
+        every device has the whole parameter vector -- so it is evaluated once
+        in the global term, gnll_local.
+
+        Refusing loudly matters more than it sounds. This used to accept every
+        regularizer and then silently drop the penalty, because gnll_local
+        summed only the constraint and external-likelihood terms. Fits ran to
+        convergence against the *unregularized* likelihood while the command
+        line said otherwise, wrote plausible-looking results, and left the
+        in-situ scale factors far outside the physical region (u up to 1.56 on
+        2143 cells of a 4-GPU W+Z fit). The loss looked better than a
+        single-device fit's for the worst reason: a positive term was missing.
+
+        The graphs are rebuilt here because __init__ traces them before
+        --regularizer has been read, so a graph cached from an earlier call
+        would have no penalty in it.
+        """
+        unsupported = [
+            type(reg).__name__
+            for reg in self.regularizers
+            if getattr(reg, "needs_observables", True)
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                f"Regularizers {unsupported} read the predicted yields "
+                "(needs_observables=True), which multi-device mode "
+                "(--nDevices > 1) cannot provide: the sharded likelihood never "
+                "builds the full yield vector on any one device. Run this fit "
+                "single-device (drop --nDevices), or, if the penalty really "
+                "only depends on the parameters, set needs_observables=False "
+                "on the regularizer."
+            )
+        super().arm_regularizers()
+        if len(self.regularizers):
+            self._make_tf_functions()
+
+    def _unsharded(self, what, flag):
+        raise NotImplementedError(
+            f"{what} is not supported in multi-device mode (--nDevices > 1): it "
+            "is computed over all bins on one device, which is what the "
+            "sharding exists to avoid. Drop --nDevices, or rerun this step "
+            f"single-device from the fit output. ({flag})"
+        )
+
+    # Everything below is reachable from rabbit_fit.py and runs *after* the
+    # minimiser, over all bins at once. Left alone they raise an allocation
+    # failure at the end of a multi-hour fit and take the whole result with
+    # them -- which is exactly how reduced_nll was found, having thrown away a
+    # 19.9-hour run. Failing at the point of use, before the fit starts, costs
+    # nothing by comparison.
+    def global_impacts_parms(self, *args, **kwargs):
+        self._unsharded("Global impacts", "--doImpacts with --impactType global")
+
+    def gaussian_global_impacts_parms(self, *args, **kwargs):
+        self._unsharded("Gaussian global impacts", "--doImpacts")
+
+    def toyassign(self, *args, **kwargs):
+        self._unsharded("Toy generation", "-t > 0")
+
+    def loss_val_valfull_grad_hess(self, *args, **kwargs):
+        self._unsharded("The full-NLL value/gradient/Hessian", "--fullNll")
+
+    def reduced_nll(self):
+        """Sharded counterpart of Fitter.reduced_nll.
+
+        The base version routes through _compute_nll over all bins on one
+        device, which is the same class of failure as expected_yield and the
+        dense Hessian: it OOMs gathering the full result. It computes exactly
+        what the sharded loss_val already sums -- _compute_nll(full_nll=False)
+        -- so reuse that. This runs after the minimiser has finished, so
+        failing here throws away the whole fit: the last one cost 6.3 hours of
+        completed minimisation.
+        """
+        return self.loss_val()
+
+    def full_nll(self):
+        raise NotImplementedError(
+            "--fullNll is not supported in multi-device mode (--nDevices > 1): "
+            "the sharded likelihood is built with full_nll=False, so the "
+            "normalisation terms are not available per shard. Rerun the "
+            "postfit single-device with --externalPostfit if it is needed."
+        )
+
+    def expected_yield(self, profile=False, full=False):
+        """Global all-bins yield, computed on the host.
+
+        This path is not sharded: it runs the base implementation over the
+        whole [nbins, 9, nsyst] logk, and on the default device that
+        materialises the full tensor on GPU:0 -- 30.6 GB for a 92144-bin,
+        4618-systematic model, which is precisely what sharding exists to
+        avoid. It is needed once at construction (nexpnom) and in postfit
+        paths, never inside the minimiser loop, so paying for it in host
+        memory costs one slow pass rather than the fit.
+        """
+        with tf.device("/CPU:0"):
+            return super().expected_yield(profile=profile, full=full)
 
     def set_nobs(self, values, variances=None):
         super().set_nobs(values, variances)
@@ -423,18 +580,6 @@ class MultiDeviceFitter(Fitter):
                 )
                 return v, g, hp
 
-            def vgh(x, aux):
-                with tf.GradientTape() as t2:
-                    t2.watch(x)
-                    with tf.GradientTape() as t1:
-                        t1.watch(x)
-                        v = nll_local(x, aux)
-                    g = t1.gradient(
-                        v, x, unconnected_gradients=tf.UnconnectedGradients.ZERO
-                    )
-                h = t2.jacobian(g, x)
-                return v, g, h
-
             def beta_local(x, aux):
                 _pin(x, aux)
                 _, _, beta = shard._compute_yields_with_beta(
@@ -446,7 +591,6 @@ class MultiDeviceFitter(Fitter):
                 tf.function(nll_local, jit_compile=jit),
                 tf.function(vg, jit_compile=jit),
                 tf.function(vgp, jit_compile=jit),
-                tf.function(vgh, jit_compile=jit),
                 tf.function(beta_local, jit_compile=jit),
             )
 
@@ -456,11 +600,26 @@ class MultiDeviceFitter(Fitter):
 
         def gnll_local(x):
             gview.x = x
-            lc = gview._compute_lc(full_nll=False)
+            total = gview._compute_lc(full_nll=False)
             lext = external_likelihood.compute_external_nll(
                 self.external_terms, x, self.indata.dtype, full_nll=False
             )
-            return lc + lext if lext is not None else lc
+            if lext is not None:
+                total = total + lext
+            # Regularizer penalties belong here rather than in a shard: they
+            # are global (a shard would double count them) and, for the ones
+            # allowed on this path, depend only on the parameter vector, which
+            # every device has in full. gvg and gvgp both differentiate
+            # gnll_local, so gradient, HVP and Hessian follow automatically.
+            if len(self.regularizers):
+                penalty = tf.add_n(
+                    [
+                        reg.compute_nll_penalty(gview.get_x(), None)
+                        for reg in self.regularizers
+                    ]
+                )
+                total = total + penalty * tf.exp(2 * self.tau)
+            return total
 
         def gvg(x):
             with tf.GradientTape() as t:
@@ -487,20 +646,8 @@ class MultiDeviceFitter(Fitter):
             )
             return v, g, hp
 
-        def gvgh(x):
-            with tf.GradientTape() as t2:
-                t2.watch(x)
-                with tf.GradientTape() as t1:
-                    t1.watch(x)
-                    v = gnll_local(x)
-                g = t1.gradient(
-                    v, x, unconnected_gradients=tf.UnconnectedGradients.ZERO
-                )
-            h = t2.jacobian(g, x)
-            return v, g, h
-
         self._global_graph_fns = tuple(
-            tf.function(f, jit_compile=jit) for f in (gnll_local, gvg, gvgp, gvgh)
+            tf.function(f, jit_compile=jit) for f in (gnll_local, gvg, gvgp)
         )
 
         def _read_aux():
@@ -556,27 +703,35 @@ class MultiDeviceFitter(Fitter):
             hs.append(hp)
             return tf.add_n(vs), tf.add_n(gs), tf.add_n(hs)
 
-        def _loss_val_grad_hess(profile=True):
-            if not profile:
-                raise NotImplementedError(
-                    "profile=False Hessians are not supported in multi-device "
-                    "mode (--nDevices > 1)."
-                )
+        def _loss_val_grad_hessp_batch(P):
+            """Batched HVP, kept sharded: [k, npar] directions in, sum out.
+
+            Mirrors _loss_val_grad_hessp but vectorises over the batch inside
+            each shard's graph, so the columns of the Hessian are built on the
+            GPUs. vectorized_map is a pfor of width k, unlike tape.jacobian's
+            non-pfor path whose while_loop XLA unrolls, so memory scales with k
+            and compilation stays bounded.
+            """
             x0 = tf.identity(self.x)
             aux = _read_aux()
-            vs, gs, hs = [], [], []
+            parts = []
             for shard, fns in zip(self.shards, self._shard_graph_fns):
                 with tf.device(shard.device):
-                    v, g, h = fns[3](tf.identity(x0), _to_device(aux))
-                vs.append(v)
-                gs.append(g)
-                hs.append(h)
+                    a = _to_device(aux)
+                    parts.append(
+                        tf.vectorized_map(
+                            lambda p, f=fns, a=a: f[2](tf.identity(x0), a, p)[2], P
+                        )
+                    )
             with tf.device(self.shards[0].device):
-                v, g, h = self._global_graph_fns[3](tf.identity(x0))
-            vs.append(v)
-            gs.append(g)
-            hs.append(h)
-            return tf.add_n(vs), tf.add_n(gs), tf.add_n(hs)
+                parts.append(
+                    tf.vectorized_map(
+                        lambda p: self._global_graph_fns[2](tf.identity(x0), p)[2], P
+                    )
+                )
+            return tf.add_n([tf.identity(x) for x in parts])
+
+        self._hessp_batch_sharded = _loss_val_grad_hessp_batch
 
         def _profile_beta_sharded():
             x0 = tf.identity(self.x)
@@ -584,7 +739,7 @@ class MultiDeviceFitter(Fitter):
             betas = []
             for shard, fns in zip(self.shards, self._shard_graph_fns):
                 with tf.device(shard.device):
-                    beta = fns[4](tf.identity(x0), _to_device(aux))
+                    beta = fns[3](tf.identity(x0), _to_device(aux))
                 shard.bbstat.beta.assign(beta)
                 betas.append(beta)
             # mirror into the fitter-level beta variable, whose masked-bin
@@ -603,7 +758,29 @@ class MultiDeviceFitter(Fitter):
             )
         self.loss_val_grad_hessp_fwdrev = self.loss_val_grad_hessp_revrev
         self.loss_val_grad_hessp = self.loss_val_grad_hessp_revrev
+
         # instance override of the class-level @tf.function
-        self.loss_val_grad_hess = _loss_val_grad_hess
+        def _loss_val_grad_hess_hvp(profile=True):
+            """Value, gradient and dense Hessian for the sharded fit.
+
+            The Hessian comes from batched HVP columns rather than the sharded
+            jacobian. The jacobian path vectorises over every parameter inside
+            each shard and needs ~70 GB on its device for a 6538-parameter
+            model, so it cannot run at all here -- and it is what the postfit
+            covariance calls, meaning the failure would land at the *end* of a
+            multi-hour fit. The HVPs are the same ones the minimiser uses every
+            iteration, so they stay distributed and cost one [k, npar] batch of
+            memory.
+            """
+            if not profile:
+                raise NotImplementedError(
+                    "profile=False Hessians are not supported in multi-device "
+                    "mode (--nDevices > 1)."
+                )
+            val, grad = self.loss_val_grad()
+            hess = tf.constant(self.hessian_from_hvps(), dtype=self.indata.dtype)
+            return val, grad, hess
+
+        self.loss_val_grad_hess = _loss_val_grad_hess_hvp
         if self.bbstat.enabled:
             self._profile_beta = tf.function(_profile_beta_sharded)
