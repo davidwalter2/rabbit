@@ -214,3 +214,121 @@ def test_sharded_across_logical_cpu_devices():
         )
         assert res.returncode == 0, res.stdout + "\n" + res.stderr
         assert "LOGICAL-DEVICE SHARDING OK" in res.stdout
+
+
+class _ParamOnlyPenalty:
+    """Quadratic pull on the first parameter; ignores the yields entirely."""
+
+    needs_observables = False
+
+    def __init__(self, strength=7.0):
+        self.strength = strength
+        self.armed = 0
+
+    def set_expectations(self, initial_params, initial_observables, parms=None):
+        assert initial_observables is None, "must not be handed yields"
+        self.armed += 1
+
+    def compute_nll_penalty(self, params, observables=None):
+        assert observables is None, "must not be handed yields"
+        return self.strength * tf.reduce_sum(params[:1] ** 2)
+
+
+def test_parameter_only_penalty_is_actually_applied_when_sharded():
+    """The regression test for the silent drop.
+
+    A penalty on the parameters alone has to change the sharded loss by
+    exactly the same amount it changes the single-device loss. Before this,
+    the sharded loss was identical with and without the regularizer, because
+    gnll_local had no penalty term in it -- which is invisible unless you
+    compare against the unregularized value.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        filename = make_test_tensor(tmp)
+        vals = {}
+        for nd in (1, 2):
+            for reg in (False, True):
+                f = _make_fitter(filename, ndevices=nd)
+                f.set_nobs(f.indata.data_obs)
+                if reg:
+                    f.regularizers = [_ParamOnlyPenalty()]
+                    f.arm_regularizers()
+                vals[(nd, reg)] = float(f.loss_val().numpy())
+
+        d1 = vals[(1, True)] - vals[(1, False)]
+        d2 = vals[(2, True)] - vals[(2, False)]
+        assert d1 > 0.0, "the penalty must raise the single-device loss"
+        assert d2 > 0.0, "the penalty must raise the sharded loss too (was 0)"
+        assert np.isclose(
+            d1, d2, rtol=1e-9, atol=1e-9
+        ), f"penalty contributes {d2} sharded vs {d1} single-device"
+        assert np.isclose(vals[(1, True)], vals[(2, True)], rtol=1e-9)
+
+
+def test_parameter_only_penalty_reaches_the_gradient():
+    """A penalty in the value but not the gradient would not steer the fit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        filename = make_test_tensor(tmp)
+        g = {}
+        for reg in (False, True):
+            f = _make_fitter(filename, ndevices=2)
+            f.set_nobs(f.indata.data_obs)
+            if reg:
+                f.regularizers = [_ParamOnlyPenalty()]
+                f.arm_regularizers()
+            g[reg] = f.loss_val_grad()[1].numpy().copy()
+        assert not np.allclose(g[True], g[False]), "penalty absent from gradient"
+
+
+def test_regularizers_are_refused_rather_than_silently_dropped():
+    """A sharded fit must not quietly minimise a different objective.
+
+    The only global (non-shard) term is gnll_local, which sums the constraint
+    and external-likelihood pieces; there is no penalty in it. So a regularizer
+    passed on the command line used to be accepted and then simply not applied
+    -- the fit converged, wrote a plausible result, and had never enforced the
+    bound. Worse, its loss looked *better* than a single-device fit's, because
+    a positive penalty term was missing from it.
+
+    The check cannot live in the constructor (self.regularizers is still empty
+    there), which is why the docstring's "checked at construction" claim went
+    unimplemented for so long.
+    """
+
+    class YieldDependent:
+        needs_observables = True
+
+        def set_expectations(self, *a, **k):
+            raise AssertionError("must never be armed on the sharded path")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _make_fitter(make_test_tensor(tmp), ndevices=2)
+        f.regularizers = [YieldDependent()]
+        with pytest.raises(NotImplementedError, match="read the predicted yields"):
+            f.arm_regularizers()
+        # and with none configured, arming still works
+        f.regularizers = []
+        f.arm_regularizers()
+
+
+@pytest.mark.parametrize(
+    "method,flag",
+    [
+        ("global_impacts_parms", "--doImpacts --impactType global"),
+        ("gaussian_global_impacts_parms", "--doImpacts"),
+        ("toyassign", "-t > 0"),
+        ("loss_val_valfull_grad_hess", "--fullNll"),
+    ],
+)
+def test_unsharded_postfit_steps_fail_before_the_fit_not_after(method, flag):
+    """These run over all bins on one device, so they cannot work here.
+
+    They are all reached only *after* the minimiser. Inherited unchanged they
+    raise an allocation failure at the end of a multi-hour fit and take the
+    result with it -- which is how reduced_nll was found, having discarded a
+    19.9-hour run. Raising on call is the cheap version of that discovery.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _make_fitter(make_test_tensor(tmp), ndevices=2)
+        with pytest.raises(NotImplementedError, match="multi-device mode"):
+            getattr(f, method)()
