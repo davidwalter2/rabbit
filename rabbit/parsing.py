@@ -329,6 +329,19 @@ def common_parser():
         "falls back to no preconditioning.",
     )
     parser.add_argument(
+        "--hvpBatch",
+        default=256,
+        type=int,
+        help="Number of Hessian-vector products evaluated together when the "
+        "dense Hessian is assembled from HVPs (preconditioning and, on the "
+        "multi-device path, the postfit Hessian). Memory scales with this and "
+        "the number of graph calls scales inversely: on a 4-way shard of a "
+        "92144-bin model 256 costs a few GB and turns 6538 sequential HVPs into "
+        "26 batched ones. The batch is halved automatically if the device "
+        "cannot hold it, so this is an upper bound rather than a value that "
+        "has to be right. Set 1 for the sequential loop.",
+    )
+    parser.add_argument(
         "--hvpMethod",
         default="revrev",
         type=str,
