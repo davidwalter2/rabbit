@@ -21,17 +21,41 @@ class InSituEfficiencyBound(Regularizer):
     the pt/ut window -- where little data constrains the polynomial -- the fit
     does walk outside it.
 
-    This adds a one-sided penalty on ``u`` per efficiency cell:
+    The penalty is written on the fail factor itself, one-sided:
 
-        P = sum_cells  relu((u - u0) / w)^2
+        P = sum_cells  relu((f_min - f_fail) / w)^2
 
-    ``u0`` defaults to the same bound the histmaker caps at, which is above the
-    largest MC efficiency after clamping. The penalty is therefore *exactly*
-    zero at theta = 0 and everywhere the model is physical -- it never pulls a
-    scale factor away from 1 -- while growing as the square of the distance
-    outside. ``w`` sets how fast: at the default the worst cell seen so far
-    (u = 1.25) contributes ~600 to the NLL while a cell just barely outside
-    contributes ~1e-4.
+    rather than on ``u`` against a fixed threshold. Those are not equivalent,
+    and the difference matters. A fixed ``u0`` penalises a cell whose *MC*
+    efficiency alone already exceeds it: at eMC = 0.9975 and u0 = 0.995 the cell
+    pays a penalty before the scale factor has done anything, which is a
+    systematic pull on the highest-efficiency regions for no physical reason. On
+    a real combined fit 670 of the 754 cells above such a threshold were of
+    exactly that kind, with |SF - 1| < 0.005.
+
+    A floor on f_fail is equivalent to the per-cell bound
+
+        u <= 1 - f_min * (1 - eMC),
+
+    which scales with each cell's own headroom: the same f_min leaves a cell at
+    eMC = 0.9975 alone until u = 0.99988, while acting on one at eMC = 0.83 from
+    u = 0.9915. It also says something interpretable -- the scale factors may not
+    suppress a fail category below ``f_min`` of its MC prediction -- which is the
+    quantity that actually decides whether the fail regions keep enough events to
+    constrain anything. Capping ``u`` at a fixed value left fail factors of 7e-4,
+    emptying bins that held thousands of data events.
+
+    A second, looser floor bounds the other side: f_pass = SF >= p_min. Together
+    they confine the implied data efficiency to a band strictly inside (0, 1),
+
+        p_min * eMC  <=  u  <=  1 - f_min * (1 - eMC),
+
+    with both margins scaling per cell -- the upper one with the headroom to 1,
+    the lower one with eMC itself.
+
+    The penalty is exactly zero at theta = 0 for any f_min < 1 and p_min < 1,
+    since f_fail = f_pass = 1 there, so it never pulls a scale factor away
+    from 1.
 
     A squared hinge rather than a log barrier, deliberately. A barrier's
     curvature diverges at the boundary, which would wreck the conditioning that
@@ -49,7 +73,24 @@ class InSituEfficiencyBound(Regularizer):
     datacard, so they cannot drift out of step with the coefficient definitions.
     """
 
-    def __init__(self, mapping, dtype, indata=None, threshold=0.9999, width=0.01):
+    # u = eMC * (1 + delta * P(theta)) is built from the fitted coefficients
+    # and the MC efficiency grid carried in the aux bundle; the predicted
+    # yields never enter. Declaring that makes the penalty available to
+    # bins-sharded multi-device fits, where no device holds the full yields.
+    needs_observables = False
+
+    def __init__(
+        self,
+        mapping,
+        dtype,
+        indata=None,
+        failFloor=0.05,
+        failWidth=0.02,
+        passFloor=0.5,
+        passWidth=0.1,
+        smooth=0.0,
+        smoothKind="rational",
+    ):
         if indata is None:
             raise ValueError(
                 "InSituEfficiencyBound needs the input data to read the "
@@ -65,15 +106,21 @@ class InSituEfficiencyBound(Regularizer):
 
         self.mapping = mapping
         self.dtype = dtype
-        self.threshold = float(threshold)
-        self.width = float(width)
+        self.fail_floor = float(failFloor)
+        self.fail_width = float(failWidth)
+        self.pass_floor = float(passFloor)
+        self.pass_width = float(passWidth)
+        self.smooth = float(smooth)
+        self.smooth_kind = str(smoothKind)
 
         # (n_cells,) MC efficiency, (n_cells, k) basis values and the labels of
         # the coefficients they multiply. k is the widest block (idip uses only
         # the pt coefficients and is zero padded).
-        self.effmc = tf.constant(
-            np.asarray(bundle["effmc"], dtype=np.float64), dtype=dtype
-        )
+        effmc = np.asarray(bundle["effmc"], dtype=np.float64)
+        self.effmc = tf.constant(effmc, dtype=dtype)
+        # 1 - eMC, the denominator of the fail factor. The bundle clamps eMC to
+        # effMC_max < 1, so this is bounded away from zero.
+        self.headroom = tf.constant(1.0 - effmc, dtype=dtype)
         self.basis = np.asarray(bundle["basis"], dtype=np.float64)
         self.coeff_index = np.asarray(bundle["coeff_index"], dtype=np.int64)
         # fit nuisance -> polynomial coefficient. The histmaker folds the
@@ -110,6 +157,33 @@ class InSituEfficiencyBound(Regularizer):
         self.param_index = tf.constant(positions[self.coeff_index], dtype=tf.int32)
         self.basis_tf = tf.constant(self.basis, dtype=self.dtype)
 
+    def _hinge(self, x):
+        """Squared hinge on ``x``, optionally smoothed through the kink.
+
+        relu(x)^2 has a *discontinuous* second derivative: curvature 2 above the
+        kink and exactly 0 below it. The preconditioner whitens the Hessian for
+        one set of violating cells, and every cell that crosses the kink as the
+        fit descends changes that Hessian abruptly -- so the transform stops
+        matching the problem, which is an active-set problem being handed to a
+        smooth trust-region solver.
+
+        ``smooth`` replaces it with x^3/(x + smooth), which is still exactly zero
+        for x <= 0 (no bias where the bound is satisfied), agrees with x^2 once
+        x >> smooth, and has continuous value, gradient and curvature at the
+        kink -- all three vanish as x -> 0+. Curvature stays bounded, unlike a
+        log barrier.
+        """
+        if self.smooth <= 0.0:
+            return tf.square(tf.nn.relu(x))
+        if self.smooth_kind == "softplus":
+            # the textbook smoothing, but softplus(0) = ln2, so it leaks a
+            # penalty of (smooth*ln2)^2 where the bound is satisfied and decays
+            # only exponentially below the kink -- the bias the hinge was chosen
+            # to avoid, reintroduced at a smaller scale
+            return tf.square(self.smooth * tf.math.softplus(x / self.smooth))
+        r = tf.nn.relu(x)
+        return r * r * r / (r + self.smooth)
+
     def _gather_dense_grad(self, params):
         """Gather the per-cell coefficients with a *dense* gradient.
 
@@ -133,7 +207,7 @@ class InSituEfficiencyBound(Regularizer):
 
         return op(params)
 
-    def compute_nll_penalty(self, params, observables):
+    def compute_nll_penalty(self, params, observables=None):
         if self.param_index is None:
             raise RuntimeError(
                 "InSituEfficiencyBound.set_expectations() must run before the "
@@ -142,5 +216,26 @@ class InSituEfficiencyBound(Regularizer):
         theta = self._gather_dense_grad(params)  # (n_cells, k)
         pol = tf.reduce_sum(self.basis_tf * theta, axis=-1)  # (n_cells,)
         u = self.effmc * (1.0 + self.coeff_scale * pol)
-        excess = tf.nn.relu((u - self.threshold) / self.width)
-        return tf.reduce_sum(tf.square(excess))
+        # f_fail goes negative once u passes 1, so the same expression covers
+        # both "too small a fail probability" and "no fail probability at all"
+        f_fail = (1.0 - u) / self.headroom
+        penalty = tf.reduce_sum(
+            self._hinge((self.fail_floor - f_fail) / self.fail_width)
+        )
+
+        if self.pass_floor > 0.0:
+            # The other side of the physical region. Only f_fail was bounded, so
+            # nothing stopped the scale factor collapsing towards zero
+            # efficiency except the helper's hard throw at 1 + P <= 0 -- a cliff
+            # rather than a bound, which is why the curves drop sharply in
+            # places. f_pass = SF is the pass-side counterpart of f_fail.
+            #
+            # Unlike the fail floor this is a smoothness guard, not a
+            # requirement: the pass category is where the statistics are, so
+            # nothing is being emptied. Keep it loose enough to catch only
+            # pathology.
+            f_pass = 1.0 + self.coeff_scale * pol
+            penalty += tf.reduce_sum(
+                self._hinge((self.pass_floor - f_pass) / self.pass_width)
+            )
+        return penalty
