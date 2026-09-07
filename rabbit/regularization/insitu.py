@@ -1,7 +1,10 @@
 import numpy as np
 import tensorflow as tf
+from wums import logging
 
 from rabbit.regularization.regularizer import Regularizer
+
+logger = logging.child_logger(__name__)
 
 AUX_NAME = "insitu_efficiency_bound"
 
@@ -140,6 +143,7 @@ class InSituEfficiencyBound(Regularizer):
             )
         self.param_index = None
         self.basis_tf = None
+        self.design = None
 
     def set_expectations(self, initial_params, initial_observables, parms=None):
         """Resolve the coefficient names against the current parameter layout.
@@ -150,12 +154,39 @@ class InSituEfficiencyBound(Regularizer):
         """
         found = self.resolve_indices(parms, self.labels, who=type(self).__name__)
         positions = np.array([found[name] for name in self.labels], dtype=np.int64)
-        # cell -> position in the fit parameter vector, via the label list.
-        # A gather rather than a sparse matmul: the loss is XLA compiled
-        # (_XlaMustCompile), and SparseTensorDenseMatMul has no XLA lowering, so
-        # a sparse design matrix aborts the minimizer on the first call.
-        self.param_index = tf.constant(positions[self.coeff_index], dtype=tf.int32)
-        self.basis_tf = tf.constant(self.basis, dtype=self.dtype)
+
+        # The polynomial is linear in the coefficients, so evaluating it is a
+        # matrix product. It used to be written as a gather of n_cells x k
+        # entries whose custom gradient scattered them back with
+        # unsorted_segment_sum -- 700,416 float64 values into 6,538 buckets,
+        # ~107 collisions each. Float64 atomics on a GPU are compare-and-swap
+        # loops, and that one backward op cost 3.9 s per gradient and 7.7 s per
+        # Hessian-vector product against 0.28 s for the entire likelihood
+        # without it: measured 27x, which is ~97% of the fit's wall clock.
+        #
+        # Expanding to a dense [n_cells, n_coeff] matrix removes the scatter.
+        # It is 170x more arithmetic and 986 MB for this model, but it is a
+        # bandwidth-bound matvec of about a millisecond, and its adjoint is
+        # another matvec rather than an atomic scatter. Duplicate entries are
+        # accumulated (idip pads its unused ut slots by repeating an index), so
+        # np.add.at rather than assignment.
+        n_cells, k = self.coeff_index.shape
+        design = np.zeros((n_cells, len(self.labels)), dtype=np.float64)
+        rows = np.repeat(np.arange(n_cells), k)
+        np.add.at(design, (rows, self.coeff_index.ravel()), self.basis.ravel())
+        self.design = tf.constant(design, dtype=self.dtype)
+        logger.debug(
+            f"in-situ bound: dense design {design.shape} "
+            f"({design.nbytes / 1024**3:.2f} GiB), replacing a "
+            f"{n_cells * k}-element scatter"
+        )
+
+        # Only the coefficients themselves are gathered now: 2112 entries, not
+        # 700,416, so the dense-gradient trick below costs nothing. It is still
+        # needed -- tf.gather's IndexedSlices gradient aborts XLA when scattered
+        # into a parameter block that happens to be empty.
+        self.param_index = tf.constant(positions, dtype=tf.int32)
+        self.basis_tf = None
 
     def _hinge(self, x):
         """Squared hinge on ``x``, optionally smoothed through the kink.
@@ -208,13 +239,13 @@ class InSituEfficiencyBound(Regularizer):
         return op(params)
 
     def compute_nll_penalty(self, params, observables=None):
-        if self.param_index is None:
+        if self.design is None:
             raise RuntimeError(
                 "InSituEfficiencyBound.set_expectations() must run before the "
                 "penalty is evaluated"
             )
-        theta = self._gather_dense_grad(params)  # (n_cells, k)
-        pol = tf.reduce_sum(self.basis_tf * theta, axis=-1)  # (n_cells,)
+        theta = self._gather_dense_grad(params)  # (n_coeff,)
+        pol = tf.linalg.matvec(self.design, theta)  # (n_cells,)
         u = self.effmc * (1.0 + self.coeff_scale * pol)
         # f_fail goes negative once u passes 1, so the same expression covers
         # both "too small a fail probability" and "no fail probability at all"
