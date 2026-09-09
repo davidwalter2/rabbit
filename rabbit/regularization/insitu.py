@@ -133,6 +133,17 @@ class InSituEfficiencyBound(Regularizer):
         self.coeff_scale = float(
             np.asarray(bundle.get("coeff_scale", [1.0])).ravel()[0]
         )
+        # P(theta_central) per cell: the scale factor the histmaker already
+        # applied when it re-linearised. Zero on iteration 0, and absent from
+        # bundles written before it existed, so default to zero. Without it the
+        # bound is imposed on 1 + delta*P(n) rather than on the total scale
+        # factor, i.e. at the wrong point on every iteration after the first.
+        offset = bundle.get("offset")
+        self.offset = (
+            tf.constant(np.asarray(offset, dtype=np.float64), dtype=dtype)
+            if offset is not None
+            else tf.constant(0.0, dtype=dtype)
+        )
         self.labels = [
             x.decode() if isinstance(x, bytes) else str(x) for x in bundle["labels"]
         ]
@@ -246,7 +257,8 @@ class InSituEfficiencyBound(Regularizer):
             )
         theta = self._gather_dense_grad(params)  # (n_coeff,)
         pol = tf.linalg.matvec(self.design, theta)  # (n_cells,)
-        u = self.effmc * (1.0 + self.coeff_scale * pol)
+        sf = 1.0 + self.offset + self.coeff_scale * pol
+        u = self.effmc * sf
         # f_fail goes negative once u passes 1, so the same expression covers
         # both "too small a fail probability" and "no fail probability at all"
         f_fail = (1.0 - u) / self.headroom
@@ -265,7 +277,7 @@ class InSituEfficiencyBound(Regularizer):
             # requirement: the pass category is where the statistics are, so
             # nothing is being emptied. Keep it loose enough to catch only
             # pathology.
-            f_pass = 1.0 + self.coeff_scale * pol
+            f_pass = sf
             penalty += tf.reduce_sum(
                 self._hinge((self.pass_floor - f_pass) / self.pass_width)
             )
