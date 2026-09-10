@@ -34,6 +34,33 @@ class ParamModel:
         #                     # to the model (e.g. POIs free, POUs constrained).
         # self.prior_means  = # np.ndarray, shape (nparams,). Optional; defaults
         #                     # to self.xparamdefault when not provided.
+        #
+        # # optional: how this model's POIs should be BLINDED.
+        # # rabbit blinds a POI MULTIPLICATIVELY (poi * exp(N(0, 5))), which is
+        # # the right choice for the default `Mu`: a signal strength centred at
+        # # 1 that scales YIELDS, so any value it is handed is still evaluable
+        # # and positivity is preserved.
+        # #
+        # # It is the wrong choice for a POI that is a PHYSICAL parameter fed
+        # # into a calculation with a restricted domain. Two things go wrong:
+        # # the calculation can be asked for a value it cannot evaluate, and --
+        # # because the reported coordinate is then poi_true / offset -- the
+        # # curvature scales as offset^2, so the reported SIGMA, the POI row of
+        # # the covariance and every impact on that POI are all divided by the
+        # # random factor. Only the RELATIVE uncertainty survives.
+        # #
+        # # Setting this to True switches the model's POIs to ADDITIVE
+        # # blinding, the same form rabbit already uses for nuisances of
+        # # interest. The offset is the same N(0, 5) draw, applied in the
+        # # parameter's OWN fit units. Because d(model)/d(internal) = 1 for a
+        # # translation, the covariance, the uncertainties and the impacts come
+        # # out EXACTLY unblinded while the central value is still hidden --
+        # # which is the point.
+        # #
+        # # Requires allowNegativeParam=True: with the squared storage an
+        # # additive offset could hand compute() a negative value, destroying
+        # # the only guarantee that branch provides (the Fitter raises).
+        # self.blind_additive = # bool, default False.
 
     @property
     def nparams(self):
@@ -192,6 +219,14 @@ class CompositeParamModel(ParamModel):
                 [v[: m.npoi] for v, m in zip(means, param_models)]
                 + [v[m.npoi :] for v, m in zip(means, param_models)]
             )
+
+        # Blinding form: a boolean, so unlike prior_sigmas there is no index
+        # permutation to track. Any submodel asking for additive blinding makes
+        # the composite additive -- the composite's POI block is the
+        # concatenation of the submodels' POIs, and mixing forms within one POI
+        # block is exactly what the Fitter refuses for a blinding group.
+        if any(getattr(m, "blind_additive", False) for m in param_models):
+            self.blind_additive = True
 
         # impact groups are name-based, so a plain merge survives the
         # permutation
