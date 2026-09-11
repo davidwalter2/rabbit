@@ -39,6 +39,8 @@ function of the parameter vector, which every device has in full, and it
 is evaluated once in the global term.
 """
 
+import gc
+
 import numpy as np
 import tensorflow as tf
 from wums import logging
@@ -276,6 +278,11 @@ class MultiDeviceFitter(Fitter):
         "_hessp_batch_sharded",
         "_global_view",
         "_global_graph_fns",
+        # Instance-level tf.function whose traced graph captures every shard's
+        # logk, so it belongs here with the rest of the dynamic machinery --
+        # both for __deepcopy__ (which previously caught it only by accident,
+        # via the separate jit_overrides scan) and for the drop below.
+        "_profile_beta",
     }
 
     def __init__(self, indata, param_model, options, **kwargs):
@@ -592,6 +599,27 @@ class MultiDeviceFitter(Fitter):
         collect the [nparams]-sized partials and sum them. See
         rabbit/sharding.py for why both choices are load-bearing.
         """
+        # Drop the previous generation before _build_shards allocates the next
+        # one, or both exist at once and device memory peaks at 2x on exactly
+        # the tensors this class is for. Rebuilds happen on arm_regularizers
+        # with a regularizer attached, on deepcopy (the saturated-model path in
+        # save_hists) and on any re-init_fit_parms.
+        #
+        # Both steps are needed. self._profile_beta is a live strong reference
+        # to the old shards until it is replaced at the end of this method, so
+        # the attributes have to go first; and what is left is CYCLIC (a
+        # tf.function graph references its captures and its siblings), so
+        # refcounting cannot reclaim it and the device memory is held until the
+        # generational collector happens to run. Measured with weakrefs on
+        # shards[i].logk, sampled at the moment the new shards are allocated:
+        #
+        #   as-is                      old alive: [True, True]
+        #   pop attributes only        old alive: [True, True]
+        #   pop attributes + collect   old alive: [False, False]
+        for name in self._DYNAMIC_TF_FUNCS:
+            self.__dict__.pop(name, None)
+        gc.collect()
+
         self._build_shards()
 
         jit = self.jit_compile

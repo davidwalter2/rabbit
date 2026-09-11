@@ -379,3 +379,55 @@ def test_bin_by_bin_stat_modes_match_single_device(mode):
             v = f.loss_val()
             vals.append(float(v[0] if isinstance(v, (tuple, list)) else v))
         np.testing.assert_allclose(vals[1], vals[0], rtol=RTOL)
+
+
+def test_rebuild_frees_the_previous_shard_generation():
+    """A rebuild must not hold two generations of shard tensors at once.
+
+    Sampled at the moment the new shards are allocated, which is the only
+    moment that matters for peak device memory -- after _make_tf_functions
+    returns, the old generation is unreachable either way and the check
+    passes vacuously.
+
+    Two things kept it alive. self._profile_beta is a live strong reference
+    to the old shards until it is replaced at the end of _make_tf_functions,
+    and what remains after dropping it is cyclic, so refcounting alone does
+    not reclaim it.
+    """
+    import weakref
+
+    from rabbit.sharding import MultiDeviceFitter
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = make_test_tensor(tmpdir)
+        f = _make_fitter(fname, 2, noBinByBinStat=False)
+        f.defaultassign()
+        f.set_nobs(f.indata.data_obs)
+
+        # trace every graph, so each one really holds its captures
+        f.loss_val()
+        f.loss_val_grad()
+        f.loss_val_grad_hessp(tf.constant(np.ones(f.x.shape[0])))
+        f._profile_beta()
+
+        refs = [weakref.ref(shard.logk) for shard in f.shards]
+        alive = {}
+
+        original = MultiDeviceFitter._build_shards
+
+        def spy(self):
+            # deliberately NO gc.collect() here: the production path has to do
+            # it, and collecting in the probe would let this test pass with the
+            # collect removed from _make_tf_functions
+            alive["at_allocation"] = [r() is not None for r in refs]
+            return original(self)
+
+        MultiDeviceFitter._build_shards = spy
+        try:
+            f._make_tf_functions()
+        finally:
+            MultiDeviceFitter._build_shards = original
+
+        assert alive["at_allocation"] == [False, False], alive["at_allocation"]
+        # and the rebuild is still a no-op numerically
+        np.testing.assert_allclose(float(f.loss_val()), 20.185670, rtol=1e-6)
