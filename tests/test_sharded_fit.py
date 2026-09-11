@@ -317,7 +317,9 @@ def test_regularizers_are_refused_rather_than_silently_dropped():
         ("global_impacts_parms", "--doImpacts --impactType global"),
         ("gaussian_global_impacts_parms", "--doImpacts"),
         ("toyassign", "-t > 0"),
-        ("loss_val_valfull_grad_hess", "--fullNll"),
+        # full_nll, not loss_val_valfull_grad_hess: the latter has no caller
+        # in bin/, so testing it left the real --fullNll entry point uncovered
+        ("full_nll", "--fullNll"),
     ],
 )
 def test_unsharded_postfit_steps_fail_before_the_fit_not_after(method, flag):
@@ -332,3 +334,48 @@ def test_unsharded_postfit_steps_fail_before_the_fit_not_after(method, flag):
         f = _make_fitter(make_test_tensor(tmp), ndevices=2)
         with pytest.raises(NotImplementedError, match="multi-device mode"):
             getattr(f, method)()
+
+
+@pytest.mark.parametrize("how", ["hessian", "gaussnewton"])
+def test_reference_matrix_honours_precondition_from(how):
+    """--preconditionFrom must mean the same thing sharded as unsharded.
+
+    MultiDeviceFitter used to override _reference_matrix and return the
+    HVP-assembled exact Hessian unconditionally, so a sharded fit ignored
+    'gaussnewton' without warning -- measured max|delta| 1.1e+03 against the
+    single-device Gauss-Newton matrix. The override is gone: the base method
+    already reaches the sharded machinery through loss_val_grad_hess and
+    expected_yield, both of which the subclass replaces.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = make_test_tensor(tmpdir)
+        mats = []
+        for ndevices in (1, 2):
+            f = _make_fitter(fname, ndevices, preconditionFrom=how)
+            f.defaultassign()
+            f.set_nobs(f.indata.data_obs)
+            mats.append(np.asarray(f._reference_matrix()))
+        np.testing.assert_allclose(mats[1], mats[0], rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("mode", ["lite", "full"])
+def test_bin_by_bin_stat_modes_match_single_device(mode):
+    """Both BBB modes must run sharded and agree with the single-device loss.
+
+    'full' used to raise AttributeError: ShardIndataView did not define
+    betavar, which bbstat.profile_and_apply reads before its `and full`
+    short-circuits -- an opaque crash rather than one of the deliberate
+    NotImplementedErrors.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = make_test_tensor(tmpdir)
+        vals = []
+        for ndevices in (1, 2):
+            f = _make_fitter(
+                fname, ndevices, noBinByBinStat=False, binByBinStatMode=mode
+            )
+            f.defaultassign()
+            f.set_nobs(f.indata.data_obs)
+            v = f.loss_val()
+            vals.append(float(v[0] if isinstance(v, (tuple, list)) else v))
+        np.testing.assert_allclose(vals[1], vals[0], rtol=RTOL)

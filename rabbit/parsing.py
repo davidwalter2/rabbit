@@ -419,8 +419,13 @@ def common_parser():
         default=256,
         type=int,
         help="Number of Hessian-vector products evaluated together when the "
-        "dense Hessian is assembled from HVPs (preconditioning and, on the "
-        "multi-device path, the postfit Hessian). Memory scales with this and "
+        "dense Hessian is assembled from HVPs. Only the multi-device path "
+        "(--nDevices > 1) assembles it this way today, for both the "
+        "preconditioner reference matrix and the postfit Hessian; the "
+        "single-device path uses tape.jacobian and ignores this. NB the "
+        "assembly is O(nparams) graph evaluations where the jacobian is a "
+        "single pass, so the postfit covariance scales linearly in parameter "
+        "count there. Memory scales with this and "
         "the number of graph calls scales inversely: on a 4-way shard of a "
         "92144-bin model 256 costs a few GB and turns 6538 sequential HVPs into "
         "26 batched ones. The batch is halved automatically if the device "

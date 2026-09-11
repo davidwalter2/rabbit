@@ -882,6 +882,12 @@ def main():
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
+    # The GPU selection above has to run before TF may touch a GPU, i.e. before
+    # the logger exists, so it buffers its messages rather than dropping them.
+    from rabbit.sharding import drain_selection_log
+
+    drain_selection_log()
+
     # make list of fits with -1: asimov; 0: fit to data; >=1: toy
     fits = np.concatenate(
         [np.array([x]) if x <= 0 else 1 + np.arange(x, dtype=int) for x in args.toys]

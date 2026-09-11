@@ -136,7 +136,9 @@ class Fitter:
         # outcome can be written to the output. None if the minimizer raised.
         self.minimizer_result = None
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
-        self.hvp_batch = int(getattr(options, "hvpBatch", 256) or 256)
+        hvp_batch = getattr(options, "hvpBatch", 256)
+        # `or 256` would turn an explicit 0 into the default; test None
+        self.hvp_batch = 256 if hvp_batch is None else int(hvp_batch)
         # Optional parameter preconditioning (see rabbit/preconditioner.py).
         # getattr so callers that build options objects by hand keep working.
         # Parameter snapshots (see rabbit/snapshot.py). Everything the fit has
@@ -1724,10 +1726,19 @@ class Fitter:
             # Dense logk: [nbinsfull, nproc, nsyst] symmetric, or
             # [nbinsfull, nproc, 2, nsyst] asymmetric. Broadcast rnorm_init
             # over the trailing axes.
-            if self.indata.symmetric_tensor:
-                self.logk = self.indata.logk * rnorm_init[..., None]
-            else:
-                self.logk = self.indata.logk * rnorm_init[..., None, None]
+            # Pinned to the host: indata.logk is host-resident under
+            # FitInputData(host_memory=True) (multi-device mode), and without a
+            # scope this eager copy of the FULL [nbinsfull, nproc, nsyst]
+            # tensor lands on the default device -- GPU:0 -- before any shard
+            # exists, defeating both that pinning and the host-side slicing in
+            # MultiDeviceFitter._build_shards. Only reachable for
+            # systematic_type == "normal"; the log_normal branch above aliases
+            # indata.logk and so inherits its placement.
+            with tf.device("/CPU:0"):
+                if self.indata.symmetric_tensor:
+                    self.logk = self.indata.logk * rnorm_init[..., None]
+                else:
+                    self.logk = self.indata.logk * rnorm_init[..., None, None]
 
     def _compute_yields_noBBB(self, full=True, compute_norm=True):
         # full: compute yields inclduing masked channels
