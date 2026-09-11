@@ -278,10 +278,9 @@ class MultiDeviceFitter(Fitter):
         "_hessp_batch_sharded",
         "_global_view",
         "_global_graph_fns",
-        # Instance-level tf.function whose traced graph captures every shard's
-        # logk, so it belongs here with the rest of the dynamic machinery --
-        # both for __deepcopy__ (which previously caught it only by accident,
-        # via the separate jit_overrides scan) and for the drop below.
+        # Instance-level tf.function whose traced graph captures every
+        # shard's logk, so it is dynamic machinery like the rest: stripped
+        # on __deepcopy__ and dropped before a rebuild.
         "_profile_beta",
     }
 
@@ -599,23 +598,18 @@ class MultiDeviceFitter(Fitter):
         collect the [nparams]-sized partials and sum them. See
         rabbit/sharding.py for why both choices are load-bearing.
         """
-        # Drop the previous generation before _build_shards allocates the next
-        # one, or both exist at once and device memory peaks at 2x on exactly
-        # the tensors this class is for. Rebuilds happen on arm_regularizers
-        # with a regularizer attached, on deepcopy (the saturated-model path in
-        # save_hists) and on any re-init_fit_parms.
+        # Release the previous generation before _build_shards allocates the
+        # next one, or both exist at once and device memory peaks at 2x on
+        # exactly the tensors this class is for. Rebuilds happen on
+        # arm_regularizers with a regularizer attached, on deepcopy (the
+        # saturated-model path in save_hists) and on any re-init_fit_parms.
         #
-        # Both steps are needed. self._profile_beta is a live strong reference
-        # to the old shards until it is replaced at the end of this method, so
-        # the attributes have to go first; and what is left is CYCLIC (a
-        # tf.function graph references its captures and its siblings), so
-        # refcounting cannot reclaim it and the device memory is held until the
-        # generational collector happens to run. Measured with weakrefs on
-        # shards[i].logk, sampled at the moment the new shards are allocated:
-        #
-        #   as-is                      old alive: [True, True]
-        #   pop attributes only        old alive: [True, True]
-        #   pop attributes + collect   old alive: [False, False]
+        # Both steps are required. self._profile_beta holds a live reference to
+        # the old shards until it is replaced at the end of this method, so the
+        # attributes have to go first; what remains is cyclic (a tf.function
+        # graph references its captures and its siblings), so refcounting alone
+        # cannot reclaim it and the device memory would be held until the
+        # generational collector happened to run.
         for name in self._DYNAMIC_TF_FUNCS:
             self.__dict__.pop(name, None)
         gc.collect()

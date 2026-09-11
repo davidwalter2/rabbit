@@ -284,11 +284,12 @@ def test_regularizers_are_refused_rather_than_silently_dropped():
     """A sharded fit must not quietly minimise a different objective.
 
     The only global (non-shard) term is gnll_local, which sums the constraint
-    and external-likelihood pieces; there is no penalty in it. So a regularizer
-    passed on the command line used to be accepted and then simply not applied
-    -- the fit converged, wrote a plausible result, and had never enforced the
-    bound. Worse, its loss looked *better* than a single-device fit's, because
-    a positive penalty term was missing from it.
+    and external-likelihood pieces and carries no penalty, so a regularizer
+    that is accepted but not wired into it would be silently inert: the fit
+    converges, writes a plausible result, and never enforces the bound. Its
+    loss would even look *better* than a single-device fit's, a positive
+    penalty term being absent -- which is why this asserts the shift is
+    exactly the single-device shift rather than merely non-zero.
 
     The check cannot live in the constructor (self.regularizers is still empty
     there), which is why the docstring's "checked at construction" claim went
@@ -340,12 +341,12 @@ def test_unsharded_postfit_steps_fail_before_the_fit_not_after(method, flag):
 def test_reference_matrix_honours_precondition_from(how):
     """--preconditionFrom must mean the same thing sharded as unsharded.
 
-    MultiDeviceFitter used to override _reference_matrix and return the
-    HVP-assembled exact Hessian unconditionally, so a sharded fit ignored
-    'gaussnewton' without warning -- measured max|delta| 1.1e+03 against the
-    single-device Gauss-Newton matrix. The override is gone: the base method
-    already reaches the sharded machinery through loss_val_grad_hess and
-    expected_yield, both of which the subclass replaces.
+    MultiDeviceFitter inherits _reference_matrix: the base implementation
+    reaches the sharded machinery on its own, through loss_val_grad_hess and
+    expected_yield, both of which the subclass replaces. An override that
+    returned one of the two branches unconditionally would be invisible here
+    without this comparison, since the fit itself proceeds normally either
+    way.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         fname = make_test_tensor(tmpdir)
@@ -362,10 +363,9 @@ def test_reference_matrix_honours_precondition_from(how):
 def test_bin_by_bin_stat_modes_match_single_device(mode):
     """Both BBB modes must run sharded and agree with the single-device loss.
 
-    'full' used to raise AttributeError: ShardIndataView did not define
-    betavar, which bbstat.profile_and_apply reads before its `and full`
-    short-circuits -- an opaque crash rather than one of the deliberate
-    NotImplementedErrors.
+    'full' exercises the branch of bbstat.profile_and_apply that reads
+    indata.betavar, which the shard view has to expose even in lite mode
+    because the read happens before the `and full` short-circuits.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         fname = make_test_tensor(tmpdir)
@@ -385,14 +385,13 @@ def test_rebuild_frees_the_previous_shard_generation():
     """A rebuild must not hold two generations of shard tensors at once.
 
     Sampled at the moment the new shards are allocated, which is the only
-    moment that matters for peak device memory -- after _make_tf_functions
-    returns, the old generation is unreachable either way and the check
-    passes vacuously.
+    moment that matters for peak device memory: once _make_tf_functions has
+    returned the old generation is unreachable either way, so checking there
+    would pass vacuously.
 
-    Two things kept it alive. self._profile_beta is a live strong reference
-    to the old shards until it is replaced at the end of _make_tf_functions,
-    and what remains after dropping it is cyclic, so refcounting alone does
-    not reclaim it.
+    Both halves of the release matter -- dropping the attributes that still
+    reference the old shards, and collecting the cycle that is left -- so
+    the assertion fails if either is removed.
     """
     import weakref
 
