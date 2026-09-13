@@ -711,7 +711,25 @@ def fit(args, fitter, ws, dofit=True):
                 "pass (the one without a covariance) so it is recomputed here, "
                 "or use --globalImpacts, which needs only the covariance."
             )
-        parms_variances = tf.linalg.diag_part(fitter.cov)
+        # Only the parameters the external result actually covered have a
+        # postfit variance here: load_fitresult fills the intersection of the
+        # two parameter sets and leaves the rest of fitter.cov on the prefit
+        # diagonal it was initialized with. Reporting those would hand back a
+        # prefit width as a postfit uncertainty, which is exactly the
+        # "plausible-looking value" the NaN default above exists to avoid.
+        ext_var = tf.linalg.diag_part(fitter.cov).numpy()
+        ext_mask = getattr(fitter, "external_cov_mask", None)
+        if ext_mask is not None and not ext_mask.all():
+            n_missing = int((~ext_mask).sum())
+            logger.warning(
+                f"--externalPostfit covered {int(ext_mask.sum())} of "
+                f"{ext_mask.size} parameters; the remaining {n_missing} have no "
+                "postfit uncertainty and are written as NaN. Global impacts for "
+                "them are computed against a covariance block that is still the "
+                "prefit diagonal, so treat those rows as unreliable."
+            )
+            ext_var[~ext_mask] = np.nan
+        parms_variances = tf.constant(ext_var, dtype=fitter.indata.dtype)
         cov_available = True
 
     # Global impacts need the covariance and the parameter values, not the
