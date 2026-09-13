@@ -16,13 +16,15 @@ name: Hodor AI review
 # first_time_contributors — approval required until a contributor's first
 # merged commit, then automatic, as for main.yml). Consequences, baked in
 # below:
-#   - The workflow file, the hodor patch, and models.json are all read from
-#     the BASE branch checkout; PRs cannot modify what runs.
-#   - hodor checks the PR head out on the runner by itself; its agent reads
-#     PR content with a read-oriented toolset and also loads review
-#     guidelines from .agents/skills in the (PR) workspace. Note the
-#     exposure is NOT identical to main.yml: this job runs with secrets,
-#     while fork pull_request runs of main.yml never receive any, and the
+#   - The workflow file is read from the base branch by GitHub, and the
+#     hodor patch and models.json from a BASE-branch checkout made first
+#     and copied aside; the review workspace is then replaced by the PR
+#     merge commit. PRs cannot modify the workflow, patch, or model config.
+#   - The review workspace contains the PR merge tree: the agent reads PR
+#     content with a read-oriented toolset and also loads review guidelines
+#     from .agents/skills in the (PR) workspace. Note the exposure is NOT
+#     identical to main.yml: this job runs with secrets, while fork
+#     pull_request runs of main.yml never receive any, and the
 #     approval gate goes automatic after a contributor's first merged
 #     commit. The auto-running set is therefore: org members plus every
 #     fork author with ≥1 merged commit. That set is accepted deliberately
@@ -89,19 +91,33 @@ jobs:
       # Pinned commit of the hodor release in use (tag v0.7.7). Pinning the
       # SHA makes the build reproducible and the patch application exact.
       HODOR_COMMIT: 8a97b507021f6df0027769a442ad208f6365f916
-      # pi-format custom provider/model definitions used by the patch:
-      HODOR_MODELS_JSON: ${{ github.workspace }}/.github/hodor/models.json
       HODOR_MODEL: ${{ vars.HODOR_LLM_MODEL || 'Kimi-K3-FLATIRON' }}
       LLM_API_KEY: ${{ secrets.HODOR_LLM_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PI_OFFLINE: "1" # never download rg/fd binaries mid-review
     steps:
-      - name: Check out this repository (patch source)
-        uses: actions/checkout@v5
+      - name: Check out base branch (trusted inputs)
+        uses: actions/checkout@v4
         with:
-          # hodor reuses this checkout as its review workspace and diffs
-          # against origin/<base>; depth 1 leaves no origin/main ref and
-          # silently degrades reviews to command mode.
+          # pull_request_target checks out the BASE branch: the workflow's
+          # trusted inputs (hodor patch, models.json) are read from here,
+          # never from the PR.
+          path: base
+
+      - name: Copy trusted inputs out of the workspace
+        run: cp -r base/.github/hodor "$RUNNER_TEMP/hodor-config"
+
+      - name: Check out PR merge commit (review target)
+        uses: actions/checkout@v4
+        with:
+          # hodor reuses the GHA workspace as its review workspace and diffs
+          # against origin/<base>, computing "HEAD" from it. With the default
+          # base-branch checkout that diff is empty and its review state keys
+          # on the base tip, which silently no-ops every review (observed on
+          # #154/#159/#161). Checking out the merge ref makes HEAD the PR
+          # merge commit on base and fork PRs alike. fetch-depth 0 is needed
+          # so origin/<base> exists for the diff.
+          ref: refs/pull/${{ github.event.pull_request.number || inputs.pr_number }}/merge
           fetch-depth: 0
 
       - name: Preflight configuration
@@ -150,7 +166,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Cache bun dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
           key: hodor-${{ env.HODOR_COMMIT }}-${{ hashFiles('.github/hodor/custom-models.patch', '.github/hodor/models.json') }}
@@ -164,7 +180,7 @@ jobs:
           git -C "$HODOR_SRC" remote add origin https://github.com/mr-karan/hodor.git
           git -C "$HODOR_SRC" fetch -q --depth 1 origin "$HODOR_COMMIT"
           git -C "$HODOR_SRC" checkout -q FETCH_HEAD
-          git -C "$HODOR_SRC" apply "$GITHUB_WORKSPACE/.github/hodor/custom-models.patch"
+          git -C "$HODOR_SRC" apply "$RUNNER_TEMP/hodor-config/custom-models.patch"
           cd "$HODOR_SRC"
           bun install --frozen-lockfile
           bun run build
@@ -172,6 +188,9 @@ jobs:
       - name: Run hodor review
         run: |
           PR="${{ github.event.pull_request.number || inputs.pr_number }}"
+          # Trusted provider/model config copied from the base checkout
+          # (the workspace itself is the PR merge tree by then).
+          export HODOR_MODELS_JSON="$RUNNER_TEMP/hodor-config/models.json"
           # "cern" selects the custom provider defined in models.json; the
           # prefix is a provider id from HODOR_MODELS_JSON, not a pi builtin.
           bun run "$RUNNER_TEMP/hodor-src/dist/cli.js" \
