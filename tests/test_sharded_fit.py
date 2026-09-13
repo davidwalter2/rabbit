@@ -430,3 +430,50 @@ def test_rebuild_frees_the_previous_shard_generation():
         assert alive["at_allocation"] == [False, False], alive["at_allocation"]
         # and the rebuild is still a no-op numerically
         np.testing.assert_allclose(float(f.loss_val()), 20.185670, rtol=1e-6)
+
+
+@pytest.mark.parametrize("no_bbb", [False, True])
+def test_impacts_refused_only_when_bin_by_bin_stat_needs_the_unsharded_hessian(no_bbb):
+    """--doImpacts is refused sharded only with bin-by-bin stat enabled.
+
+    With BBB on, impacts_parms takes a second Hessian at profile=False to
+    split out the stat-only covariance, which the sharded loss does not
+    provide. With BBB off that branch is skipped, so refusing unconditionally
+    would take a working combination away.
+
+    The refusal has to happen at the point of use rather than being inherited,
+    because the inherited failure lands after the minimiser and the postfit
+    Hessian have already run.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = make_test_tensor(tmpdir)
+        f = _make_fitter(fname, 2, noBinByBinStat=no_bbb)
+        f.defaultassign()
+        f.set_nobs(f.indata.data_obs)
+        _, _, hess = f.loss_val_grad_hess()
+
+        if no_bbb:
+            f.impacts_parms(hess)  # must not raise
+        else:
+            with pytest.raises(NotImplementedError, match="Impacts"):
+                f.impacts_parms(hess)
+
+
+def test_sharded_loss_refuses_unarmed_regularizers():
+    """The sharded objective keeps the base class's armed check.
+
+    An unarmed regularizer would otherwise contribute a penalty whose
+    internals were never set, or none at all if the graphs were traced before
+    it was attached -- the objective drifting with no error either way.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = make_test_tensor(tmpdir)
+        f = _make_fitter(fname, 2)
+        f.defaultassign()
+        f.set_nobs(f.indata.data_obs)
+
+        f.regularizers = [_ParamOnlyPenalty()]
+        f._regularizers_armed = False
+        f._make_tf_functions()
+        with pytest.raises(RuntimeError, match="not armed"):
+            f.loss_val()

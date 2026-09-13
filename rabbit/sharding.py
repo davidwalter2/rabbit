@@ -501,6 +501,23 @@ class MultiDeviceFitter(Fitter):
     def gaussian_global_impacts_parms(self, *args, **kwargs):
         self._unsharded("Gaussian global impacts", "--doImpacts")
 
+    def impacts_parms(self, *args, **kwargs):
+        """Per-nuisance impacts. Refused only when bin-by-bin stat is on.
+
+        With BBB enabled the base implementation needs a second Hessian at
+        profile=False to split out the stat-only covariance, and the sharded
+        loss_val_grad_hess supports profile=True only. With BBB off that
+        branch is skipped and the sharded path works, so this must not be a
+        blanket refusal -- --doImpacts --nDevices N --noBinByBinStat is a
+        working combination.
+        """
+        if self.bbstat.enabled:
+            self._unsharded(
+                "Impacts with bin-by-bin statistical uncertainties",
+                "--doImpacts without --noBinByBinStat",
+            )
+        return super().impacts_parms(*args, **kwargs)
+
     def toyassign(self, *args, **kwargs):
         self._unsharded("Toy generation", "-t > 0")
 
@@ -695,6 +712,16 @@ class MultiDeviceFitter(Fitter):
             # every device has in full. gvg and gvgp both differentiate
             # gnll_local, so gradient, HVP and Hessian follow automatically.
             if len(self.regularizers):
+                # Same guard as Fitter._compute_nll_components: an unarmed
+                # regularizer would otherwise contribute a penalty whose
+                # internals were never set, or be omitted entirely if the
+                # graphs were traced before it was attached -- either way the
+                # objective drifts silently.
+                if not getattr(self, "_regularizers_armed", False):
+                    raise RuntimeError(
+                        "Regularizers not armed; call arm_regularizers() "
+                        "after attaching them (defaultassign does this)."
+                    )
                 penalty = tf.add_n(
                     [
                         reg.compute_nll_penalty(gview.get_x(), None)
