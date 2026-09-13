@@ -7,27 +7,42 @@ name: Hodor AI review
 # the repository's CERN-based self-hosted runners; GitHub-hosted runners
 # cannot reach the endpoint (verified: TCP connect blackholed).
 #
-# hodor has no native custom-endpoint support: its OpenAI-compatible fallback
-# model is hardwired to openrouter.ai (its documented LLM_BASE_URL is a stale
-# pre-rewrite artifact). We therefore clone hodor at a pinned tag, apply
-# .github/hodor/llm-base-url.patch (honors LLM_BASE_URL, pins plain OpenAI
-# chat-completions semantics, and remaps reasoning efforts medium/xhigh that
-# the endpoint's chat template rejects), and build it here.
+# The trigger is pull_request_target DELIBERATELY: a plain pull_request run
+# never receives secrets for fork PRs — and ~all of this repo's PRs are
+# forks — so the endpoint key would be missing for exactly the PRs that
+# need review most. pull_request_target runs the BASE branch's workflow in
+# the base-repo context (secrets available), and who may run it stays
+# governed by the repository's approval gate for fork contributors, the
+# same gate main.yml inherits. Consequences, baked in below:
+#   - The workflow file, the hodor patch, and models.json are all read from
+#     the BASE branch checkout; PRs cannot modify what runs.
+#   - hodor checks the PR head out on the runner by itself and its agent
+#     reads PR content through read-only tools; loading of .agents/skills
+#     FROM THE WORKSPACE is disabled by the patch so PR-controlled
+#     instruction files never enter the reviewer's instructions.
+#   - HODOR_LLM_API_KEY should be a REPOSITORY secret, rotatable without
+#     touching other repos: the review agent can run bash on a CERN-network
+#     runner while reading unchecked PR content, which is a more exposed
+#     place for a shared org-wide credential than ordinary CI.
 #
-# Required configuration (organization or repository level):
-#   secret   HODOR_LLM_API_KEY   API key for the endpoint. An *organization*
-#                                secret is recommended so the same key can be
-#                                shared by every repo running this workflow
-#                                (set visibility to the selected repos).
-#   variable HODOR_LLM_BASE_URL  Optional override for the endpoint base URL.
+# hodor (and the pi stack it builds on) has no custom-endpoint support:
+# provider base URLs are hardcoded and pi's user-models file is explicitly
+# disabled (modelsPath: null) inside hodor. This workflow clones hodor at a
+# pinned commit and applies .github/hodor/custom-models.patch, which:
+#   - honors HODOR_MODELS_JSON pointing at a pi-format models.json defining
+#     a custom provider (.github/hodor/models.json carries the base URL,
+#     context window, token limits, and thinking-level/compatible quirks —
+#     none of it is hardcoded in the patch);
+#   - accepts a --model provider prefix naming a provider from that file
+#     (stock hodor whitelists builtin providers only);
+#   - disables workspace skill loading (see above).
 #
-# Token/key hygiene: the job is guarded to never run for fork PRs via the
-# pull_request trigger (GitHub withholds secrets there anyway). For a fork PR,
-# a maintainer can vet the change and start a review manually:
-#   Actions -> Hodor AI review -> Run workflow -> PR number
+# Required configuration:
+#   secret   HODOR_LLM_API_KEY   API key for the endpoint (repository secret)
+#   variable HODOR_LLM_MODEL     optional model-id override
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, ready_for_review]
   workflow_dispatch:
     inputs:
@@ -42,12 +57,12 @@ concurrency:
 
 jobs:
   review:
-    # Fork PRs on the pull_request trigger get no secrets; skip them.
-    # Skip drafts; reviews start when the PR is marked ready.
+    # Skip drafts; reviews start when the PR is marked ready. Fork
+    # contributors additionally pass the repository's approval gate
+    # (trusted contributors run automatically, as for main.yml).
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       !github.event.pull_request.draft)
+      !github.event.pull_request.draft
     # CERN-network self-hosted runners only (see header comment).
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
@@ -56,8 +71,11 @@ jobs:
       pull-requests: write # review comments on the PR
       issues: write # PR comments are issue comments via the API
     env:
-      HODOR_VERSION: v0.7.7
-      LLM_BASE_URL: ${{ vars.HODOR_LLM_BASE_URL || 'https://aigw.cern.ch/v1' }}
+      # Pinned commit of the hodor release in use (tag v0.7.7). Pinning the
+      # SHA makes the build reproducible and the patch application exact.
+      HODOR_COMMIT: 8a97b507021f6df0027769a442ad208f6365f916
+      # pi-format custom provider/model definitions used by the patch:
+      HODOR_MODELS_JSON: ${{ github.workspace }}/.github/hodor/models.json
       HODOR_MODEL: ${{ vars.HODOR_LLM_MODEL || 'Kimi-K3-FLATIRON' }}
       LLM_API_KEY: ${{ secrets.HODOR_LLM_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -74,7 +92,7 @@ jobs:
       - name: Preflight configuration
         run: |
           if [ -z "$LLM_API_KEY" ]; then
-            echo "::error::HODOR_LLM_API_KEY secret is not configured. Add it as an organization or repository secret."
+            echo "::error::HODOR_LLM_API_KEY secret is not configured. Add it as a repository secret (Settings > Secrets and variables > Actions)."
             exit 1
           fi
 
@@ -120,15 +138,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: hodor-${{ env.HODOR_VERSION }}-${{ hashFiles('.github/hodor/llm-base-url.patch') }}
+          key: hodor-${{ env.HODOR_COMMIT }}-${{ hashFiles('.github/hodor/custom-models.patch', '.github/hodor/models.json') }}
           restore-keys: hodor-
 
       - name: Build patched hodor
         run: |
           set -e
           HODOR_SRC="$RUNNER_TEMP/hodor-src"
-          git clone --depth 1 --branch "$HODOR_VERSION" https://github.com/mr-karan/hodor.git "$HODOR_SRC"
-          git -C "$HODOR_SRC" apply "$GITHUB_WORKSPACE/.github/hodor/llm-base-url.patch"
+          git init -q "$HODOR_SRC"
+          git -C "$HODOR_SRC" remote add origin https://github.com/mr-karan/hodor.git
+          git -C "$HODOR_SRC" fetch -q --depth 1 origin "$HODOR_COMMIT"
+          git -C "$HODOR_SRC" checkout -q FETCH_HEAD
+          git -C "$HODOR_SRC" apply "$GITHUB_WORKSPACE/.github/hodor/custom-models.patch"
           cd "$HODOR_SRC"
           bun install --frozen-lockfile
           bun run build
@@ -136,9 +157,11 @@ jobs:
       - name: Run hodor review
         run: |
           PR="${{ github.event.pull_request.number || inputs.pr_number }}"
+          # "cern" selects the custom provider defined in models.json; the
+          # prefix is a provider id from HODOR_MODELS_JSON, not a pi builtin.
           bun run "$RUNNER_TEMP/hodor-src/dist/cli.js" \
             "https://github.com/${{ github.repository }}/pull/$PR" \
-            --model "openrouter/$HODOR_MODEL" \
+            --model "cern/$HODOR_MODEL" \
             --reasoning-effort max \
             --post \
             --require-delivery
