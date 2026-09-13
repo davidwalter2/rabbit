@@ -1,0 +1,35 @@
+diff --git a/src/agent.ts b/src/agent.ts
+index 7c4f013..e92b44d 100644
+--- a/src/agent.ts
++++ b/src/agent.ts
+@@ -173,7 +173,11 @@ export async function reviewPr(opts: {
+ 
+   const modelRuntime = await ModelRuntime.create({
+     credentials: new InMemoryCredentialStore(),
+-    modelsPath: null,
++    // HODOR_MODELS_JSON optionally points at a pi-format models.json defining
++    // custom (e.g. self-hosted OpenAI-compatible) providers and models,
++    // including their context windows, limits, and compat quirks. Unset keeps
++    // the stock behavior: no user state is read.
++    modelsPath: process.env.HODOR_MODELS_JSON ?? null,
+   });
+   if (process.env.LLM_API_KEY) {
+     await modelRuntime.setRuntimeApiKey(parsed.provider, process.env.LLM_API_KEY);
+diff --git a/src/model.ts b/src/model.ts
+index ff99b82..29a88b5 100644
+--- a/src/model.ts
++++ b/src/model.ts
+@@ -71,6 +71,13 @@ export function parseModelString(model: string): ParsedModel {
+       return { provider, modelId: parts.slice(1).join("/") };
+     }
+ 
++    // With a user-supplied models file (HODOR_MODELS_JSON), any provider
++    // prefix may name a custom provider defined there. Bad names surface as
++    // resolution errors from ModelRuntime.getModel with the effective list.
++    if (process.env.HODOR_MODELS_JSON) {
++      return { provider, modelId: parts.slice(1).join("/") };
++    }
++
+     throw new Error(
+       `Unsupported provider "${first}". Use a pi-ai provider prefix such as anthropic/, openai/, openrouter/, google/, mistral/, xai/, or bedrock/.`,
+     );
