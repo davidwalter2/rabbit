@@ -20,15 +20,24 @@ name: Hodor AI review
 #     the BASE branch checkout; PRs cannot modify what runs.
 #   - hodor checks the PR head out on the runner by itself; its agent reads
 #     PR content with a read-oriented toolset and also loads review
-#     guidelines from .agents/skills in the workspace — both trusted under
-#     the same approval gate that lets CI execute PR code on these runners.
+#     guidelines from .agents/skills in the (PR) workspace. Note the
+#     exposure is NOT identical to main.yml: this job runs with secrets,
+#     while fork pull_request runs of main.yml never receive any, and the
+#     approval gate goes automatic after a contributor's first merged
+#     commit. The auto-running set is therefore: org members plus every
+#     fork author with ≥1 merged commit. That set is accepted deliberately
+#     (established collaborators only, at time of writing); if it widens,
+#     harden by snapshotting .agents/skills from the BASE tree and pointing
+#     hodor's skillPaths at the copy (small hodor override), so PR content
+#     stops feeding the reviewer's instructions.
 #   - HODOR_LLM_API_KEY is an ORGANIZATION-level secret shared by every repo
 #     running this workflow. The review agent can run bash while reading
 #     checked-out PR content, so a prompt-injected PR could in principle exfil
-#     it — acceptable here because only trusted collaborators can trigger runs
-#     (approval gate above), the same trust that lets CI execute PR code on
-#     these runners. It must not be visible to repos that run with weaker
-#     gating.
+#     it. Accepted under the same trusted-set argument as the skills bullet
+#     above, with worst case limited to abuse of the aigw quota (the job's
+#     GITHUB_TOKEN is task-scoped and expires with the job). The org secret
+#     must only be visible to repos whose fork-PR gating is at least this
+#     strict.
 #
 # hodor (and the pi stack it builds on) has no custom-endpoint support:
 # provider base URLs are hardcoded and pi's user-models file is explicitly
