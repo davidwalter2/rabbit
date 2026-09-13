@@ -22,10 +22,13 @@ name: Hodor AI review
 #     PR content with a read-oriented toolset and also loads review
 #     guidelines from .agents/skills in the workspace — both trusted under
 #     the same approval gate that lets CI execute PR code on these runners.
-#   - HODOR_LLM_API_KEY should be a REPOSITORY secret, rotatable without
-#     touching other repos: the review agent can run bash on a CERN-network
-#     runner while reading checked-out PR content, which is a more exposed
-#     place for a shared org-wide credential than ordinary CI.
+#   - HODOR_LLM_API_KEY is an ORGANIZATION-level secret shared by every repo
+#     running this workflow. The review agent can run bash while reading
+#     checked-out PR content, so a prompt-injected PR could in principle exfil
+#     it — acceptable here because only trusted collaborators can trigger runs
+#     (approval gate above), the same trust that lets CI execute PR code on
+#     these runners. It must not be visible to repos that run with weaker
+#     gating.
 #
 # hodor (and the pi stack it builds on) has no custom-endpoint support:
 # provider base URLs are hardcoded and pi's user-models file is explicitly
@@ -39,7 +42,9 @@ name: Hodor AI review
 #     (stock hodor whitelists builtin providers only).
 #
 # Required configuration:
-#   secret   HODOR_LLM_API_KEY   API key for the endpoint (repository secret)
+#   secret   HODOR_LLM_API_KEY   API key for the endpoint (organization
+#                                secret shared with the repos using this
+#                                workflow; repository secret also works)
 #   variable HODOR_LLM_MODEL     optional model-id override
 
 on:
@@ -93,7 +98,7 @@ jobs:
       - name: Preflight configuration
         run: |
           if [ -z "$LLM_API_KEY" ]; then
-            echo "::error::HODOR_LLM_API_KEY secret is not configured. Add it as a repository secret (Settings > Secrets and variables > Actions)."
+            echo "::error::HODOR_LLM_API_KEY secret is not configured. Add it as an organization or repository secret."
             exit 1
           fi
 
