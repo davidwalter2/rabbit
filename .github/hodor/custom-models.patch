@@ -1,14 +1,8 @@
 diff --git a/src/agent.ts b/src/agent.ts
-index 7c4f013..2fa25e3 100644
+index 7c4f013..e92b44d 100644
 --- a/src/agent.ts
 +++ b/src/agent.ts
-@@ -1,5 +1,3 @@
--import { existsSync } from "node:fs";
--import { join } from "node:path";
- import {
-   createAgentSession,
-   DefaultResourceLoader,
-@@ -173,7 +171,11 @@ export async function reviewPr(opts: {
+@@ -173,7 +173,11 @@ export async function reviewPr(opts: {
  
    const modelRuntime = await ModelRuntime.create({
      credentials: new InMemoryCredentialStore(),
@@ -21,20 +15,6 @@ index 7c4f013..2fa25e3 100644
    });
    if (process.env.LLM_API_KEY) {
      await modelRuntime.setRuntimeApiKey(parsed.provider, process.env.LLM_API_KEY);
-@@ -523,8 +525,11 @@ export async function reviewPr(opts: {
-     const settingsManager = SettingsManager.inMemory({
-       compaction: { enabled: true },
-     });
--    const skillPaths = [join(workspacePath, ".agents", "skills")]
--      .filter((p) => existsSync(p));
-+    // Review workspaces contain checked-out PR content. Never load agent
-+    // "skills" from there: under CI triggers that service untrusted PRs,
-+    // workspace skills would be PR-author-controlled instructions merged
-+    // into the reviewer's instructions.
-+    const skillPaths: string[] = [];
-     const resourceLoader = new DefaultResourceLoader({
-       cwd: workspacePath,
-       agentDir: getAgentDir(),
 diff --git a/src/model.ts b/src/model.ts
 index ff99b82..29a88b5 100644
 --- a/src/model.ts

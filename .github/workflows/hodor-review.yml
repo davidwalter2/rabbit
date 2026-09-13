@@ -11,18 +11,20 @@ name: Hodor AI review
 # never receives secrets for fork PRs — and ~all of this repo's PRs are
 # forks — so the endpoint key would be missing for exactly the PRs that
 # need review most. pull_request_target runs the BASE branch's workflow in
-# the base-repo context (secrets available), and who may run it stays
-# governed by the repository's approval gate for fork contributors, the
-# same gate main.yml inherits. Consequences, baked in below:
+# the base-repo context (secrets available), and who may run stays governed
+# by the repository's fork-contributor approval gate (approval_policy:
+# first_time_contributors — approval required until a contributor's first
+# merged commit, then automatic, as for main.yml). Consequences, baked in
+# below:
 #   - The workflow file, the hodor patch, and models.json are all read from
 #     the BASE branch checkout; PRs cannot modify what runs.
-#   - hodor checks the PR head out on the runner by itself and its agent
-#     reads PR content through read-only tools; loading of .agents/skills
-#     FROM THE WORKSPACE is disabled by the patch so PR-controlled
-#     instruction files never enter the reviewer's instructions.
+#   - hodor checks the PR head out on the runner by itself; its agent reads
+#     PR content with a read-oriented toolset and also loads review
+#     guidelines from .agents/skills in the workspace — both trusted under
+#     the same approval gate that lets CI execute PR code on these runners.
 #   - HODOR_LLM_API_KEY should be a REPOSITORY secret, rotatable without
 #     touching other repos: the review agent can run bash on a CERN-network
-#     runner while reading unchecked PR content, which is a more exposed
+#     runner while reading checked-out PR content, which is a more exposed
 #     place for a shared org-wide credential than ordinary CI.
 #
 # hodor (and the pi stack it builds on) has no custom-endpoint support:
@@ -34,8 +36,7 @@ name: Hodor AI review
 #     context window, token limits, and thinking-level/compatible quirks —
 #     none of it is hardcoded in the patch);
 #   - accepts a --model provider prefix naming a provider from that file
-#     (stock hodor whitelists builtin providers only);
-#   - disables workspace skill loading (see above).
+#     (stock hodor whitelists builtin providers only).
 #
 # Required configuration:
 #   secret   HODOR_LLM_API_KEY   API key for the endpoint (repository secret)
