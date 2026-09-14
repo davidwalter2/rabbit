@@ -68,7 +68,13 @@ class ToyModel:
     naive concatenation agree by accident.
     """
 
-    def __init__(self, indata, allowNegativeParam=True, blind_additive=False):
+    def __init__(
+        self,
+        indata,
+        allowNegativeParam=True,
+        blind_additive=False,
+        blind_additive_scale=None,
+    ):
         self.indata = indata
         self.npoi = 1
         self.npou = 1
@@ -80,6 +86,8 @@ class ToyModel:
         self.xparamdefault = tf.constant([start, POU_START], dtype=indata.dtype)
         if blind_additive:
             self.blind_additive = True
+        if blind_additive_scale is not None:
+            self.blind_additive_scale = blind_additive_scale
 
     def compute(self, param, full=False):
         # one number per (bin, proc) is not needed: a per-process column is
@@ -508,6 +516,58 @@ def test_free_bin_scales_can_only_lower_the_loss(tensor_path):
     fs.minimize()
     nll_sat = float(fs.reduced_nll().numpy())
     assert nll_sat <= nll_main + 1e-7, (nll_sat, nll_main)
+
+
+# --- the scale must survive the composite rabbit_fit.py builds ----------------
+
+
+def test_declared_scale_survives_the_saturated_composite(tensor_path):
+    """The composite here is built INSIDE rabbit_fit.py, so the user has no
+    object to re-declare the scale on -- if it is dropped in the propagation
+    there is no remedy, and for a free POI the weak-blinding warning cannot
+    even report it. This is the configuration that makes that matter.
+    """
+    ind = inputdata.FitInputData(tensor_path)
+
+    plain = ToyModel(ind, blind_additive=True)
+    scaled = ToyModel(ind, blind_additive=True, blind_additive_scale=7.0)
+
+    comp_plain = CompositeParamModel([plain, make_saturated(ind, True)])
+    comp_scaled = CompositeParamModel([scaled, make_saturated(ind, True)])
+
+    f_plain = fitter.Fitter(ind, comp_plain, make_options(), do_blinding=True)
+    f_scaled = fitter.Fitter(ind, comp_scaled, make_options(), do_blinding=True)
+
+    off_plain = f_plain._blinding_values_poi_add[0]
+    off_scaled = f_scaled._blinding_values_poi_add[0]
+
+    assert off_plain != 0.0, "vacuous: the analysis POI is not being offset"
+    assert np.isclose(off_scaled, 7.0 * off_plain, rtol=1e-12, atol=0)
+
+    # the saturated bin scales declare nothing, so they keep 1.0 over their own
+    # slice -- a composite-wide scalar would have rescaled them too
+    np.testing.assert_allclose(comp_scaled.blind_additive_scale[1:], 1.0)
+
+
+def test_scaled_blinding_still_opens_the_bin_scales_at_one(tensor_path):
+    """The warm start's premise, with a non-default scale in play.
+
+    The main fitter and the composite must offset the shared POI name by the
+    SAME amount, or the copied x lands at a different physical point and the
+    loss equality goes away. That is what the scale propagation buys here.
+    """
+    ind = inputdata.FitInputData(tensor_path)
+    model = ToyModel(ind, blind_additive=True, blind_additive_scale=7.0)
+    f = fitter.Fitter(ind, model, make_options(), do_blinding=True)
+    f.defaultassign()
+    f.set_blinding_offsets(True)
+    f.set_nobs(f.expected_yield())
+    nll_main = float(f.reduced_nll().numpy())
+
+    _, composite, fs = build_saturated(f, do_blinding=True)
+    scales = fs.get_poi().numpy()[model.npoi : composite.npoi]
+    np.testing.assert_allclose(scales, 1.0, rtol=0, atol=1e-9)
+    assert np.isclose(float(fs.reduced_nll().numpy()), nll_main, rtol=0, atol=1e-9)
 
 
 if __name__ == "__main__":
