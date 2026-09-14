@@ -783,25 +783,124 @@ class Fitter:
                 "uncertainty, in the POI's own fit units."
             )
 
+    def _poi_reframe(self, xpoi, mul_old, add_old, mul_new, add_new):
+        """Rewrite a stored POI coordinate for a new pair of blinding offsets,
+        holding the PHYSICAL value :meth:`get_poi` reports fixed.
+
+        ``get_poi`` is affine in the model frame::
+
+            poi = T(x) * mul + add        T = identity, or square when
+                                          allowNegativeParam is False
+
+        so the coordinate that reproduces the same ``poi`` under
+        ``(mul_new, add_new)`` is ``T^-1((T(x)*mul_old + add_old - add_new) /
+        mul_new)``. Both branches below are that expression, specialised:
+
+        * ``allowNegativeParam=True``: ``T`` is the identity, so it is the
+          affine map directly.
+        * ``allowNegativeParam=False``: the stored coordinate is
+          ``sqrt(poi/mul)``, and ``add`` is IDENTICALLY ZERO on this branch --
+          ``blind_additive`` raises unless ``allowNegativeParam`` is True (see
+          :meth:`init_fit_parms`) -- so the whole reframing collapses to
+          ``x * sqrt(mul_old / mul_new)``. Note the SQUARE ROOT: the ratio
+          itself would be the right factor only for a model whose POI is not
+          squared, and the default ``Mu`` is squared.
+
+        Reduces to the identity when the offsets do not change, which is what
+        makes :meth:`set_blinding_offsets` idempotent.
+        """
+        ratio = mul_old / mul_new
+        if self.param_model.allowNegativeParam:
+            return xpoi * ratio + (add_old - add_new) / mul_new
+        return xpoi * tf.sqrt(ratio)
+
+    def _theta_reframe(self, theta, add_old, add_new):
+        """Rewrite a stored nuisance coordinate for a new blinding offset,
+        holding the PHYSICAL value :meth:`get_theta` reports fixed.
+
+        Derived from :meth:`get_theta`, which is::
+
+            theta_physical = theta_stored + add
+
+        There is NO transform in front of it -- unlike :meth:`get_poi`, whose
+        squaring branch is what forces a square root there -- and no
+        multiplicative offset exists for nuisances at all. So holding
+        ``theta_physical`` fixed is the plain additive shift, the same form the
+        additive POI slots already used::
+
+            theta -> theta + (add_old - add_new)
+
+        Only nuisances of INTEREST carry a non-zero offset
+        (``init_blinding_values`` loops over ``indata.noiidxs``), so this is the
+        identity on every ordinary constrained nuisance.
+
+        The constraint term is unaffected by construction: ``_compute_lc``
+        penalises ``get_x() - self.x0``, i.e. it compares the MODEL frame
+        against ``x0``, which is also in the model frame and which this does not
+        touch. Holding ``theta_physical`` fixed therefore leaves both the value
+        and the minimum of the penalty exactly where they were.
+
+        Reduces to the identity when the offset does not change, which is what
+        makes :meth:`set_blinding_offsets` idempotent.
+        """
+        return theta + (add_old - add_new)
+
+    def _reframe_blinded_x(self, x, old, new):
+        """Rewrite a FULL parameter vector for a new set of blinding offsets,
+        holding every physical value :meth:`get_x` reports fixed.
+
+        ``old`` and ``new`` are ``(poi_mul, poi_add, theta_add)`` triples. The
+        POI block and the nuisance block are reframed by :meth:`_poi_reframe`
+        and :meth:`_theta_reframe`; the ParamModel's OWN nuisances (the ``npou``
+        block, between them) are never blinded and are deliberately left
+        untouched.
+        """
+        npoi = self.param_model.npoi
+        nparams = self.param_model.nparams
+        nsyst = self.indata.nsyst
+
+        idxs = []
+        updates = []
+        if npoi:
+            idxs.append(np.arange(npoi))
+            updates.append(self._poi_reframe(x[:npoi], old[0], old[1], new[0], new[1]))
+        if nsyst:
+            idxs.append(nparams + np.arange(nsyst))
+            updates.append(
+                self._theta_reframe(
+                    x[nparams : nparams + nsyst],
+                    old[2],
+                    new[2],
+                )
+            )
+        if not idxs:
+            return x
+        return tf.tensor_scatter_nd_update(
+            x,
+            np.concatenate(idxs)[:, None],
+            tf.concat(updates, axis=0),
+        )
+
     def set_blinding_offsets(self, blind=True):
         """Arm or disarm the blinding offsets, holding the PHYSICAL point fixed.
 
         Blinding is a change of variables: ``self.x`` is the internal
         (blinded) coordinate and ``get_x()`` is the physical value the model
         and the likelihood see. Changing the offsets therefore moves the
-        physical point unless ``x`` is compensated, and for an ADDITIVE offset
-        that matters a great deal -- the fit would otherwise open at
-        ``xparamdefault + offset`` instead of at the start value the model
-        declared. That is the same class of failure as the 2026-09-09 alpha_s
-        bug, where the multiplicative form opened the fit at
-        ``xparamdefault * offset`` and handed SCETlib a value outside its
-        domain.
+        physical point unless ``x`` is compensated. ``self.x`` is initialised
+        to ``xparamdefault``, i.e. in the UNBLINDED frame, so arming the
+        offsets without compensating opens the fit at ``xparamdefault + off``
+        for an additive offset and at ``xparamdefault * off`` for a
+        multiplicative one, rather than at the start value the model declared.
+        For a signal strength that is merely a slow start; for a POI fed into
+        a calculation with a restricted domain it is an evaluation error, the
+        calculation being handed a value it cannot evaluate at all.
 
-        So shift ``x`` by ``off_old - off_new`` on the additive slots, which
-        keeps ``x + off`` invariant. Self-idempotent: arming twice shifts by
-        zero. Multiplicative slots are deliberately left alone -- their
-        physical start is preserved only when the declared default is 0, and
-        changing that would alter results for every analysis using them.
+        All three offsets are compensated here, through
+        :meth:`_reframe_blinded_x`, so ``get_x()`` is invariant under arming and
+        disarming in either direction -- for a multiplicative POI, an additive
+        POI and a blinded nuisance of interest alike. Self-idempotent:
+        re-arming the same offsets reframes by exactly 1 / 0.
         """
         if not self.do_blinding:
             return
@@ -814,13 +913,21 @@ class Fitter:
             poi_add_new = np.zeros(self.param_model.npoi, dtype=np.float64)
             theta_new = np.zeros(self.indata.nsyst, dtype=np.float64)
 
-        npoi = self.param_model.npoi
-        if npoi:
-            off_old = self._blinding_offsets_poi_add.value()
-            shift = off_old - tf.constant(poi_add_new, dtype=self.x.dtype)
-            self.x.assign(
-                tf.tensor_scatter_nd_add(self.x, np.arange(npoi)[:, None], shift)
+        self.x.assign(
+            self._reframe_blinded_x(
+                self.x,
+                (
+                    self._blinding_offsets_poi.value(),
+                    self._blinding_offsets_poi_add.value(),
+                    self._blinding_offsets_theta.value(),
+                ),
+                (
+                    tf.constant(poi_new, dtype=self.x.dtype),
+                    tf.constant(poi_add_new, dtype=self.x.dtype),
+                    tf.constant(theta_new, dtype=self.x.dtype),
+                ),
             )
+        )
 
         self._blinding_offsets_poi.assign(poi_new)
         self._blinding_offsets_poi_add.assign(poi_add_new)
@@ -990,19 +1097,32 @@ class Fitter:
         # start every parameter at its constraint center (prior mean / theta0
         # default, and the model default for unpriored params)
         #
-        # x0default is a PHYSICAL point, while self.x is the internal (blinded)
-        # coordinate, so subtract any armed additive offset. Without this the
-        # result would depend on whether the caller happens to run while
+        # x0default is the stored coordinate at the IDENTITY offsets, while
+        # self.x is the internal (blinded) coordinate, so reframe it into
+        # whichever offsets are currently armed. Without this the physical
+        # start point would depend on whether the caller happens to run while
         # disarmed -- which today's driver does, but only by accident of
-        # ordering. See set_blinding_offsets for the invariant.
-        if self.do_blinding and self.param_model.npoi:
+        # ordering -- and defaultassign()'s trailing disarm, which reframes
+        # back, would no longer land on the declared default. See
+        # set_blinding_offsets for the invariant.
+        #
+        # Gated on do_blinding alone, NOT on npoi: an analysis whose parameter
+        # of interest is a nuisance of interest (--poiAsNoi) can have npoi = 0
+        # and still need its theta block reframed.
+        if self.do_blinding:
             npoi = self.param_model.npoi
-            x0 = tf.tensor_scatter_nd_sub(
-                self.x0default,
-                np.arange(npoi)[:, None],
-                self._blinding_offsets_poi_add.value(),
+            nsyst = self.indata.nsyst
+            identity = (
+                tf.ones([npoi], dtype=self.x.dtype),
+                tf.zeros([npoi], dtype=self.x.dtype),
+                tf.zeros([nsyst], dtype=self.x.dtype),
             )
-            self.x.assign(x0)
+            armed = (
+                self._blinding_offsets_poi.value(),
+                self._blinding_offsets_poi_add.value(),
+                self._blinding_offsets_theta.value(),
+            )
+            self.x.assign(self._reframe_blinded_x(self.x0default, identity, armed))
         else:
             self.x.assign(self.x0default)
 

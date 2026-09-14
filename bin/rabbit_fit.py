@@ -350,7 +350,7 @@ def save_observed_hists(args, mappings, fitter, ws):
         )
 
 
-def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
+def save_hists(args, mappings, fitter, ws, prefit=True, profile=False, blind=False):
 
     for mapping in mappings:
         logger.info(f"Save inclusive histogram for {mapping.key}")
@@ -448,11 +448,75 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 fitter_saturated.tau.assign(saved_tau)
 
                 fitter_saturated.xdefaultassign()
+
+                # RE-ARM BLINDING. init_fit_parms() above re-created the offset
+                # Variables at the composite size, which creates them at the
+                # IDENTITY -- offsets_poi = 1, offsets_poi_add = 0 -- and
+                # nothing armed them again. So the saturated fit ran in an
+                # UNBLINDED frame and wrote an unblinded POI into
+                # results[...]["saturated_fit"]["parms"], silently unblinding
+                # any analysis that asked for this test.
+                #
+                # Arm BEFORE touching x: set_blinding_offsets holds the
+                # PHYSICAL point fixed for both offset forms, so arming has to
+                # precede any assignment to x.
+                #
+                # The warm start below depends on that, and not via the
+                # analysis POI -- via the SATURATED bin scales, which are POIs
+                # of the composite and so are blinded along with everything
+                # else. Reframed, they stay at their physical default of 1;
+                # unreframed they land at 1 * exp(N(0, 5)) and the composite
+                # opens millions of units above the main fit. Pinned by
+                # tests/test_saturated_blinding.py.
+                if fitter_saturated.do_blinding:
+                    fitter_saturated.set_blinding_offsets(blind=blind)
+
+                # WARM START from the main fit's converged point, with every bin
+                # scale left at its default of 1.
+                #
+                # xdefaultassign() puts the composite at x0default, i.e. a COLD
+                # start from the model's anchor, which re-solves the whole fit
+                # from scratch. That is wasteful, and for a multimodal
+                # likelihood it is also WRONG: if the cold saturated fit stops
+                # above the main fit's own NLL, the statistic
+                # q = 2*(NLL_main - NLL_sat) comes out NEGATIVE, which is not a
+                # deviance. Starting where the main fit converged, with the bin
+                # scales at 1, makes the composite loss EQUAL the main loss by
+                # construction, so q >= 0 is guaranteed and the statistic reads
+                # as "what do these free bin scales buy from HERE".
+                #
+                # The permutation is the one used for x0 just above:
+                #   main      [poi_o | pou_o | theta]
+                #   composite [poi_o | poi_sat | pou_o | theta]
+                # x is the internal (blinded) coordinate on both sides, so the
+                # entries copy verbatim without a frame conversion. That rests
+                # on the two fitters offsetting each shared parameter name
+                # IDENTICALLY: the draw is seeded by name, and
+                # CompositeParamModel propagates both the blinding form and its
+                # per-POI scale, so the composite reproduces the analysis
+                # model's offsets on the analysis model's slice. If a submodel
+                # declaration were ever dropped in that propagation the copied
+                # x would land at a different PHYSICAL point and the loss
+                # equality below would quietly stop holding.
+                x_main = fitter.x.numpy()
+                if orig_model.npoi > 0:
+                    fitter_saturated.x[: orig_model.npoi].assign(
+                        x_main[: orig_model.npoi]
+                    )
+                if orig_model.npou > 0:
+                    fitter_saturated.x[
+                        composite_model.npoi : composite_model.npoi + orig_model.npou
+                    ].assign(x_main[orig_model.npoi : orig_model.nparams])
+                fitter_saturated.x[composite_model.nparams :].assign(
+                    x_main[orig_model.nparams :]
+                )
+
                 # The composite re-init reordered and resized the parameter
-                # vector (one POI per projected bin, inserted ahead of the
-                # original model's block), so regularizers must be re-armed or
-                # they read the wrong entries. xdefaultassign() above is
-                # deliberate but does not arm them.
+                # vector (one POI per projected bin, appended AFTER the
+                # original model's POIs -- see the layout diagram above), so
+                # regularizers must be re-armed or they read the wrong
+                # entries. xdefaultassign() above is deliberate but does not
+                # arm them.
                 fitter_saturated.arm_regularizers()
                 cb = fitter_saturated.minimize()
                 cov_saturated = None
@@ -1046,6 +1110,7 @@ def main():
                             ws,
                             prefit=False,
                             profile=not args.noPostfitProfileBB,
+                            blind=blinded_fits[i],
                         )
                 else:
                     fit_time.append(time.time())
