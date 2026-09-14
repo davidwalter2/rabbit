@@ -5,8 +5,8 @@ arming the offsets moves the PHYSICAL point unless ``x`` is compensated. The
 additive form is compensated (``set_blinding_offsets`` shifts by
 ``off_old - off_new``); the multiplicative form was not, so a blinded fit opened
 at ``default * exp(offset)`` with ``offset ~ N(0, 5)`` instead of at the start
-value the model declared. That is the same class of failure as the 2026-09-09
-alpha_s bug, in the form that caused it.
+value the model declared. For a signal strength that is a slow start; for a POI
+fed into a calculation with a restricted domain it is an evaluation error.
 
 The compensation is NOT the offset ratio in general. ``get_poi`` is affine in the
 model frame,

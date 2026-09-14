@@ -892,8 +892,9 @@ class Fitter:
         offsets without compensating opens the fit at ``xparamdefault + off``
         for an additive offset and at ``xparamdefault * off`` for a
         multiplicative one, rather than at the start value the model declared.
-        That is the 2026-09-09 alpha_s bug: the multiplicative form handed
-        SCETlib a value outside its domain.
+        For a signal strength that is merely a slow start; for a POI fed into
+        a calculation with a restricted domain it is an evaluation error, the
+        calculation being handed a value it cannot evaluate at all.
 
         All three offsets are compensated here, through
         :meth:`_reframe_blinded_x`, so ``get_x()`` is invariant under arming and

@@ -251,10 +251,12 @@ def test_multiplicative_path_keeps_its_arithmetic_but_is_reframed(path):
     is now reframed by the offset RATIO so that the physical start is preserved
     like the additive case.
 
-    This assertion used to read "x is NOT frame-shifted for a multiplicative
-    model", which pinned the uncompensated behaviour: the fit then opened at
-    ``START * offset`` with ``offset = exp(N(0, 5))``. See
-    tests/test_blinding_multiplicative.py for the invariances that replaced it.
+    The two halves are separable and both matter: the Jacobian of the
+    multiplicative form is intended and unchanged (only the RELATIVE
+    uncertainty survives it), while the START POINT is not part of that
+    bargain -- an uncompensated frame would open the fit at ``START * offset``
+    with ``offset = exp(N(0, 5))``. tests/test_blinding_multiplicative.py
+    carries the full set of start-point invariances.
     """
     _, _, f = build(path, False, True)
     f.defaultassign()
