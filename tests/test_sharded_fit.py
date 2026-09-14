@@ -21,8 +21,7 @@ import tensorflow as tf
 
 from rabbit import fitter, inputdata
 from rabbit.param_models.helpers import load_model
-
-from .test_sparse_fit import make_options, make_test_tensor
+from tests.test_sparse_fit import make_options, make_test_tensor
 
 
 def _make_fitter(filename, ndevices=1, **kw):
@@ -809,3 +808,9 @@ def test_every_driver_called_fitter_method_is_classified_for_sharding():
         "them in rabbit/sharding.py, or add them to _SHARDED_SAFE with the "
         "reason they are safe when the bins are sharded."
     )
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v"]))

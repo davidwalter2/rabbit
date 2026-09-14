@@ -143,6 +143,7 @@ jobs:
           - test_external_term.py
           - test_global_asym_impacts.py
           - test_multi_systematic.py
+          - test_sharded_fit.py
           - test_sparse_fit.py
 
     steps:
