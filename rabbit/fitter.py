@@ -704,8 +704,17 @@ class Fitter:
         # absolute shift, so how well it hides depends on the POI's units. The
         # model is the only thing that knows them, so it declares the scale.
         # Default 1.0 == the historical draw.
-        additive_scale = float(
-            getattr(self.param_model, "blind_additive_scale", 1.0) or 1.0
+        #
+        # Scalar (one scale for all of a model's POIs) or per-POI vector, which
+        # is what CompositeParamModel produces: the scale is in each
+        # parameter's own units, so a composite cannot reduce its submodels'
+        # declarations to a single number.
+        additive_scale = np.broadcast_to(
+            np.asarray(
+                getattr(self.param_model, "blind_additive_scale", 1.0),
+                dtype=np.float64,
+            ),
+            (self.param_model.npoi,),
         )
         for i in range(self.param_model.npoi):
             param = self.param_model.params[i]
@@ -715,7 +724,7 @@ class Fitter:
             logger.debug(f"Blind parameter {param} (seed='{seed}')")
             value = deterministic_random_from_string(seed)
             if self._blind_additive:
-                self._blinding_values_poi_add[i] = additive_scale * value
+                self._blinding_values_poi_add[i] = additive_scale[i] * value
             else:
                 self._blinding_values_poi[i] = np.exp(value)
 

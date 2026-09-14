@@ -32,7 +32,7 @@ import pytest
 import tensorflow as tf
 
 from rabbit import fitter, inputdata, tensorwriter
-from rabbit.param_models.param_model import ParamModel
+from rabbit.param_models.param_model import CompositeParamModel, ParamModel
 
 # Deliberately NON-ZERO. A zero default would satisfy the start-invariance test
 # by accident -- ``0 * offset == 0`` for the multiplicative form -- which is
@@ -67,6 +67,32 @@ class ToyModel(ParamModel):
         nproc = self.indata.nproc
         col = tf.reshape(1.0 + 0.1 * param[0], [1, 1])
         return tf.concat([col, tf.ones([1, nproc - 1], dtype=col.dtype)], axis=1)
+
+
+class SecondToyModel(ToyModel):
+    """A second POI-carrying model, with a DIFFERENT parameter name so its
+    deterministic draw differs from ToyModel's."""
+
+    def __init__(self, indata, **kwargs):
+        super().__init__(indata, **kwargs)
+        self.params = np.array([b"alphaS2"])
+
+
+class PouOnlyAdditiveModel(ParamModel):
+    """Declares blind_additive but carries no POIs, so it gets no vote."""
+
+    def __init__(self, indata):
+        super().__init__(indata)
+        self.npoi = 0
+        self.npou = 1
+        self.params = np.array([b"nuisance"])
+        self.xparamdefault = tf.constant([0.0], dtype=indata.dtype)
+        self.is_linear = True
+        self.allowNegativeParam = True
+        self.blind_additive = True
+
+    def compute(self, param, full=False):
+        return tf.ones([1, self.indata.nproc], dtype=self.indata.dtype)
 
 
 def make_tensor(path):
@@ -348,6 +374,96 @@ def test_weak_additive_blinding_is_reported(path, caplog):
     assert not any(
         "Additive blinding may be INEFFECTIVE" in r.message for r in caplog.records
     )
+
+
+# --- the scale must SURVIVE compositing -------------------------------------
+
+
+def _composite_offsets(path, models):
+    """Offsets the Fitter actually draws for a CompositeParamModel of `models`."""
+    ind = inputdata.FitInputData(path)
+    composite = CompositeParamModel([m(ind) for m in models])
+    f = fitter.Fitter(ind, composite, make_options(), do_blinding=True)
+    return composite, f._blinding_values_poi_add
+
+
+def test_composite_preserves_a_declared_scale(path):
+    """A submodel declaring a scale must not be quietly reset to the default.
+
+    The Fitter reads the scale off its EFFECTIVE model, so if the composite
+    drops the declaration the draw silently reverts to 1.0 -- in the
+    under-blinding direction, and with no warning possible for the free POIs
+    this feature exists for.
+    """
+    _, off_plain = _composite_offsets(
+        path, [lambda i: ToyModel(i, blind_additive=True)]
+    )
+    _, off_scaled = _composite_offsets(
+        path,
+        [lambda i: ToyModel(i, blind_additive=True, blind_additive_scale=7.0)],
+    )
+    assert off_plain[0] != 0.0
+    assert np.isclose(off_scaled[0], 7.0 * off_plain[0], rtol=1e-12, atol=0)
+
+
+def test_scale_is_per_poi_not_one_composite_value(path):
+    """Two submodels with different scales must each keep their own.
+
+    The scale is in each parameter's own units, so there is no correct single
+    composite value -- reducing to one (max, first, any) would silently
+    rescale somebody.
+    """
+    composite, off = _composite_offsets(
+        path,
+        [
+            lambda i: ToyModel(i, blind_additive=True, blind_additive_scale=7.0),
+            lambda i: SecondToyModel(i, blind_additive=True, blind_additive_scale=0.5),
+        ],
+    )
+    np.testing.assert_allclose(composite.blind_additive_scale, [7.0, 0.5])
+
+    # each offset is its own scale times the draw for its own NAME
+    ind = inputdata.FitInputData(path)
+    solo_a = fitter.Fitter(
+        ind, ToyModel(ind, blind_additive=True), make_options(), do_blinding=True
+    )._blinding_values_poi_add[0]
+    solo_b = fitter.Fitter(
+        ind, SecondToyModel(ind, blind_additive=True), make_options(), do_blinding=True
+    )._blinding_values_poi_add[0]
+    assert np.isclose(off[0], 7.0 * solo_a, rtol=1e-12, atol=0)
+    assert np.isclose(off[1], 0.5 * solo_b, rtol=1e-12, atol=0)
+
+
+def test_composite_of_composites_keeps_the_vector(path):
+    """The propagated vector is itself a legal declaration, so nesting works."""
+    ind = inputdata.FitInputData(path)
+    inner = CompositeParamModel(
+        [
+            ToyModel(ind, blind_additive=True, blind_additive_scale=7.0),
+            SecondToyModel(ind, blind_additive=True, blind_additive_scale=0.5),
+        ]
+    )
+    outer = CompositeParamModel([inner])
+    np.testing.assert_allclose(outer.blind_additive_scale, [7.0, 0.5])
+
+
+def test_undeclared_submodels_get_one(path):
+    """A submodel that declares nothing contributes 1.0 over its own slice."""
+    composite, _ = _composite_offsets(
+        path,
+        [
+            lambda i: ToyModel(i, blind_additive=True, blind_additive_scale=7.0),
+            lambda i: SecondToyModel(i),
+        ],
+    )
+    np.testing.assert_allclose(composite.blind_additive_scale, [7.0, 1.0])
+
+
+def test_a_poi_less_submodel_does_not_flip_the_form(path):
+    """The form governs the POI block, so only POI-carrying submodels vote."""
+    ind = inputdata.FitInputData(path)
+    composite = CompositeParamModel([ToyModel(ind), PouOnlyAdditiveModel(ind)])
+    assert not getattr(composite, "blind_additive", False)
 
 
 if __name__ == "__main__":

@@ -78,7 +78,12 @@ class ParamModel:
         # # O(1) or larger should set this to a few times its expected
         # # uncertainty. The Fitter additionally WARNS at startup whenever it
         # # can see a prefit sigma and the drawn offset is small against it.
-        # self.blind_additive_scale = # float, default 1.0.
+        # #
+        # # A scalar applies to all of the model's POIs. A per-POI array is
+        # # also accepted, and is what CompositeParamModel produces: the scale
+        # # is in each parameter's OWN units, so submodel declarations compose
+        # # as a vector rather than reducing to one value.
+        # self.blind_additive_scale = # float or array (npoi,), default 1.0.
 
     @property
     def nparams(self):
@@ -254,10 +259,13 @@ class CompositeParamModel(ParamModel):
         # mix. The override is safe there: both forms hide the value, and the
         # dangerous mix (an additive offset reaching a squared POI) is already
         # refused by the Fitter.
+        # Only POI-carrying submodels vote: the form governs the POI block, so a
+        # submodel with no POIs flipping the whole composite (and then being
+        # named as the reason) would be misleading.
         additive_models = [
             type(m).__name__
             for m in param_models
-            if getattr(m, "blind_additive", False)
+            if m.npoi > 0 and getattr(m, "blind_additive", False)
         ]
         if additive_models:
             self.blind_additive = True
@@ -272,6 +280,33 @@ class CompositeParamModel(ParamModel):
                     f"POI block because {additive_models} declared blind_additive=True; "
                     f"this overrides the (default multiplicative) form of {overridden}."
                 )
+
+            # The SCALE, unlike the form, is per-parameter units -- so it is
+            # carried as a per-POI VECTOR rather than reduced to one composite
+            # value. Each submodel contributes its own declaration over its own
+            # POI slice and there is no "any one wins" rule to get wrong, which
+            # is the same treatment prior_sigmas gets above. A composite of
+            # composites therefore works too: the vector is itself a legal
+            # declaration.
+            #
+            # Dropping this is NOT a benign default: the Fitter reads the scale
+            # off its effective model, so a submodel declaring scale=7 would
+            # blind at scale=1 the moment it is composited -- silently, and in
+            # the under-blinding direction. The weak-blinding warning cannot
+            # backstop it, because an additively blinded POI is typically free
+            # and so has no prefit sigma to compare against.
+            self.blind_additive_scale = np.concatenate(
+                [
+                    np.broadcast_to(
+                        np.asarray(
+                            getattr(m, "blind_additive_scale", 1.0), dtype=np.float64
+                        ),
+                        (m.npoi,),
+                    )
+                    for m in param_models
+                    if m.npoi > 0
+                ]
+            )
 
         # impact groups are name-based, so a plain merge survives the
         # permutation
