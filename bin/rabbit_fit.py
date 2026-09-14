@@ -488,9 +488,16 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False, blind=Fal
                 # The permutation is the one used for x0 just above:
                 #   main      [poi_o | pou_o | theta]
                 #   composite [poi_o | poi_sat | pou_o | theta]
-                # x is the internal (blinded) coordinate on both sides and the
-                # per-name offsets are deterministic, so the entries copy
-                # verbatim without a frame conversion.
+                # x is the internal (blinded) coordinate on both sides, so the
+                # entries copy verbatim without a frame conversion. That rests
+                # on the two fitters offsetting each shared parameter name
+                # IDENTICALLY: the draw is seeded by name, and
+                # CompositeParamModel propagates both the blinding form and its
+                # per-POI scale, so the composite reproduces the analysis
+                # model's offsets on the analysis model's slice. If a submodel
+                # declaration were ever dropped in that propagation the copied
+                # x would land at a different PHYSICAL point and the loss
+                # equality below would quietly stop holding.
                 x_main = fitter.x.numpy()
                 if orig_model.npoi > 0:
                     fitter_saturated.x[: orig_model.npoi].assign(
@@ -505,10 +512,11 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False, blind=Fal
                 )
 
                 # The composite re-init reordered and resized the parameter
-                # vector (one POI per projected bin, inserted ahead of the
-                # original model's block), so regularizers must be re-armed or
-                # they read the wrong entries. xdefaultassign() above is
-                # deliberate but does not arm them.
+                # vector (one POI per projected bin, appended AFTER the
+                # original model's POIs -- see the layout diagram above), so
+                # regularizers must be re-armed or they read the wrong
+                # entries. xdefaultassign() above is deliberate but does not
+                # arm them.
                 fitter_saturated.arm_regularizers()
                 cb = fitter_saturated.minimize()
                 cov_saturated = None
