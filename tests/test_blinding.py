@@ -166,73 +166,22 @@ def _asimov(f):
     return f.expected_yield()
 
 
-def test_model_sees_physical_while_x_is_blinded(path):
-    """compute() gets the physical value; fitter.x holds the blinded one."""
-    _, _, fu = build(path, True, False)
-    fu.defaultassign()
-    y_unblinded = fu.expected_yield().numpy()
+def test_model_sees_the_offset_while_x_does_not(path):
+    """compute() gets x + offset; fitter.x -- what gets written out -- does not.
 
-    _, model, fb = build(path, True, True)
+    The two frames differ by exactly the offset, and the stored one is the
+    declared default: that is what makes the coordinate safe to write out and
+    what stops the offset being recoverable from it.
+    """
+    _, _, fb = build(path, True, True)
     fb.defaultassign()
     fb.set_blinding_offsets(True)
-    # Zero the THETA offsets to isolate the POI: theta starts at 0, so arming
-    # puts the physical NOIs at their offsets and moves the yields for reasons
-    # that have nothing to do with the POI under test.
-    fb._blinding_offsets_theta.assign(np.zeros(fb.indata.nsyst, dtype=np.float64))
-    y_blinded = fb.expected_yield().numpy()
 
-    assert np.isclose(float(fb.get_poi()[0].numpy()), START, rtol=0, atol=1e-12)
-    assert np.allclose(y_blinded, y_unblinded, rtol=1e-12, atol=0)
-    assert not np.isclose(float(fb.x[0].numpy()), START, rtol=0, atol=1e-9)
+    add = float(fb._blinding_offsets_poi_add[0].numpy())
+    assert add != 0.0, "vacuous: POI was not blinded"
 
-
-def test_additive_leaves_hessian_exactly_unblinded(path):
-    """sigma = sqrt(diag(H^-1)), so 'sigma unblinded' IS 'H unchanged'."""
-
-    def loss_and_hess(blind_additive, do_blinding, asimov):
-        _, _, f = build(path, blind_additive, do_blinding)
-        f.defaultassign()
-        if do_blinding:
-            f.set_blinding_offsets(True)
-            f._blinding_offsets_theta.assign(np.zeros(f.indata.nsyst, dtype=np.float64))
-        f.set_nobs(asimov)
-        loss, _, hess = f.loss_val_grad_hess()
-        return float(loss.numpy()), hess.numpy()
-
-    _, _, f_ref = build(path, True, False)
-    f_ref.defaultassign()
-    asimov = _asimov(f_ref)
-
-    l_u, h_u = loss_and_hess(True, False, asimov)
-    l_a, h_a = loss_and_hess(True, True, asimov)
-
-    # Guard against a vacuous pass before comparing.
-    assert abs(h_u[0, 0]) > 1e-6, f"no POI curvature to compare: {h_u[0, 0]}"
-    assert np.isclose(l_a, l_u, rtol=0, atol=1e-9)
-    assert np.isclose(h_a[0, 0], h_u[0, 0], rtol=1e-10)
-    assert np.allclose(h_a, h_u, rtol=1e-10, atol=0)
-
-    # The defect being fixed: the multiplicative path scales the same element.
-    _, h_m = loss_and_hess(False, True, asimov)
-    assert not np.isclose(h_m[0, 0], h_u[0, 0], rtol=1e-6)
-
-
-def test_physical_start_invariant_under_arming(path):
-    """Arming must not move the physical point, and must be idempotent."""
-    _, _, f = build(path, True, True)
-    f.defaultassign()
-    assert np.isclose(float(f.get_poi()[0].numpy()), START, rtol=0, atol=1e-14)
-
-    f.set_blinding_offsets(True)
-    p_armed = float(f.get_poi()[0].numpy())
-    assert np.isclose(p_armed, START, rtol=0, atol=1e-12)
-    assert not np.isclose(float(f.x[0].numpy()), p_armed, rtol=0, atol=1e-9)
-
-    f.set_blinding_offsets(True)  # idempotent: shifts by zero
-    assert np.isclose(float(f.get_poi()[0].numpy()), p_armed, rtol=0, atol=1e-14)
-
-    f.set_blinding_offsets(False)
-    assert np.isclose(float(f.get_poi()[0].numpy()), START, rtol=0, atol=1e-12)
+    assert np.isclose(float(fb.x[0].numpy()), START, rtol=0, atol=1e-12)
+    assert np.isclose(float(fb.get_poi()[0].numpy()), START + add, rtol=0, atol=1e-12)
 
 
 def test_x0_untouched_by_arming(path):
@@ -245,32 +194,26 @@ def test_x0_untouched_by_arming(path):
     assert np.array_equal(before, f.x0.numpy())
 
 
-def test_multiplicative_path_keeps_its_arithmetic_but_is_reframed(path):
+def test_multiplicative_path_keeps_its_arithmetic(path):
     """A model that does not opt into ADDITIVE blinding keeps exactly its
-    ``get_poi`` arithmetic -- ``poi = x * offset``, no additive slot -- but ``x``
-    is now reframed by the offset RATIO so that the physical start is preserved
-    like the additive case.
+    ``get_poi`` arithmetic -- ``poi = x * offset``, no additive slot.
 
-    The two halves are separable and both matter: the Jacobian of the
-    multiplicative form is intended and unchanged (only the RELATIVE
-    uncertainty survives it), while the START POINT is not part of that
-    bargain -- an uncompensated frame would open the fit at ``START * offset``
-    with ``offset = exp(N(0, 5))``. tests/test_blinding_multiplicative.py
-    carries the full set of start-point invariances.
+    The Jacobian of the multiplicative form is intended and unchanged, which is
+    why only the RELATIVE uncertainty survives it. The stored coordinate stays
+    at the declared default, so the physical start is START * offset -- see
+    tests/test_blinding_start_point.py for why that is accepted.
     """
     _, _, f = build(path, False, True)
     f.defaultassign()
     f.set_blinding_offsets(True)
+    mul = float(f._blinding_offsets_poi[0].numpy())
     assert float(f._blinding_offsets_poi_add[0].numpy()) == 0.0
-    # the arithmetic of get_poi is untouched
+    assert not np.isclose(mul, 1.0), "vacuous: POI was not blinded"
+
     assert np.isclose(
-        float(f.get_poi()[0].numpy()),
-        float(f.x[0].numpy()) * float(f._blinding_offsets_poi[0].numpy()),
-        rtol=1e-14,
+        float(f.get_poi()[0].numpy()), float(f.x[0].numpy()) * mul, rtol=1e-14
     )
-    # x IS frame-shifted now, and that is what keeps the physical start at START
-    assert not np.isclose(float(f.x[0].numpy()), START, rtol=0, atol=1e-9)
-    assert np.isclose(float(f.get_poi()[0].numpy()), START, rtol=1e-14, atol=0)
+    assert np.isclose(float(f.x[0].numpy()), START, rtol=0, atol=1e-12)
 
 
 def test_determinism_across_fitters(path):
@@ -357,16 +300,17 @@ def test_default_scale_is_the_historical_draw(path):
     assert implicit._blinding_values_poi_add[0] == explicit._blinding_values_poi_add[0]
 
 
-def test_weak_additive_blinding_is_reported(path, caplog):
-    """An offset small against the prefit sigma must not fail silently.
+def test_weak_additive_blinding_scale_is_reported(path, caplog):
+    """A smearing too narrow against the prefit sigma must not fail silently.
 
-    The prefit sigma exists for a POI only where the model declared a prior on
-    it, which is the only case the Fitter can judge. A prior width far larger
-    than the drawn offset is the "POI in awkward units" case; a tight one is
-    the alpha_s-like case that is fine.
+    Judged on the CONFIGURED width, so the verdict is a property of the setup
+    and not of the sample: a sound configuration whose draw happens to land
+    near zero is not reported, and an unsound one is reported every time.
     """
     ind = inputdata.FitInputData(path)
+    MSG = "Additive blinding is configured too narrowly"
 
+    # smearing 5 * 1.0 wide against a sigma of 1e6: hopeless
     with caplog.at_level("WARNING"):
         fitter.Fitter(
             ind,
@@ -374,10 +318,9 @@ def test_weak_additive_blinding_is_reported(path, caplog):
             make_options(),
             do_blinding=True,
         )
-    assert any(
-        "Additive blinding may be INEFFECTIVE" in r.message for r in caplog.records
-    )
+    assert any(MSG in r.message for r in caplog.records)
 
+    # same smearing against a sigma of 1e-4: ample
     caplog.clear()
     with caplog.at_level("WARNING"):
         fitter.Fitter(
@@ -386,9 +329,41 @@ def test_weak_additive_blinding_is_reported(path, caplog):
             make_options(),
             do_blinding=True,
         )
-    assert not any(
-        "Additive blinding may be INEFFECTIVE" in r.message for r in caplog.records
-    )
+    assert not any(MSG in r.message for r in caplog.records)
+
+
+def test_the_weak_blinding_warning_does_not_leak_the_secret(path, caplog):
+    """The warning must not print the numbers it is reasoning about.
+
+    A message carrying the drawn offset hands over the secret outright; one
+    carrying the prefit sigma hands it over too, since sigma and the declared
+    scale determine each other. Only the parameter name and the knob to turn
+    are safe, and those are the actionable part anyway.
+    """
+    ind = inputdata.FitInputData(path)
+    sigma = 1e6
+    with caplog.at_level("WARNING"):
+        f = fitter.Fitter(
+            ind,
+            ToyModel(ind, blind_additive=True, prior_sigma=sigma),
+            make_options(),
+            do_blinding=True,
+        )
+    msgs = [r.message for r in caplog.records if "configured too narrowly" in r.message]
+    assert msgs, "warning did not fire; test is vacuous"
+    text = " ".join(msgs)
+
+    offset = abs(float(f._blinding_values_poi_add[0]))
+    assert offset > 0.0, "vacuous: no offset was drawn"
+
+    # neither the secret nor the yardstick that would reconstruct it
+    for forbidden, label in ((offset, "the drawn offset"), (sigma, "the prefit sigma")):
+        for fmt in (f"{forbidden:.4g}", f"{forbidden:.3g}", f"{forbidden:g}"):
+            assert fmt not in text, f"warning leaked {label} as {fmt!r}: {text}"
+
+    # it must still say which parameter and which knob
+    assert "alphaS" in text
+    assert "blind_additive_scale" in text
 
 
 # --- the scale must SURVIVE compositing -------------------------------------

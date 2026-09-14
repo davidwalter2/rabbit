@@ -479,31 +479,46 @@ def test_warm_start_sits_exactly_on_the_main_loss(
     assert np.isclose(nll_warm, nll_main, rtol=0, atol=1e-9), (nll_warm, nll_main)
 
 
-def test_additive_blinding_cannot_make_a_bin_scale_negative(tensor_path):
-    """Additive POI blinding composes with self-squaring, and only with it.
+def test_bin_scales_are_exempt_from_blinding(tensor_path):
+    """The saturated POIs carry no offset, while the analysis POI does.
 
-    The composite inherits ``blind_additive`` from the analysis model, so the
-    saturated POIs get an N(0, 5) offset too. Self-squaring is applied to the
-    value handed to compute(), i.e. AFTER the offset, giving ``(x + off)**2``.
-    The Fitter's transform is applied BEFORE it, giving ``x**2 + off``, which
-    for a negative draw is a negative bin scale and a NaN likelihood -- so this
-    combination is only representable the new way.
+    They are the test's own machinery, not a measurement, so there is nothing
+    in them to hide -- and blinding them would move their start away from the
+    1.0 the warm start needs, which is the whole reason the exemption exists.
+    SaturatedProjectModel declares it; CompositeParamModel carries the names
+    through the POI-block permutation.
     """
     _, _, f = build_main(tensor_path, True, True, True)
     sat, composite, fs = build_saturated(f, True)
+    sl = slice(1, 1 + sat.npoi)
 
-    off = fs._blinding_offsets_poi_add.numpy()[1 : 1 + sat.npoi]
-    assert np.any(np.abs(off) > 1e-6), "vacuous: saturated POIs were not blinded"
+    add = fs._blinding_offsets_poi_add.numpy()
+    mul = fs._blinding_offsets_poi.numpy()
 
-    # the physical bin scales at the warm start are exactly 1 despite the offset
-    scales = fs.get_poi().numpy()[1 : 1 + sat.npoi] ** 2
-    np.testing.assert_allclose(scales, np.ones(sat.npoi), rtol=0, atol=1e-12)
+    # the analysis POI IS blinded, or the exemption below proves nothing
+    assert abs(add[0]) > 1e-6 or not np.isclose(mul[0], 1.0)
 
-    # and they stay positive wherever the minimizer wanders
+    np.testing.assert_array_equal(add[sl], np.zeros(sat.npoi))
+    np.testing.assert_array_equal(mul[sl], np.ones(sat.npoi))
+
+
+def test_exempt_bin_scales_stay_positive_wherever_the_minimiser_goes(tensor_path):
+    """Self-squaring still guarantees positivity, independently of blinding.
+
+    The exemption removes the offset, but the squaring is what keeps the scale
+    positive, and that has to hold for any coordinate the minimiser visits --
+    a negative scale sends the expected yield negative and the Poisson log to
+    NaN.
+    """
+    _, _, f = build_main(tensor_path, True, True, True)
+    sat, composite, fs = build_saturated(f, True)
+    sl = slice(1, 1 + sat.npoi)
+
     x = fs.x.numpy()
-    x[1 : 1 + sat.npoi] += np.array([-30.0, 12.0, -3.0, 0.0])
+    x[sl] += np.array([-30.0, 12.0, -3.0, 0.0])
     fs.x.assign(x)
-    scales = fs.get_poi().numpy()[1 : 1 + sat.npoi] ** 2
+
+    scales = fs.get_poi().numpy()[sl] ** 2
     assert np.all(scales >= 0.0)
     assert np.all(np.isfinite(fs.expected_yield().numpy()))
     assert np.all(fs.expected_yield().numpy() > 0.0)
@@ -555,25 +570,37 @@ def test_declared_scale_survives_the_saturated_composite(tensor_path):
     np.testing.assert_allclose(comp_scaled.blind_additive_scale[1:], 1.0)
 
 
-def test_scaled_blinding_still_opens_the_bin_scales_at_one(tensor_path):
-    """The warm start's premise, with a non-default scale in play.
+def test_a_wide_smearing_that_breaks_the_model_is_refused(tensor_path):
+    """The limitation of the uncompensated start, stated as a refusal.
 
-    The main fitter and the composite must offset the shared POI name by the
-    SAME amount, or the copied x lands at a different physical point and the
-    loss equality goes away. That is what the scale propagation buys here.
+    An uncompensated armed fit opens at default + offset, and a smearing wide
+    enough to hide this POI takes it far enough that the yields go negative and
+    the likelihood is NaN. There is nothing for the minimiser to descend from,
+    so arming raises instead of letting the fit start and fail later.
+
+    This is the cost of never materialising the offset, and it is deliberate:
+    such a POI cannot be blinded this way. The narrow-smearing case below is
+    the contrast, and must still arm cleanly.
     """
     ind = inputdata.FitInputData(tensor_path)
-    model = ToyModel(ind, blind_additive=True, blind_additive_scale=7.0)
-    f = fitter.Fitter(ind, model, make_options(), do_blinding=True)
+    wide = ToyModel(ind, blind_additive=True, blind_additive_scale=7.0)
+    f = fitter.Fitter(ind, wide, make_options(), do_blinding=True)
     f.defaultassign()
-    f.set_blinding_offsets(True)
     f.set_nobs(f.expected_yield())
-    nll_main = float(f.reduced_nll().numpy())
+    with pytest.raises(RuntimeError, match="non-finite likelihood"):
+        f.set_blinding_offsets(True)
 
-    _, composite, fs = build_saturated(f, do_blinding=True)
-    scales = fs.get_poi().numpy()[model.npoi : composite.npoi]
-    np.testing.assert_allclose(scales, 1.0, rtol=0, atol=1e-9)
-    assert np.isclose(float(fs.reduced_nll().numpy()), nll_main, rtol=0, atol=1e-9)
+
+def test_a_smearing_the_model_survives_arms_cleanly(tensor_path):
+    """The contrast to the refusal above: same machinery, evaluable start."""
+    ind = inputdata.FitInputData(tensor_path)
+    ok = ToyModel(ind, blind_additive=True, blind_additive_scale=1.0)
+    f = fitter.Fitter(ind, ok, make_options(), do_blinding=True)
+    f.defaultassign()
+    f.set_nobs(f.expected_yield())
+    f.set_blinding_offsets(True)
+    assert abs(float(f._blinding_offsets_poi_add[0].numpy())) > 1e-6
+    assert np.isfinite(float(f.reduced_nll().numpy()))
 
 
 if __name__ == "__main__":

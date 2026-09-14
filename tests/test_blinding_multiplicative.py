@@ -161,21 +161,26 @@ def _blinded(f):
 
 
 @pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
-def test_physical_start_invariant_under_arming(path, model_cls):
-    """The fit must open where the model said, not at default * offset.
+def test_arming_does_not_move_the_coordinate(path, model_cls):
+    """Arming assigns offsets and leaves ``x`` alone.
 
-    Fails before the fix by a factor exp(N(0, 5)) -- up to many orders of
-    magnitude, which for a POI feeding a calculation with a restricted domain is
-    not a slow start but an evaluation error.
+    The physical start therefore DOES move -- to default * exp(N(0, 5)) for
+    this form -- and that is the accepted cost. Compensating it would write the
+    offset into ``x``, where the public ``x0default`` recovers it by
+    subtraction. Both halves are asserted, because a compensation reintroduced
+    for either reason has to fail here.
     """
     f = build(path, model_cls)
-    assert np.isclose(_poi(f), MU_START, rtol=0, atol=1e-12)
+    x_before = f.x.numpy().copy()
+    poi_before = _poi(f)
 
     f.set_blinding_offsets(True)
     assert _blinded(f), "vacuous: this POI was not blinded"
-    assert np.isclose(
-        _poi(f), MU_START, rtol=1e-12, atol=0
-    ), f"arming moved the physical POI from {MU_START} to {_poi(f)}"
+
+    np.testing.assert_array_equal(f.x.numpy(), x_before)
+    assert not np.isclose(
+        _poi(f), poi_before, rtol=1e-9
+    ), "the physical point did not move, so nothing was actually armed"
 
 
 @pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
@@ -193,10 +198,11 @@ def test_x_is_still_blinded(path, model_cls):
 
 @pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
 def test_arming_is_idempotent(path, model_cls):
-    """A second arm must reframe by exactly 1, on x as well as on get_poi.
+    """A second arm changes nothing, on x or on get_poi.
 
-    This is the property the additive fix already relies on; the driver arms
-    once per (pseudo)data set and the saturated path arms again on a copy.
+    Trivially true now that arming only assigns the offset Variables, which is
+    the point: the driver arms once per (pseudo)data set and the saturated path
+    arms again on a copy, and neither may accumulate.
     """
     f = build(path, model_cls)
     f.set_blinding_offsets(True)
@@ -206,6 +212,23 @@ def test_arming_is_idempotent(path, model_cls):
     f.set_blinding_offsets(True)
     np.testing.assert_array_equal(f.x.numpy(), x_once)
     assert _poi(f) == poi_once
+
+
+@pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
+def test_disarming_returns_to_the_starting_coordinate(path, model_cls):
+    """Arm then disarm leaves the stored coordinate exactly where it began.
+
+    Trivial now that neither direction touches ``x`` -- which is the assertion.
+    The driver disarms inside defaultassign() on every iteration, so any drift
+    here would accumulate across (pseudo)data sets.
+    """
+    f = build(path, model_cls)
+    x0 = f.x.numpy().copy()
+    f.set_blinding_offsets(True)
+    assert _blinded(f)
+    f.set_blinding_offsets(False)
+    np.testing.assert_array_equal(f.x.numpy(), x0)
+    assert np.isclose(_poi(f), MU_START, rtol=0, atol=1e-14)
 
 
 @pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
@@ -225,79 +248,29 @@ def test_disarming_returns_to_the_starting_coordinate(path, model_cls):
 
 
 @pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
-def test_defaultassign_lands_on_the_default_while_armed(path, model_cls):
-    """xdefaultassign must reframe too, not only set_blinding_offsets.
+def test_defaultassign_lands_on_x0default_whether_armed_or_not(path, model_cls):
+    """The stored start is the declared default in both cases.
 
     The driver calls defaultassign() once per (pseudo)data set, and from the
-    second set onwards the offsets are still armed from the previous one. Without
-    the reframing in xdefaultassign the physical start of every set after the
-    first depends on whether it happens to run armed.
+    second set onwards the offsets are still armed from the previous one. What
+    must not happen is the stored coordinate depending on that: it would make
+    the offset visible as a difference between sets.
     """
     f = build(path, model_cls)
+    f.defaultassign()
+    disarmed = f.x.numpy().copy()
+
     f.set_blinding_offsets(True)
     assert _blinded(f)
-
-    # the loop body in bin/rabbit_fit.py: defaultassign() while armed, then arm
     f.defaultassign()
-    assert np.isclose(_poi(f), MU_START, rtol=1e-12, atol=0)
-    f.set_blinding_offsets(True)
-    assert np.isclose(_poi(f), MU_START, rtol=1e-12, atol=0)
+    np.testing.assert_array_equal(f.x.numpy(), disarmed)
 
-    # xdefaultassign() on its own, armed (the toy-throw path does this)
     f.set_blinding_offsets(True)
     f.xdefaultassign()
-    assert np.isclose(_poi(f), MU_START, rtol=1e-12, atol=0)
+    np.testing.assert_array_equal(f.x.numpy(), disarmed)
 
 
 # --- the likelihood itself must be untouched ---------------------------------
-
-
-@pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
-def test_loss_is_the_same_armed_and_disarmed(path, model_cls):
-    """Blinding is a reparametrisation: at the same PHYSICAL point the loss,
-    and hence every fit result, must be identical.
-
-    Without the compensation the armed fitter sits at a different physical point
-    and this comparison is meaningless -- which is exactly why the start point
-    mattered.
-    """
-    f_ref = build(path, model_cls)
-    asimov = f_ref.expected_yield()
-
-    f_ref.set_nobs(asimov)
-    loss_disarmed = float(f_ref.reduced_nll().numpy())
-
-    f = build(path, model_cls)
-    f.set_blinding_offsets(True)
-    # isolate the POI: theta starts at 0, so arming moves the physical NOIs to
-    # their offsets and the yields for reasons unrelated to the POI under test
-    f._blinding_offsets_theta.assign(np.zeros(f.indata.nsyst, dtype=np.float64))
-    f.set_nobs(asimov)
-    loss_armed = float(f.reduced_nll().numpy())
-
-    assert np.isclose(loss_armed, loss_disarmed, rtol=0, atol=1e-9)
-
-
-def test_squared_branch_uses_the_square_root_of_the_ratio(path):
-    """Pin the algebra, not just its consequence.
-
-    For a squared POI, poi = x**2 * mul, so the frame-preserving factor on x is
-    sqrt(mul_old/mul_new). Using the ratio itself -- the correct factor for a POI
-    that is NOT squared -- would leave the physical start off by sqrt(offset),
-    which for offset = exp(N(0, 5)) is still orders of magnitude. Read the
-    factor off the coordinate rather than asserting on the offset value.
-    """
-    f = build(path, SquaredPoiModel)
-    x_before = float(f.x[0].numpy())
-    f.set_blinding_offsets(True)
-    assert _blinded(f)
-    x_after = float(f.x[0].numpy())
-    mul = float(f._blinding_offsets_poi[0].numpy())
-
-    factor = x_after / x_before
-    assert np.isclose(factor, 1.0 / np.sqrt(mul), rtol=1e-12, atol=0)
-    # and NOT the un-rooted ratio (guard against a plausible-looking wrong fix)
-    assert not np.isclose(factor, 1.0 / mul, rtol=1e-6, atol=0)
 
 
 def test_unblind_leaves_both_frames_equal(path):

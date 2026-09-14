@@ -62,6 +62,15 @@ class ParamModel:
         # # the only guarantee that branch provides (the Fitter raises).
         # self.blind_additive = # bool, default False.
         #
+        # # optional: declare that this model's POIs are NOT results and must
+        # # never be blinded -- auxiliary parameters that exist to absorb
+        # # something, not quantities anyone is trying to keep from the analyst.
+        # # SaturatedProjectModel's per-bin scales are the case this exists
+        # # for: they are blinded only as a side effect of sharing a POI block
+        # # with the analysis model, and a blinded bin scale does not start at
+        # # the 1.0 the saturated test requires of it.
+        # self.blind_exempt = # bool, default False.
+        #
         # # optional: the SCALE of that additive draw, in the POI's own units.
         # # Unlike the multiplicative form, additive blinding is NOT scale
         # # free: exp(N(0, 5)) spans e^+-10 whatever the POI means, but
@@ -271,6 +280,17 @@ class CompositeParamModel(ParamModel):
         # Only POI-carrying submodels vote: the form governs the POI block, so a
         # submodel with no POIs flipping the whole composite (and then being
         # named as the reason) would be misleading.
+        # Parameters no submodel wants blinded. Names rather than indices: the
+        # Fitter resolves blinding by name, and names survive the POI-block
+        # permutation that indices would not.
+        exempt = [
+            m.params[: m.npoi]
+            for m in param_models
+            if m.npoi > 0 and getattr(m, "blind_exempt", False)
+        ]
+        if exempt:
+            self.blind_exempt_params = np.concatenate(exempt)
+
         additive_models = [
             type(m).__name__
             for m in param_models
@@ -596,6 +616,13 @@ class SaturatedProjectModel(ParamModel):
         # so compute() squares it here instead. See the class docstring: the
         # bin scales are positive in BOTH branches, only the owner of the
         # transform differs.
+        # The bin scales are the saturated test's own machinery, not a
+        # measurement: there is nothing in them to hide. Say so, because
+        # compositing them with a blinded analysis model would otherwise blind
+        # them too, and a blinded bin scale does not open at 1.0 -- which is
+        # exactly what the warm start in rabbit_fit.py requires of it.
+        self.blind_exempt = True
+
         self._square_internally = bool(allowNegativeParam)
 
         # x -> x**2 in either branch, so the model is never linear in its

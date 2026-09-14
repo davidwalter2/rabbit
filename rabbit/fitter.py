@@ -77,6 +77,13 @@ NATIVE_MINIMIZER_OPTIONS = {
 }
 
 
+# Standard deviation of the deterministic blinding draw. The multiplicative
+# form is scale free, so this is only meaningful for the additive form, where
+# the smearing distribution is BLINDING_DRAW_STD * blind_additive_scale wide in
+# the parameter's own fit units.
+BLINDING_DRAW_STD = 5.0
+
+
 class Fitter:
     valid_systematic_types = ["log_normal", "normal"]
 
@@ -610,6 +617,18 @@ class Fitter:
         unblind_parameters = match_regexp_params(
             unblind_parameter_expressions, all_param_names
         )
+
+        # Parameters the MODEL declares exempt, on top of whatever --unblind
+        # asked for. These are auxiliary quantities that are not results (the
+        # saturated test's per-bin scales), so blinding them buys nothing and
+        # costs them their declared start point.
+        exempt = getattr(self.param_model, "blind_exempt_params", None)
+        if exempt is None and getattr(self.param_model, "blind_exempt", False):
+            exempt = self.param_model.params[: self.param_model.npoi]
+        if exempt is not None and len(exempt):
+            unblind_parameters = list(unblind_parameters) + [
+                q for q in exempt if q not in unblind_parameters
+            ]
         # unblinding is sensitive: always report exactly which parameters the
         # expressions resolved to, so an over-broad pattern is visible
         if unblind_parameters:
@@ -624,7 +643,7 @@ class Fitter:
             np.equal(self.indata.data_obs, np.floor(self.indata.data_obs))
         )
 
-        def deterministic_random_from_string(s, mean=0.0, std=5.0):
+        def deterministic_random_from_string(s, mean=0.0, std=BLINDING_DRAW_STD):
             # random value with seed taken based on string of parameter name
             if isinstance(s, str):
                 s = s.encode("utf-8")
@@ -729,33 +748,53 @@ class Fitter:
                 self._blinding_values_poi[i] = np.exp(value)
 
         if self._blind_additive:
-            self._warn_if_additive_blinding_is_weak(unblind_parameters)
+            self._warn_if_additive_blinding_scale_is_weak(unblind_parameters)
 
-    def _warn_if_additive_blinding_is_weak(self, unblind_parameters):
-        """Say so when an additive offset is too small to actually hide the POI.
+    def _warn_if_additive_blinding_scale_is_weak(self, unblind_parameters):
+        """Say so when the CONFIGURED additive smearing is too narrow to hide a POI.
 
         The multiplicative form is scale free -- ``exp(N(0, 5))`` spans
-        ``e**+-10`` whatever the POI means -- so it hides by orders of
-        magnitude regardless of units. ``+ N(0, 5)`` does not: it is an
-        absolute shift, and a POI whose uncertainty is O(1) in its own fit
-        units ends up offset by well under a sigma, i.e. effectively
-        unblinded. That failure is SILENT, and the thing it fails at is
-        blinding, so it is worth a startup warning.
+        ``e**+-10`` whatever the POI means. ``+ N(0, 5)`` does not: it is an
+        absolute shift, so a POI whose uncertainty is O(1) in its own fit units
+        ends up smeared by well under a sigma, i.e. effectively unblinded.
+        That failure is silent, and the thing it fails at is blinding, so it is
+        worth a startup warning.
 
-        The natural yardstick is the prefit sigma, which for a POI exists only
-        where the model declared a Gaussian prior on it (``prior_sigmas``);
+        Judged on the WIDTH OF THE DRAW, ``BLINDING_DRAW_STD *
+        blind_additive_scale``, and never on the value actually drawn. The
+        realised offset is a sample: a wide, perfectly adequate smearing lands
+        near zero some of the time, so testing the sample both misreports a
+        sound configuration and -- far worse -- makes the warning itself a
+        function of the secret. What is wrong in that case is the
+        configuration, and the configuration is what this reports.
+
+        For the same reason the message names no numbers. Printing the drawn
+        offset hands over the secret outright; printing the prefit sigma hands
+        it over too once the declared scale is known, since the two determine
+        each other. The actionable content is WHICH parameters are
+        under-smeared and WHICH knob raises them, and neither requires a
+        magnitude.
+
+        The yardstick is the prefit sigma, which for a POI exists only where
+        the model declared a Gaussian prior on it (``prior_sigmas``);
         ``indata.constraintweights`` covers the nuisances, not this block.
         Scaling the draw BY that sigma -- the obvious alternative -- is not
-        safe here: an unconstrained POI has no prior sigma at all, so the
-        offset would come out identically zero and blinding would silently
-        switch off completely. Hence a declared scale
-        (``blind_additive_scale``) plus this check wherever a sigma does
-        exist.
+        safe: an unconstrained POI has no prior sigma at all, so the smearing
+        would collapse to zero and blinding would switch off completely. Hence
+        a declared scale plus this check wherever a sigma does exist.
         """
         sigmas = getattr(self.param_model, "prior_sigmas", None)
         if sigmas is None:
             return
         sigmas = np.asarray(sigmas, dtype=np.float64)
+
+        scales = np.broadcast_to(
+            np.asarray(
+                getattr(self.param_model, "blind_additive_scale", 1.0),
+                dtype=np.float64,
+            ),
+            (self.param_model.npoi,),
+        )
 
         weak = []
         for i in range(self.param_model.npoi):
@@ -765,173 +804,119 @@ class Fitter:
             sigma = sigmas[i]
             if not np.isfinite(sigma) or sigma <= 0.0:
                 continue
-            offset = abs(self._blinding_values_poi_add[i])
-            if offset < 5.0 * sigma:
-                name = param.decode() if isinstance(param, bytes) else str(param)
-                weak.append((name, offset, offset / sigma))
+            # width of the smearing distribution, not the sample drawn from it
+            if BLINDING_DRAW_STD * scales[i] < 5.0 * sigma:
+                weak.append(param.decode() if isinstance(param, bytes) else str(param))
 
         if weak:
-            details = ", ".join(
-                f"{n} (|offset|={o:.4g}, {r:.2g} sigma)" for n, o, r in weak
-            )
             logger.warning(
-                "Additive blinding may be INEFFECTIVE for "
-                f"{len(weak)} of {self.param_model.npoi} POIs: the drawn offset is "
-                "smaller than 5 prefit sigma, so the true value is recoverable to "
-                f"within a few sigma of the blinded one. {details}. Raise "
-                "param_model.blind_additive_scale to a few times the expected "
-                "uncertainty, in the POI's own fit units."
+                "Additive blinding is configured too narrowly for "
+                f"{len(weak)} of {self.param_model.npoi} POIs: the smearing is "
+                "less than 5 prefit sigma wide, so the true value stays "
+                "recoverable to within a few sigma of the blinded one. "
+                f"Affected: {', '.join(weak)}. Raise "
+                "param_model.blind_additive_scale for these, to a few times "
+                "the expected uncertainty in the POI's own fit units."
             )
 
-    def _poi_reframe(self, xpoi, mul_old, add_old, mul_new, add_new):
-        """Rewrite a stored POI coordinate for a new pair of blinding offsets,
-        holding the PHYSICAL value :meth:`get_poi` reports fixed.
+    def _check_blinded_start_is_evaluable(self):
+        """Refuse a blinded start the model cannot be evaluated at.
 
-        ``get_poi`` is affine in the model frame::
+        Because the frame is not compensated, arming moves the PHYSICAL start
+        to ``default + offset``. For a POI that merely scales yields that is a
+        poor starting point and nothing worse. For a POI that feeds a
+        calculation with a restricted domain it can be fatal: the yields go
+        negative, the Poisson ``log`` returns NaN, and the minimiser has no
+        finite point to descend from -- it does not converge slowly, it cannot
+        start. That is the 2026-09-09 alpha_s failure.
 
-            poi = T(x) * mul + add        T = identity, or square when
-                                          allowNegativeParam is False
+        The wider the smearing the likelier this is, which is the awkward part:
+        ``blind_additive_scale`` is the knob raised to make blinding effective,
+        so the configurations that hide best are the ones most likely to land
+        outside the domain. Rather than discover it as a NaN partway through,
+        check once at arming and say so.
 
-        so the coordinate that reproduces the same ``poi`` under
-        ``(mul_new, add_new)`` is ``T^-1((T(x)*mul_old + add_old - add_new) /
-        mul_new)``. Both branches below are that expression, specialised:
-
-        * ``allowNegativeParam=True``: ``T`` is the identity, so it is the
-          affine map directly.
-        * ``allowNegativeParam=False``: the stored coordinate is
-          ``sqrt(poi/mul)``, and ``add`` is IDENTICALLY ZERO on this branch --
-          ``blind_additive`` raises unless ``allowNegativeParam`` is True (see
-          :meth:`init_fit_parms`) -- so the whole reframing collapses to
-          ``x * sqrt(mul_old / mul_new)``. Note the SQUARE ROOT: the ratio
-          itself would be the right factor only for a model whose POI is not
-          squared, and the default ``Mu`` is squared.
-
-        Reduces to the identity when the offsets do not change, which is what
-        makes :meth:`set_blinding_offsets` idempotent.
+        The consequence is a real limitation, not a warning: a POI whose
+        required smearing takes it out of its own evaluable range cannot be
+        blinded this way at all. The message therefore names the knobs, and --
+        like the weak-smearing warning -- no numbers, since the offset and the
+        start point each give the other away.
         """
-        ratio = mul_old / mul_new
-        if self.param_model.allowNegativeParam:
-            return xpoi * ratio + (add_old - add_new) / mul_new
-        return xpoi * tf.sqrt(ratio)
-
-    def _theta_reframe(self, theta, add_old, add_new):
-        """Rewrite a stored nuisance coordinate for a new blinding offset,
-        holding the PHYSICAL value :meth:`get_theta` reports fixed.
-
-        Derived from :meth:`get_theta`, which is::
-
-            theta_physical = theta_stored + add
-
-        There is NO transform in front of it -- unlike :meth:`get_poi`, whose
-        squaring branch is what forces a square root there -- and no
-        multiplicative offset exists for nuisances at all. So holding
-        ``theta_physical`` fixed is the plain additive shift, the same form the
-        additive POI slots already used::
-
-            theta -> theta + (add_old - add_new)
-
-        Only nuisances of INTEREST carry a non-zero offset
-        (``init_blinding_values`` loops over ``indata.noiidxs``), so this is the
-        identity on every ordinary constrained nuisance.
-
-        The constraint term is unaffected by construction: ``_compute_lc``
-        penalises ``get_x() - self.x0``, i.e. it compares the MODEL frame
-        against ``x0``, which is also in the model frame and which this does not
-        touch. Holding ``theta_physical`` fixed therefore leaves both the value
-        and the minimum of the penalty exactly where they were.
-
-        Reduces to the identity when the offset does not change, which is what
-        makes :meth:`set_blinding_offsets` idempotent.
-        """
-        return theta + (add_old - add_new)
-
-    def _reframe_blinded_x(self, x, old, new):
-        """Rewrite a FULL parameter vector for a new set of blinding offsets,
-        holding every physical value :meth:`get_x` reports fixed.
-
-        ``old`` and ``new`` are ``(poi_mul, poi_add, theta_add)`` triples. The
-        POI block and the nuisance block are reframed by :meth:`_poi_reframe`
-        and :meth:`_theta_reframe`; the ParamModel's OWN nuisances (the ``npou``
-        block, between them) are never blinded and are deliberately left
-        untouched.
-        """
-        npoi = self.param_model.npoi
-        nparams = self.param_model.nparams
-        nsyst = self.indata.nsyst
-
-        idxs = []
-        updates = []
-        if npoi:
-            idxs.append(np.arange(npoi))
-            updates.append(self._poi_reframe(x[:npoi], old[0], old[1], new[0], new[1]))
-        if nsyst:
-            idxs.append(nparams + np.arange(nsyst))
-            updates.append(
-                self._theta_reframe(
-                    x[nparams : nparams + nsyst],
-                    old[2],
-                    new[2],
-                )
+        try:
+            val = float(self._compute_loss().numpy())
+        except Exception as exc:
+            raise RuntimeError(
+                "The blinded starting point is outside the range this model can "
+                "be evaluated at: computing the likelihood there raised "
+                f"{type(exc).__name__}. Blinding is not frame-compensated -- on "
+                "purpose, so that the offset is never written into a coordinate "
+                "it could be recovered from -- so an armed fit opens at the "
+                "model default plus the offset. Lower "
+                "param_model.blind_additive_scale, exempt this parameter with "
+                "--unblind, or declare blind_exempt on the model if it is not a "
+                "result."
+            ) from exc
+        if not np.isfinite(val):
+            raise RuntimeError(
+                "The blinded starting point gives a non-finite likelihood, so "
+                "the minimiser has nothing to start from. Blinding is not "
+                "frame-compensated -- on purpose, so that the offset is never "
+                "written into a coordinate it could be recovered from -- so an "
+                "armed fit opens at the model default plus the offset, and for "
+                "this model that point is outside its evaluable range (most "
+                "often negative expected yields). Lower "
+                "param_model.blind_additive_scale, exempt this parameter with "
+                "--unblind, or declare blind_exempt on the model if it is not a "
+                "result."
             )
-        if not idxs:
-            return x
-        return tf.tensor_scatter_nd_update(
-            x,
-            np.concatenate(idxs)[:, None],
-            tf.concat(updates, axis=0),
-        )
 
     def set_blinding_offsets(self, blind=True):
-        """Arm or disarm the blinding offsets, holding the PHYSICAL point fixed.
+        """Arm or disarm the blinding offsets. Does NOT touch ``self.x``.
 
-        Blinding is a change of variables: ``self.x`` is the internal
-        (blinded) coordinate and ``get_x()`` is the physical value the model
-        and the likelihood see. Changing the offsets therefore moves the
-        physical point unless ``x`` is compensated. ``self.x`` is initialised
-        to ``xparamdefault``, i.e. in the UNBLINDED frame, so arming the
-        offsets without compensating opens the fit at ``xparamdefault + off``
-        for an additive offset and at ``xparamdefault * off`` for a
-        multiplicative one, rather than at the start value the model declared.
-        For a signal strength that is merely a slow start; for a POI fed into
-        a calculation with a restricted domain it is an evaluation error, the
-        calculation being handed a value it cannot evaluate at all.
+        Blinding is a change of variables: ``self.x`` is the internal (blinded)
+        coordinate and ``get_x()`` is the physical value the model and the
+        likelihood see. Compensating ``x`` when the offsets change would hold
+        the physical point fixed, which is superficially attractive -- the fit
+        would then always open at the start value the model declared.
 
-        All three offsets are compensated here, through
-        :meth:`_reframe_blinded_x`, so ``get_x()`` is invariant under arming and
-        disarming in either direction -- for a multiplicative POI, an additive
-        POI and a blinded nuisance of interest alike. Self-idempotent:
-        re-arming the same offsets reframes by exactly 1 / 0.
+        It is not done, because the compensation MATERIALISES THE SECRET.
+        ``x`` would be set to ``x0default`` mapped through the offsets, and
+        ``x0default`` is public: it is the default the model declares. Anything
+        that then observes ``x`` before the minimiser runs -- a saved prefit
+        parameter vector, a debug dump, a debugger, or any output added later --
+        recovers the offset by one subtraction, and the offset together with the
+        postfit value is the unblinded result. Blinding has to survive someone
+        looking at the fit's own state, so the offset is never written into a
+        coordinate that a known quantity can be subtracted from.
+
+        The cost is that the fit opens at the blinded frame's default rather
+        than the declared one, i.e. at a different starting point than an
+        unblinded run. That is accepted: the minimiser converges to the same
+        minimum, so the physical result is unchanged -- only the path to it
+        differs. See ``tests/test_blinding_start_point.py``, which fits the same
+        data armed and disarmed and requires the physical minimum to agree.
+
+        Callers that need the declared physical start must run disarmed.
         """
         if not self.do_blinding:
             return
         if blind:
-            poi_new = self._blinding_values_poi
-            poi_add_new = self._blinding_values_poi_add
-            theta_new = self._blinding_values_theta
+            self._blinding_offsets_poi.assign(self._blinding_values_poi)
+            self._blinding_offsets_poi_add.assign(self._blinding_values_poi_add)
+            self._blinding_offsets_theta.assign(self._blinding_values_theta)
         else:
-            poi_new = np.ones(self.param_model.npoi, dtype=np.float64)
-            poi_add_new = np.zeros(self.param_model.npoi, dtype=np.float64)
-            theta_new = np.zeros(self.indata.nsyst, dtype=np.float64)
-
-        self.x.assign(
-            self._reframe_blinded_x(
-                self.x,
-                (
-                    self._blinding_offsets_poi.value(),
-                    self._blinding_offsets_poi_add.value(),
-                    self._blinding_offsets_theta.value(),
-                ),
-                (
-                    tf.constant(poi_new, dtype=self.x.dtype),
-                    tf.constant(poi_add_new, dtype=self.x.dtype),
-                    tf.constant(theta_new, dtype=self.x.dtype),
-                ),
+            self._blinding_offsets_poi.assign(
+                np.ones(self.param_model.npoi, dtype=np.float64)
             )
-        )
+            self._blinding_offsets_poi_add.assign(
+                np.zeros(self.param_model.npoi, dtype=np.float64)
+            )
+            self._blinding_offsets_theta.assign(
+                np.zeros(self.indata.nsyst, dtype=np.float64)
+            )
+            return
 
-        self._blinding_offsets_poi.assign(poi_new)
-        self._blinding_offsets_poi_add.assign(poi_add_new)
-        self._blinding_offsets_theta.assign(theta_new)
+        self._check_blinded_start_is_evaluable()
 
     def get_theta(self):
         start = self.param_model.nparams
@@ -1097,34 +1082,13 @@ class Fitter:
         # start every parameter at its constraint center (prior mean / theta0
         # default, and the model default for unpriored params)
         #
-        # x0default is the stored coordinate at the IDENTITY offsets, while
-        # self.x is the internal (blinded) coordinate, so reframe it into
-        # whichever offsets are currently armed. Without this the physical
-        # start point would depend on whether the caller happens to run while
-        # disarmed -- which today's driver does, but only by accident of
-        # ordering -- and defaultassign()'s trailing disarm, which reframes
-        # back, would no longer land on the declared default. See
-        # set_blinding_offsets for the invariant.
-        #
-        # Gated on do_blinding alone, NOT on npoi: an analysis whose parameter
-        # of interest is a nuisance of interest (--poiAsNoi) can have npoi = 0
-        # and still need its theta block reframed.
-        if self.do_blinding:
-            npoi = self.param_model.npoi
-            nsyst = self.indata.nsyst
-            identity = (
-                tf.ones([npoi], dtype=self.x.dtype),
-                tf.zeros([npoi], dtype=self.x.dtype),
-                tf.zeros([nsyst], dtype=self.x.dtype),
-            )
-            armed = (
-                self._blinding_offsets_poi.value(),
-                self._blinding_offsets_poi_add.value(),
-                self._blinding_offsets_theta.value(),
-            )
-            self.x.assign(self._reframe_blinded_x(self.x0default, identity, armed))
-        else:
-            self.x.assign(self.x0default)
+        # Assigned raw, in whichever frame is armed: reframing x0default into
+        # the blinded frame would compute the offset into x, and x0default is
+        # public, so the offset would be one subtraction away from anyone who
+        # reads x. See set_blinding_offsets. The physical start therefore
+        # differs between an armed and a disarmed run, which is accepted --
+        # the minimiser lands on the same minimum either way.
+        self.x.assign(self.x0default)
 
     def defaultassign(self):
         var_pre = self.prefit_variance(
