@@ -528,3 +528,74 @@ def test_explicit_devices_rejects_negative_indices(devices):
 
     with pytest.raises(ValueError, match="must be >= 0"):
         pick_physical_gpus(len(devices), explicit=devices)
+
+
+# Fitter methods rabbit_fit.py calls that are safe under sharding because they
+# reach the likelihood only through primitives MultiDeviceFitter replaces
+# (minimize / loss_val* / the HVP-assembled Hessian) or touch parameter-level
+# state only. Verified by checking that neither they nor the impacts helpers
+# they delegate to call _compute_nll, _compute_yields_with_beta or take a
+# jacobian over all bins.
+_SHARDED_SAFE = {
+    # re-minimise or evaluate through the sharded loss
+    "minimize",
+    "loss_val_grad",
+    "loss_val_grad_hess",
+    "asym_impacts_parms",
+    "global_asym_impacts_parms",
+    "nonprofiled_impacts_parms",
+    "contour_scan",
+    "contour_scan2D",
+    "nll_scan",
+    "nll_scan2D",
+    "edmval_cov_rows_hessfree",
+    # parameter-level state only
+    "defaultassign",
+    "load_fitresult",
+    "set_blinding_offsets",
+    "prefit_covariance",
+    "edmval_cov",
+}
+
+
+def test_every_driver_called_fitter_method_is_classified_for_sharding():
+    """Each fitter method the driver calls must be handled or known safe.
+
+    Three separate review rounds each found one more all-bins path reachable
+    from rabbit_fit.py under --nDevices > 1 -- impacts_parms, then
+    loss_val_grad_hess_beta, then the L-curve flags. They are the same defect
+    found three times because nothing enumerates the surface.
+
+    This closes the class: adding a fitter call to the driver, or a method to
+    Fitter that the driver reaches, now fails here until it is either handled
+    in MultiDeviceFitter (overridden, host-pinned or refused) or added to
+    _SHARDED_SAFE with a reason.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    driver = (root / "bin" / "rabbit_fit.py").read_text()
+    sharding = (root / "rabbit" / "sharding.py").read_text()
+
+    # `fitter.` in the driver is both the module and the instance, so keep
+    # only names that are genuinely Fitter methods (drops fitter.make_fitter)
+    from rabbit.fitter import Fitter
+
+    called = {
+        m
+        for m in re.findall(r"\bi?fitter\.([a-z_][a-zA-Z_0-9]*)\s*\(", driver)
+        if callable(getattr(Fitter, m, None))
+    }
+    # MultiDeviceFitter handles a name by defining it, or by rebinding it as an
+    # instance attribute in _make_tf_functions
+    handled = set(re.findall(r"^\s+def ([a-z_][a-zA-Z_0-9]*)", sharding, re.M))
+    handled |= set(re.findall(r"self\.([a-z_][a-zA-Z_0-9]*)\s*=", sharding))
+
+    unclassified = sorted(called - handled - _SHARDED_SAFE)
+    assert not unclassified, (
+        "fitter methods called by rabbit_fit.py that MultiDeviceFitter neither "
+        f"handles nor declares safe: {unclassified}. Either override/pin/refuse "
+        "them in rabbit/sharding.py, or add them to _SHARDED_SAFE with the "
+        "reason they are safe when the bins are sharded."
+    )
