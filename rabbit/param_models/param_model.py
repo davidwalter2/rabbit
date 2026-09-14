@@ -185,11 +185,20 @@ class CompositeParamModel(ParamModel):
 
         poi_flags = {bool(m.allowNegativeParam) for m in param_models if m.npoi > 0}
         if len(poi_flags) > 1:
+            names = {
+                bool(m.allowNegativeParam): type(m).__name__
+                for m in param_models
+                if m.npoi > 0
+            }
             raise ValueError(
                 "CompositeParamModel: submodels with POIs disagree on "
                 "allowNegativeParam; the fitter applies a single squaring "
                 "transform to the composite POI block, so a mix cannot be "
-                "represented."
+                f"represented (True: {names.get(True)}, False: "
+                f"{names.get(False)}). A submodel that needs positivity "
+                "inside a permissive composite must declare "
+                "allowNegativeParam=True and enforce it in its own compute(), "
+                "as AxisNormModel and SaturatedProjectModel do."
             )
         derived = next(iter(poi_flags)) if poi_flags else None
         if allowNegativeParam is None:
@@ -507,6 +516,29 @@ class SaturatedProjectModel(ParamModel):
         For each channel of the input data that enters the mapping, the flat index of the
         output bin each of its bins contributes to, and -1 for bins that are not used,
         as returned by 'Mapping.output_indices()'.
+    allowNegativeParam : bool
+        WHO enforces positivity of the bin scales, not whether it is enforced.
+        The scales multiply YIELDS, so a negative one sends the expected yield
+        negative and the Poisson log() to NaN; the parameters are therefore
+        always stored as sqrt(scale) and the physical space is always
+        [0, inf).
+
+        ``False`` (the default, and the historical behaviour) asks the Fitter
+        to do the squaring, via its transform of the POI block. ``True`` means
+        "pass my slice through raw, I square it myself in compute()" -- the
+        same contract :class:`AxisNormModel` documents.
+
+        The distinction exists because the Fitter applies ONE transform to the
+        WHOLE POI block, so ``False`` is unavailable as soon as this model is
+        composited (by ``--computeSaturatedProjectionTests``) with an analysis
+        model that needs ``allowNegativeParam=True`` -- a POI that is a
+        physical parameter, e.g. alpha_s, and/or one blinded additively.
+        ``CompositeParamModel`` rejects such a mix. Self-squaring also
+        composes correctly with ADDITIVE POI blinding, which the Fitter's
+        transform does not: blinding is applied to the value handed to
+        compute(), so squaring afterwards keeps the scale positive for any
+        offset, whereas squaring first leaves ``x**2 + offset`` free to go
+        negative.
     """
 
     def __init__(
@@ -560,9 +592,21 @@ class SaturatedProjectModel(ParamModel):
 
         self.allowNegativeParam = allowNegativeParam
 
-        self.is_linear = self.nparams == 0 or self.allowNegativeParam
+        # allowNegativeParam=True => the Fitter does not transform this slice,
+        # so compute() squares it here instead. See the class docstring: the
+        # bin scales are positive in BOTH branches, only the owner of the
+        # transform differs.
+        self._square_internally = bool(allowNegativeParam)
 
-        self.set_param_default(expectSignal, allowNegativeParam)
+        # x -> x**2 in either branch, so the model is never linear in its
+        # stored parameters. (Identical to the previous expression for the
+        # default allowNegativeParam=False.)
+        self.is_linear = self.nparams == 0
+
+        # Store sqrt(default) regardless of which branch squares, so both open
+        # at the same physical point. allowNegativeParam=False selects the
+        # sqrt in set_param_default; it is passed literally, not forwarded.
+        self.set_param_default(expectSignal, allowNegativeParam=False)
 
     def compute(self, param, full=False):
         start = 0
@@ -573,9 +617,14 @@ class SaturatedProjectModel(ParamModel):
 
             if k in self.indices.keys():
                 nbins = self.nbins_channel[k]
+                iscale = param[start : start + nbins]
+                if self._square_internally:
+                    iscale = tf.square(iscale)
                 iparam = tf.concat(
                     [
-                        param[start : start + nbins],
+                        iscale,
+                        # the trailing entry is the scale of the input bins the
+                        # mapping does not use: a physical 1, never squared
                         tf.ones([1], dtype=self.indata.dtype),
                     ],
                     axis=0,
