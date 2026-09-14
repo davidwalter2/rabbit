@@ -875,6 +875,10 @@ def main():
             _md.append("-t > 0 (toy generation)")
         if args.fullNll:
             _md.append("--fullNll")
+        if args.diagnostics and not args.noBinByBinStat:
+            # loss_val_grad_hess_beta takes a jacobian over the full-length
+            # ubeta on one device; see MultiDeviceFitter.
+            _md.append("--diagnostics (unless --noBinByBinStat)")
         if _md:
             raise Exception(
                 "--nDevices > 1 is incompatible with: "

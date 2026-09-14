@@ -69,6 +69,12 @@ def pick_physical_gpus(n, explicit=None):
     here the orders coincide, and --devices remains the explicit escape
     hatch.
     """
+    if n < 1:
+        # Otherwise n = 0 hides every GPU (sorted(order[:0]) == [], which the
+        # caller treats as a real selection) while make_fitter normalizes
+        # 0 -> 1 and builds a single-device Fitter, so the run lands silently
+        # on the CPU; n = -1 drops one GPU and leaves n_devices negative.
+        raise ValueError(f"--nDevices must be >= 1, got {n}")
     gpus = tf.config.list_physical_devices("GPU")
     if not gpus:
         return None
@@ -500,6 +506,19 @@ class MultiDeviceFitter(Fitter):
 
     def gaussian_global_impacts_parms(self, *args, **kwargs):
         self._unsharded("Gaussian global impacts", "--doImpacts")
+
+    def loss_val_grad_hess_beta(self, *args, **kwargs):
+        """Beta-space EDM diagnostic (--diagnostics with bin-by-bin stat).
+
+        The base implementation evaluates the loss over the full logk on one
+        device and then takes a jacobian over the full-length ubeta, i.e. an
+        [nbinsfull, nbinsfull] Hessian. Like the other entries here it would
+        succeed on a small model and fail on the sizes --nDevices exists for,
+        after the minimiser has already finished.
+        """
+        self._unsharded(
+            "The beta-space EDM diagnostic", "--diagnostics with bin-by-bin stat"
+        )
 
     def impacts_parms(self, *args, **kwargs):
         """Per-nuisance impacts. Refused only when bin-by-bin stat is on.

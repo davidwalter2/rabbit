@@ -477,3 +477,41 @@ def test_sharded_loss_refuses_unarmed_regularizers():
         f._make_tf_functions()
         with pytest.raises(RuntimeError, match="not armed"):
             f.loss_val()
+
+
+def test_beta_edm_diagnostic_is_refused_when_sharded():
+    """--diagnostics with bin-by-bin stat takes an [nbinsfull, nbinsfull]
+    jacobian on one device, so it has to refuse rather than be inherited.
+
+    Like the rest of the refusal list it would succeed on a model this size;
+    refusing is about the sizes --nDevices exists for, and about failing
+    before the minimiser rather than after it.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = make_test_tensor(tmpdir)
+        f = _make_fitter(fname, 2, noBinByBinStat=False)
+        f.defaultassign()
+        f.set_nobs(f.indata.data_obs)
+        with pytest.raises(NotImplementedError, match="beta-space EDM"):
+            f.loss_val_grad_hess_beta()
+
+        # single device keeps it
+        f1 = _make_fitter(fname, 1, noBinByBinStat=False)
+        f1.defaultassign()
+        f1.set_nobs(f1.indata.data_obs)
+        f1.loss_val_grad_hess_beta()
+
+
+@pytest.mark.parametrize("n", [0, -1])
+def test_pick_physical_gpus_rejects_degenerate_device_counts(n):
+    """n < 1 desyncs GPU visibility from the fitter's own device count.
+
+    n = 0 selects an empty GPU set, which the driver applies as a real
+    selection and hides every GPU, while make_fitter normalizes 0 -> 1 and
+    builds a single-device Fitter -- the run lands on the CPU with nothing
+    said. n = -1 drops one GPU and leaves n_devices negative.
+    """
+    from rabbit.sharding import pick_physical_gpus
+
+    with pytest.raises(ValueError, match="must be >= 1"):
+        pick_physical_gpus(n)
