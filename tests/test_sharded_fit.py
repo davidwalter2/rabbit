@@ -321,7 +321,6 @@ def test_regularizers_are_refused_rather_than_silently_dropped():
         # full_nll, not loss_val_valfull_grad_hess: the latter has no caller
         # in bin/, so testing it left the real --fullNll entry point uncovered
         ("full_nll", "--fullNll"),
-        ("_dxdvars", "--globalAsymImpacts --globalAsymImpactsLinearWarmstart"),
     ],
 )
 def test_unsharded_postfit_steps_fail_before_the_fit_not_after(method, flag):
@@ -542,8 +541,9 @@ _SHARDED_SAFE = {
     "loss_val_grad",
     "loss_val_grad_hess",
     "asym_impacts_parms",
-    # repeated minimize() calls; its one all-bins primitive, _dxdvars under
-    # --globalAsymImpactsLinearWarmstart, refuses in MultiDeviceFitter
+    # repeated minimize() calls; its one all-bins primitive, _dxdvars, is
+    # host-pinned, and the --globalAsymImpactsLinearWarmstart combination that
+    # makes it expensive is refused up front in rabbit_fit.py
     "global_asym_impacts_parms",
     "nonprofiled_impacts_parms",
     "contour_scan",
@@ -558,6 +558,102 @@ _SHARDED_SAFE = {
     "prefit_covariance",
     "edmval_cov",
 }
+
+
+def test_profiled_chi2_still_works_when_sharded():
+    """--saveHists must survive sharding, not just the refusals.
+
+    The suite asserted at length that unsupported paths refuse, and nothing
+    asserted that the supported ones still run: a refusal added to _dxdvars
+    passed all of it while breaking every sharded --saveHists, because
+    _dndvars calls _dxdvars unconditionally and chi2(profile=True) goes
+    through _dndvars.
+
+    This checks that the path runs and agrees with single-device, not that it
+    runs on the host: CI has no GPU, so dropping the tf.device("/CPU:0") is
+    invisible here, as it is for the other pinned methods.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        fname = make_test_tensor(tmp)
+        out = {}
+        for nd in (1, 2):
+            f = _make_fitter(fname, nd)
+            f.minimize()
+            _, grad, hess = f.loss_val_grad_hess()
+            _, cov = f.edmval_cov(grad, hess)
+            f.cov.assign(cov)
+            out[nd] = np.asarray(f._dxdvars()[0])
+
+        assert np.allclose(out[1], out[2], rtol=0, atol=1e-10), (
+            "sharded dx/dx0 disagrees with single-device: "
+            f"max|diff| = {np.abs(out[1] - out[2]).max():.3e}"
+        )
+
+
+# Methods MultiDeviceFitter keeps working by running them on the host rather
+# than refusing them. Nothing they reach may refuse.
+_HOST_PINNED = {
+    "expected_yield",
+    "expected_events",
+    "expected_with_variance",
+    "expected_variations",
+    "chi2",
+}
+
+
+def test_no_refusal_is_reachable_from_a_path_that_is_kept_working():
+    """A refusal on a shared primitive takes its supported callers down too.
+
+    _dxdvars was first refused for the one entry point that needs it in bulk
+    (--globalAsymImpactsLinearWarmstart) -- but it is a primitive, not an
+    entry point, and _dndvars puts it under chi2 and expected_with_variance,
+    both host-pinned on purpose. The refusal has to sit on the entry point,
+    or up front in the driver, never on something a kept-working path calls.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    sharding = (root / "rabbit" / "sharding.py").read_text()
+    tree = ast.parse((root / "rabbit" / "fitter.py").read_text())
+
+    refused = set()
+    for node in ast.walk(ast.parse(sharding)):
+        if isinstance(node, ast.FunctionDef) and "_unsharded" in ast.dump(node):
+            refused.add(node.name)
+    assert refused, "found no refusals to check -- the detector is broken"
+
+    # self.<name>(...) called inside each Fitter method
+    calls = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            calls[node.name] = {
+                c.func.attr
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute)
+                and isinstance(c.func.value, ast.Name)
+                and c.func.value.id == "self"
+            }
+
+    bad = []
+    for entry in sorted(_HOST_PINNED):
+        seen, stack = set(), [entry]
+        while stack:
+            cur = stack.pop()
+            for callee in calls.get(cur, ()):
+                if callee in seen:
+                    continue
+                seen.add(callee)
+                stack.append(callee)
+        for hit in sorted(seen & refused):
+            bad.append(f"{entry} -> ... -> {hit}")
+
+    assert not bad, (
+        "MultiDeviceFitter refuses methods that a host-pinned path reaches, so "
+        f"those paths now raise instead of running: {bad}. Move the refusal to "
+        "the entry point, or to the up-front list in rabbit_fit.py."
+    )
 
 
 # Reached from rabbit/impacts/*.py rather than from the driver, and safe:

@@ -517,23 +517,6 @@ class MultiDeviceFitter(Fitter):
     def gaussian_global_impacts_parms(self, *args, **kwargs):
         self._unsharded("Gaussian global impacts", "--doImpacts")
 
-    def _dxdvars(self, *args, **kwargs):
-        """Response of the postfit minimum to the constraint centers.
-
-        Reached from global_asym_impacts only under
-        --globalAsymImpactsLinearWarmstart, which uses dx/dx0 to predict each
-        refit's starting point. It is the same computation as
-        gaussian_global_impacts_parms above -- _compute_loss over all bins on
-        one device, then [npar, nbinsfull] jacobians -- so it belongs here for
-        the same reason. Without the warm start global_asym_impacts is only
-        repeated minimize() calls and runs sharded, so the refusal is on this
-        primitive rather than on the whole method.
-        """
-        self._unsharded(
-            "The constraint-center response dx/dx0",
-            "--globalAsymImpacts with --globalAsymImpactsLinearWarmstart",
-        )
-
     def loss_val_grad_hess_beta(self, *args, **kwargs):
         """Beta-space EDM diagnostic (--diagnostics with bin-by-bin stat).
 
@@ -636,6 +619,25 @@ class MultiDeviceFitter(Fitter):
         """Host-pinned; see expected_events."""
         with tf.device("/CPU:0"):
             return super().chi2(*args, **kwargs)
+
+    def _dxdvars(self, *args, **kwargs):
+        """Response of the postfit minimum to the constraint centers, on the host.
+
+        An all-bins computation -- _compute_loss over every bin, then
+        [npar, nbinsfull] jacobians -- so on the default device it
+        materialises the full logk on GPU:0.
+
+        Pinned rather than refused, because it is a shared primitive rather
+        than an entry point: _dndvars calls it unconditionally, which puts it
+        under chi2(profile=True) and the gaussian-global-impacts branch of
+        expected_with_variance, i.e. the --saveHists path this class
+        deliberately keeps working. Refusing here would take those down with
+        it. The one entry point that is genuinely unsupported,
+        --globalAsymImpacts with --globalAsymImpactsLinearWarmstart, is
+        refused up front in rabbit_fit.py instead.
+        """
+        with tf.device("/CPU:0"):
+            return super()._dxdvars(*args, **kwargs)
 
     def set_nobs(self, values, variances=None):
         super().set_nobs(values, variances)
