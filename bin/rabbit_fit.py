@@ -455,8 +455,19 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False, blind=Fal
                 # nothing armed them again. So the saturated fit ran in an
                 # UNBLINDED frame and wrote an unblinded POI into
                 # results[...]["saturated_fit"]["parms"], silently unblinding
-                # any analysis that asked for this test. Arm before touching x:
-                # set_blinding_offsets holds the physical point fixed.
+                # any analysis that asked for this test.
+                #
+                # Arm BEFORE touching x, because set_blinding_offsets holds the
+                # physical point fixed -- for BOTH offset forms. That is a
+                # property of the two commits below this one in the stack, not
+                # of main: on main it only assigns the offset Variables. It is
+                # what the warm start below depends on, and the dependence is
+                # not on the analysis POI but on the SATURATED bin scales, which
+                # are POIs of the composite and therefore blinded too. Without
+                # the reframing they land at 1 * exp(N(0, 5)) instead of 1 and
+                # the composite opens millions of units above the main fit; with
+                # it they stay at 1 and the two losses agree exactly. Pinned by
+                # tests/test_saturated_blinding.py.
                 if fitter_saturated.do_blinding:
                     fitter_saturated.set_blinding_offsets(blind=blind)
 
