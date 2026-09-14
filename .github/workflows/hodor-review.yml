@@ -97,7 +97,7 @@ jobs:
       PI_OFFLINE: "1" # never download rg/fd binaries mid-review
     steps:
       - name: Check out base branch (trusted inputs)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # pull_request_target checks out the BASE branch: the workflow's
           # trusted inputs (hodor patch, models.json) are read from here,
@@ -108,7 +108,7 @@ jobs:
         run: cp -r base/.github/hodor "$RUNNER_TEMP/hodor-config"
 
       - name: Check out PR merge commit (review target)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # hodor reuses the GHA workspace as its review workspace and diffs
           # against origin/<base>, computing "HEAD" from it. With the default
@@ -166,7 +166,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Cache bun dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.bun/install/cache
           key: hodor-${{ env.HODOR_COMMIT }}-${{ hashFiles('.github/hodor/custom-models.patch', '.github/hodor/models.json') }}
