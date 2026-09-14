@@ -12,7 +12,9 @@ The two forms are not interchangeable, which is what these tests pin down:
   that scales yields. But the reported coordinate is then ``poi_true / offset``,
   so the curvature scales as ``offset**2`` and the reported uncertainty, the POI
   row of the covariance and every impact on that POI are divided by the random
-  factor. Only the RELATIVE uncertainty survives.
+  factor. Only the RELATIVE uncertainty survives. (That Jacobian is intended and
+  is unchanged; what the start point does is a separate question, covered in
+  tests/test_blinding_multiplicative.py.)
 * ADDITIVE, which a model opts into with ``blind_additive = True``, is a
   translation. Its Jacobian is the identity, so the covariance, the
   uncertainties and the impacts come out EXACTLY unblinded while the central
@@ -243,19 +245,30 @@ def test_x0_untouched_by_arming(path):
     assert np.array_equal(before, f.x0.numpy())
 
 
-def test_multiplicative_path_unchanged(path):
-    """A model that does not opt in keeps exactly its current arithmetic."""
+def test_multiplicative_path_keeps_its_arithmetic_but_is_reframed(path):
+    """A model that does not opt into ADDITIVE blinding keeps exactly its
+    ``get_poi`` arithmetic -- ``poi = x * offset``, no additive slot -- but ``x``
+    is now reframed by the offset RATIO so that the physical start is preserved
+    like the additive case.
+
+    This assertion used to read "x is NOT frame-shifted for a multiplicative
+    model", which pinned the uncompensated behaviour: the fit then opened at
+    ``START * offset`` with ``offset = exp(N(0, 5))``. See
+    tests/test_blinding_multiplicative.py for the invariances that replaced it.
+    """
     _, _, f = build(path, False, True)
     f.defaultassign()
     f.set_blinding_offsets(True)
     assert float(f._blinding_offsets_poi_add[0].numpy()) == 0.0
+    # the arithmetic of get_poi is untouched
     assert np.isclose(
         float(f.get_poi()[0].numpy()),
         float(f.x[0].numpy()) * float(f._blinding_offsets_poi[0].numpy()),
         rtol=1e-14,
     )
-    # x is NOT frame-shifted for a multiplicative model.
-    assert np.isclose(float(f.x[0].numpy()), START, rtol=0, atol=1e-14)
+    # x IS frame-shifted now, and that is what keeps the physical start at START
+    assert not np.isclose(float(f.x[0].numpy()), START, rtol=0, atol=1e-9)
+    assert np.isclose(float(f.get_poi()[0].numpy()), START, rtol=1e-14, atol=0)
 
 
 def test_determinism_across_fitters(path):
