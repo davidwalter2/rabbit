@@ -158,6 +158,14 @@ jobs:
         run: |
           PR="${{ github.event.pull_request.number || inputs.pr_number }}"
           export HODOR_MODELS_JSON="$RUNNER_TEMP/hodor-src/models.cern.json"
+          # These self-hosted runners are shared and persistent, so
+          # GITHUB_WORKSPACE contains a STALE checkout of this repo left by
+          # other workflows. hodor's CI detection reuses any such checkout
+          # as the review workspace without fetching the PR head (observed:
+          # 0-byte embedded diffs and review state keyed to a stale commit).
+          # Point it at a fresh empty dir so detection declines and hodor
+          # clones + gh-pr-checkouts the real PR head instead.
+          export GITHUB_WORKSPACE="$RUNNER_TEMP/hodor-workspace"
           # "cern" selects the provider defined in models.cern.json
           # (HODOR_MODELS_JSON); the prefix is not a pi builtin.
           bun run "$RUNNER_TEMP/hodor-src/src/cli.ts" \
