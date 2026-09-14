@@ -724,6 +724,45 @@ class Fitter:
             [self.get_poi(), self.get_model_nui(), self.get_theta()], axis=0
         )
 
+    @property
+    def nfreeparms(self):
+        """Number of fit parameters that cost a degree of freedom.
+
+        A parameter with a Gaussian constraint adds one parameter AND one
+        pseudo-measurement, so it costs NET ZERO degrees of freedom. Only
+        genuinely free parameters reduce the ndf of a goodness-of-fit test.
+
+        ``self.cw`` is the single place that records which parameters are
+        constrained, over the whole vector ``[ParamModel params | systs]``:
+        declared ParamModel priors on one side (``prior_sigmas`` entries that
+        are finite and > 0, folded in by :meth:`init_fit_parms`) and
+        ``indata.constraintweights`` on the other. ``cw == 0`` is exactly the
+        set the likelihood treats as unconstrained, so counting it here cannot
+        drift from what ``_compute_lc`` actually penalises.
+
+        Deliberately NOT ``param_model.nparams + indata.nsystnoconstraint``:
+        that charges every model parameter but only the unconstrained card
+        systematics, i.e. it distinguishes parameters by WHERE THEY ARE
+        DECLARED, which is not a statistical property. A model parameter with a
+        sigma = 1 prior and a card nuisance with a sigma = 1 prior are the same
+        object and must be charged the same way.
+        """
+        return int(np.count_nonzero(self.cw.numpy() == 0.0))
+
+    @property
+    def nfreeparms_breakdown(self):
+        """``(free ParamModel params, free systs)``, for logging.
+
+        The two entries of :attr:`nfreeparms`, split at the ParamModel /
+        systematics boundary. The second is ``indata.nsystnoconstraint`` by
+        construction; the first is what the old ndf formula got wrong.
+        """
+        free = self.cw.numpy() == 0.0
+        nparams = self.param_model.nparams
+        return int(np.count_nonzero(free[:nparams])), int(
+            np.count_nonzero(free[nparams:])
+        )
+
     def prefit_variance(self, unconstrained_err=0.0):
         """Per-parameter prefit variance vector of length npar.
 

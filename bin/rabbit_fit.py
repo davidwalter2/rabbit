@@ -702,17 +702,29 @@ def fit(args, fitter, ws, dofit=True):
 
     nllvalreduced = fitter.reduced_nll().numpy()
 
-    ndfsat = (
-        tf.size(fitter.nobs)
-        - fitter.param_model.nparams
-        - fitter.indata.nsystnoconstraint
-    ).numpy()
+    # Charge a degree of freedom for FREE parameters only, wherever they are
+    # declared. A Gaussian-constrained parameter adds one parameter and one
+    # pseudo-measurement, so it costs net zero -- which is already why rabbit
+    # charges constrained card nuisances nothing. Constrained ParamModel
+    # parameters are the same statistical object and are now charged the same
+    # way; see Fitter.nfreeparms.
+    #
+    # No-op for any analysis whose model declares no priors: all of its
+    # ParamModel entries then have cw = 0, so nfreeparms is exactly
+    # param_model.nparams + indata.nsystnoconstraint, the previous expression.
+    ndfsat = int(tf.size(fitter.nobs).numpy()) - fitter.nfreeparms
+    nfree_params, nfree_systs = fitter.nfreeparms_breakdown
 
     chi2_val = 2.0 * nllvalreduced
     p_val = chi2.sf(chi2_val, ndfsat)
 
     logger.info("Saturated chi2:")
     logger.info(f"    ndof: {ndfsat}")
+    logger.info(
+        f"      = {int(tf.size(fitter.nobs).numpy())} bins"
+        f" - {nfree_params} free of {fitter.param_model.nparams} ParamModel params"
+        f" - {nfree_systs} free of {fitter.indata.nsyst} systematics"
+    )
     logger.info(f"    2*deltaNLL: {round(chi2_val, 2)}")
     logger.info(rf"    p-value: {round(p_val * 100, 2)}%")
 
