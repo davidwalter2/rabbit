@@ -97,7 +97,7 @@ jobs:
       PI_OFFLINE: "1" # never download rg/fd binaries mid-review
     steps:
       - name: Check out this repository (patch source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # hodor reuses this checkout as its review workspace and diffs
           # against origin/<base>; depth 1 leaves no origin/main ref and
@@ -150,7 +150,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Cache bun dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.bun/install/cache
           key: hodor-${{ env.HODOR_COMMIT }}-${{ hashFiles('.github/hodor/custom-models.patch', '.github/hodor/models.json') }}
