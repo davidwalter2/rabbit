@@ -61,6 +61,24 @@ class ParamModel:
         # # additive offset could hand compute() a negative value, destroying
         # # the only guarantee that branch provides (the Fitter raises).
         # self.blind_additive = # bool, default False.
+        #
+        # # optional: the SCALE of that additive draw, in the POI's own units.
+        # # Unlike the multiplicative form, additive blinding is NOT scale
+        # # free: exp(N(0, 5)) spans e^+-10 whatever the POI means, but
+        # # + N(0, 5) is an absolute shift, so how well it hides depends on
+        # # the units. A POI whose uncertainty is O(1) in its fit units is
+        # # offset by well under a sigma and is effectively unblinded.
+        # #
+        # # The model is the only thing that knows its own units, so it
+        # # declares them here: the offset drawn is
+        # #     blind_additive_scale * N(0, 5)
+        # # and the default of 1.0 reproduces the historical draw exactly.
+        # # A POI measured to sigma ~ 1e-3 (alpha_s) is already hidden by
+        # # thousands of sigma at the default; a POI in units where sigma is
+        # # O(1) or larger should set this to a few times its expected
+        # # uncertainty. The Fitter additionally WARNS at startup whenever it
+        # # can see a prefit sigma and the drawn offset is small against it.
+        # self.blind_additive_scale = # float, default 1.0.
 
     @property
     def nparams(self):
@@ -225,8 +243,35 @@ class CompositeParamModel(ParamModel):
         # the composite additive -- the composite's POI block is the
         # concatenation of the submodels' POIs, and mixing forms within one POI
         # block is exactly what the Fitter refuses for a blinding group.
-        if any(getattr(m, "blind_additive", False) for m in param_models):
+        #
+        # "Any one makes all" is a policy the caller did not necessarily ask
+        # for, so SAY SO rather than infer it silently: a submodel that
+        # declared the multiplicative form gets the additive one, and the only
+        # other way to notice would be to read this line. Not a refusal (the
+        # way allowNegativeParam above is), because refusing would block the
+        # legitimate composition this exists for -- an additively blinded
+        # physical POI alongside a default signal strength, which is exactly a
+        # mix. The override is safe there: both forms hide the value, and the
+        # dangerous mix (an additive offset reaching a squared POI) is already
+        # refused by the Fitter.
+        additive_models = [
+            type(m).__name__
+            for m in param_models
+            if getattr(m, "blind_additive", False)
+        ]
+        if additive_models:
             self.blind_additive = True
+            overridden = [
+                type(m).__name__
+                for m in param_models
+                if m.npoi > 0 and not getattr(m, "blind_additive", False)
+            ]
+            if overridden:
+                logger.info(
+                    "CompositeParamModel: blinding form set to ADDITIVE for the whole "
+                    f"POI block because {additive_models} declared blind_additive=True; "
+                    f"this overrides the (default multiplicative) form of {overridden}."
+                )
 
         # impact groups are name-based, so a plain merge survives the
         # permutation

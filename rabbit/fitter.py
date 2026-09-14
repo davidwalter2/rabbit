@@ -700,6 +700,13 @@ class Fitter:
         self._blinding_values_poi_add = np.zeros(
             self.param_model.npoi, dtype=np.float64
         )
+        # The additive draw is NOT scale free the way exp(N(0, 5)) is: it is an
+        # absolute shift, so how well it hides depends on the POI's units. The
+        # model is the only thing that knows them, so it declares the scale.
+        # Default 1.0 == the historical draw.
+        additive_scale = float(
+            getattr(self.param_model, "blind_additive_scale", 1.0) or 1.0
+        )
         for i in range(self.param_model.npoi):
             param = self.param_model.params[i]
             if param in unblind_parameters:
@@ -708,9 +715,64 @@ class Fitter:
             logger.debug(f"Blind parameter {param} (seed='{seed}')")
             value = deterministic_random_from_string(seed)
             if self._blind_additive:
-                self._blinding_values_poi_add[i] = value
+                self._blinding_values_poi_add[i] = additive_scale * value
             else:
                 self._blinding_values_poi[i] = np.exp(value)
+
+        if self._blind_additive:
+            self._warn_if_additive_blinding_is_weak(unblind_parameters)
+
+    def _warn_if_additive_blinding_is_weak(self, unblind_parameters):
+        """Say so when an additive offset is too small to actually hide the POI.
+
+        The multiplicative form is scale free -- ``exp(N(0, 5))`` spans
+        ``e**+-10`` whatever the POI means -- so it hides by orders of
+        magnitude regardless of units. ``+ N(0, 5)`` does not: it is an
+        absolute shift, and a POI whose uncertainty is O(1) in its own fit
+        units ends up offset by well under a sigma, i.e. effectively
+        unblinded. That failure is SILENT, and the thing it fails at is
+        blinding, so it is worth a startup warning.
+
+        The natural yardstick is the prefit sigma, which for a POI exists only
+        where the model declared a Gaussian prior on it (``prior_sigmas``);
+        ``indata.constraintweights`` covers the nuisances, not this block.
+        Scaling the draw BY that sigma -- the obvious alternative -- is not
+        safe here: an unconstrained POI has no prior sigma at all, so the
+        offset would come out identically zero and blinding would silently
+        switch off completely. Hence a declared scale
+        (``blind_additive_scale``) plus this check wherever a sigma does
+        exist.
+        """
+        sigmas = getattr(self.param_model, "prior_sigmas", None)
+        if sigmas is None:
+            return
+        sigmas = np.asarray(sigmas, dtype=np.float64)
+
+        weak = []
+        for i in range(self.param_model.npoi):
+            param = self.param_model.params[i]
+            if param in unblind_parameters:
+                continue
+            sigma = sigmas[i]
+            if not np.isfinite(sigma) or sigma <= 0.0:
+                continue
+            offset = abs(self._blinding_values_poi_add[i])
+            if offset < 5.0 * sigma:
+                name = param.decode() if isinstance(param, bytes) else str(param)
+                weak.append((name, offset, offset / sigma))
+
+        if weak:
+            details = ", ".join(
+                f"{n} (|offset|={o:.4g}, {r:.2g} sigma)" for n, o, r in weak
+            )
+            logger.warning(
+                "Additive blinding may be INEFFECTIVE for "
+                f"{len(weak)} of {self.param_model.npoi} POIs: the drawn offset is "
+                "smaller than 5 prefit sigma, so the true value is recoverable to "
+                f"within a few sigma of the blinded one. {details}. Raise "
+                "param_model.blind_additive_scale to a few times the expected "
+                "uncertainty, in the POI's own fit units."
+            )
 
     def set_blinding_offsets(self, blind=True):
         """Arm or disarm the blinding offsets, holding the PHYSICAL point fixed.

@@ -28,6 +28,7 @@ from types import SimpleNamespace
 
 import hist
 import numpy as np
+import pytest
 import tensorflow as tf
 
 from rabbit import fitter, inputdata, tensorwriter
@@ -42,7 +43,9 @@ START = 0.3
 class ToyModel(ParamModel):
     """One POI scaling the signal, linear so the fit solves exactly."""
 
-    def __init__(self, indata, blind_additive=False):
+    def __init__(
+        self, indata, blind_additive=False, blind_additive_scale=None, prior_sigma=None
+    ):
         super().__init__(indata)
         self.npoi = 1
         self.npou = 0
@@ -52,6 +55,11 @@ class ToyModel(ParamModel):
         self.allowNegativeParam = True
         if blind_additive:
             self.blind_additive = True
+        if blind_additive_scale is not None:
+            self.blind_additive_scale = blind_additive_scale
+        if prior_sigma is not None:
+            self.prior_sigmas = np.array([prior_sigma], dtype=np.float64)
+            self.prior_means = np.array([START], dtype=np.float64)
 
     def compute(self, param, full=False):
         # No numpy on `param`: compute() runs inside a tf.function, where it is
@@ -102,6 +110,14 @@ def make_options(**kwargs):
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
+
+
+@pytest.fixture(scope="module")
+def path():
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "blinding_tensor.hdf5")
+        make_tensor(p)
+        yield p
 
 
 def build(path, blind_additive, do_blinding, **opts):
@@ -253,33 +269,88 @@ def test_additive_requires_allow_negative_param(path):
         raise AssertionError("expected a refusal for blind_additive + squared storage")
 
 
-def main():
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "blinding_tensor.hdf5")
-        make_tensor(path)
-        tests = [
-            test_model_sees_physical_while_x_is_blinded,
-            test_additive_leaves_hessian_exactly_unblinded,
-            test_physical_start_invariant_under_arming,
-            test_x0_untouched_by_arming,
-            test_multiplicative_path_unchanged,
-            test_determinism_across_fitters,
-            test_unblind_disables_the_offset,
-            test_additive_requires_allow_negative_param,
-        ]
-        failed = []
-        for t in tests:
-            try:
-                t(path)
-                print(f"  OK   {t.__name__}")
-            except Exception as exc:  # noqa: BLE001
-                print(f"  FAIL {t.__name__}: {type(exc).__name__}: {exc}")
-                failed.append(t.__name__)
-        if failed:
-            print(f"SOME CHECKS FAILED: {failed}")
-            raise SystemExit(1)
-        print("ALL CHECKS PASSED")
+# --- the additive draw's SCALE, which the multiplicative form does not need ---
+
+
+def test_additive_scale_multiplies_the_draw(path):
+    """``blind_additive_scale`` rescales the offset and nothing else.
+
+    exp(N(0, 5)) hides a POI by orders of magnitude whatever it means, but
+    + N(0, 5) is an ABSOLUTE shift, so a POI whose sigma is O(1) in its own
+    units would be offset by well under a sigma. The model declares its units
+    here; the draw itself (seed, sign, magnitude) must be untouched, which is
+    what pins this as a rescale rather than a different random number.
+    """
+    ind = inputdata.FitInputData(path)
+    base = fitter.Fitter(
+        ind, ToyModel(ind, blind_additive=True), make_options(), do_blinding=True
+    )
+    scaled = fitter.Fitter(
+        ind,
+        ToyModel(ind, blind_additive=True, blind_additive_scale=1000.0),
+        make_options(),
+        do_blinding=True,
+    )
+    off_base = base._blinding_values_poi_add[0]
+    off_scaled = scaled._blinding_values_poi_add[0]
+
+    assert off_base != 0.0, "vacuous: the unscaled draw is already zero"
+    assert np.isclose(off_scaled, 1000.0 * off_base, rtol=1e-12, atol=0)
+    # the multiplicative vector stays the identity in both
+    assert np.allclose(base._blinding_values_poi, 1.0)
+    assert np.allclose(scaled._blinding_values_poi, 1.0)
+
+
+def test_default_scale_is_the_historical_draw(path):
+    """Not declaring a scale must reproduce the pre-existing offset exactly."""
+    ind = inputdata.FitInputData(path)
+    implicit = fitter.Fitter(
+        ind, ToyModel(ind, blind_additive=True), make_options(), do_blinding=True
+    )
+    explicit = fitter.Fitter(
+        ind,
+        ToyModel(ind, blind_additive=True, blind_additive_scale=1.0),
+        make_options(),
+        do_blinding=True,
+    )
+    assert implicit._blinding_values_poi_add[0] == explicit._blinding_values_poi_add[0]
+
+
+def test_weak_additive_blinding_is_reported(path, caplog):
+    """An offset small against the prefit sigma must not fail silently.
+
+    The prefit sigma exists for a POI only where the model declared a prior on
+    it, which is the only case the Fitter can judge. A prior width far larger
+    than the drawn offset is the "POI in awkward units" case; a tight one is
+    the alpha_s-like case that is fine.
+    """
+    ind = inputdata.FitInputData(path)
+
+    with caplog.at_level("WARNING"):
+        fitter.Fitter(
+            ind,
+            ToyModel(ind, blind_additive=True, prior_sigma=1e6),
+            make_options(),
+            do_blinding=True,
+        )
+    assert any(
+        "Additive blinding may be INEFFECTIVE" in r.message for r in caplog.records
+    )
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        fitter.Fitter(
+            ind,
+            ToyModel(ind, blind_additive=True, prior_sigma=1e-4),
+            make_options(),
+            do_blinding=True,
+        )
+    assert not any(
+        "Additive blinding may be INEFFECTIVE" in r.message for r in caplog.records
+    )
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v"]))
