@@ -515,3 +515,16 @@ def test_pick_physical_gpus_rejects_degenerate_device_counts(n):
 
     with pytest.raises(ValueError, match="must be >= 1"):
         pick_physical_gpus(n)
+
+
+@pytest.mark.parametrize("devices", [["-1"], ["0", "-2"]])
+def test_explicit_devices_rejects_negative_indices(devices):
+    """Negative --devices indices must not wrap to the tail.
+
+    gpus[-1] is a valid Python index, so a negative value silently selects a
+    GPU the user never named, while a positive out-of-range one raises.
+    """
+    from rabbit.sharding import pick_physical_gpus
+
+    with pytest.raises(ValueError, match="must be >= 0"):
+        pick_physical_gpus(len(devices), explicit=devices)

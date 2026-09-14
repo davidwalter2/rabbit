@@ -75,9 +75,9 @@ def pick_physical_gpus(n, explicit=None):
         # 0 -> 1 and builds a single-device Fitter, so the run lands silently
         # on the CPU; n = -1 drops one GPU and leaves n_devices negative.
         raise ValueError(f"--nDevices must be >= 1, got {n}")
-    gpus = tf.config.list_physical_devices("GPU")
-    if not gpus:
-        return None
+    # Validate the inputs before looking at the hardware: otherwise a bad
+    # --devices is rejected on a GPU node and silently ignored on a CPU one
+    # (the no-GPU early return below fires first), so CI never sees it.
     if explicit is not None:
         if len(explicit) != n:
             # Otherwise the mismatch falls through to select_devices' round
@@ -87,6 +87,16 @@ def pick_physical_gpus(n, explicit=None):
                 f"--devices lists {len(explicit)} device(s) but --nDevices is "
                 f"{n}; they must match."
             )
+        if any(int(i) < 0 for i in explicit):
+            # Python would wrap these: gpus[-1] silently selects the last GPU,
+            # so a negative index picks a device the user never named while a
+            # positive out-of-range one raises.
+            raise ValueError(f"--devices indices must be >= 0, got {explicit}")
+
+    gpus = tf.config.list_physical_devices("GPU")
+    if not gpus:
+        return None
+    if explicit is not None:
         try:
             return [gpus[int(i)] for i in explicit]
         except IndexError:

@@ -875,6 +875,13 @@ def main():
             _md.append("-t > 0 (toy generation)")
         if args.fullNll:
             _md.append("--fullNll")
+        if args.lCurveScan or args.lCurveOptimize:
+            # compute_curvature calls fitter._compute_nll and
+            # _compute_yields_with_beta directly and takes a dense full-bins
+            # jacobian; MultiDeviceFitter overrides none of those, so the
+            # curvature would run unsharded -- and for --lCurveScan it runs
+            # after each per-tau minimize, discarding finished fits mid-scan.
+            _md.append("--lCurveScan / --lCurveOptimize")
         if args.diagnostics and not args.noBinByBinStat:
             # loss_val_grad_hess_beta takes a jacobian over the full-length
             # ubeta on one device; see MultiDeviceFitter.
