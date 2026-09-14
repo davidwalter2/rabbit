@@ -248,7 +248,13 @@ def test_never_advertised_as_linear(indata):
 
 
 def test_composite_accepts_the_permissive_analysis_model(indata):
-    """The blocker: this construction used to raise."""
+    """A permissive analysis model composes with the saturated model.
+
+    This is the composition that --computeSaturatedProjectionTests needs and
+    that the disagreement guard would otherwise refuse: both submodels carry
+    POIs, and the Fitter applies one squaring transform to the whole block, so
+    they have to agree on allowNegativeParam.
+    """
     toy = ToyModel(indata, allowNegativeParam=True)
     c = CompositeParamModel([toy, make_saturated(indata, True)])
     assert c.allowNegativeParam is True
@@ -448,10 +454,10 @@ def test_fitter_accepts_the_composite_and_keeps_the_layout(
         (True, True, True),
         (True, False, False),
         (False, False, False),
-        # Legacy `Mu`, blinded MULTIPLICATIVELY. Left out while the
-        # multiplicative frame was uncompensated, because the bin scales came
-        # out at 1 * exp(N(0, 5)) rather than 1; covered now that the reframing
-        # below this in the stack handles that form too.
+        # Legacy `Mu`, blinded MULTIPLICATIVELY -- the default form, and the
+        # one that makes this case worth stating separately: the bin scales
+        # are multiplicatively blinded POIs, so they only open at 1 because
+        # arming reframes `x` for that form as well as for the additive one.
         (False, False, True),
     ],
 )
