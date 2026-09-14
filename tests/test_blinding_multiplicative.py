@@ -232,22 +232,6 @@ def test_disarming_returns_to_the_starting_coordinate(path, model_cls):
 
 
 @pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
-def test_disarming_returns_to_the_starting_coordinate(path, model_cls):
-    """Arm then disarm is the identity on both frames.
-
-    With the offsets disarmed the two frames coincide, so this also pins that
-    the reframing is invertible rather than merely self-consistent.
-    """
-    f = build(path, model_cls)
-    x0 = f.x.numpy().copy()
-    f.set_blinding_offsets(True)
-    assert _blinded(f)
-    f.set_blinding_offsets(False)
-    np.testing.assert_allclose(f.x.numpy(), x0, rtol=1e-12, atol=0)
-    assert np.isclose(_poi(f), MU_START, rtol=1e-12, atol=0)
-
-
-@pytest.mark.parametrize("model_cls", [SquaredPoiModel, PermissivePoiModel])
 def test_defaultassign_lands_on_x0default_whether_armed_or_not(path, model_cls):
     """The stored start is the declared default in both cases.
 

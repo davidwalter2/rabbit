@@ -63,32 +63,6 @@ class ToyModel(ParamModel):
         return tf.concat([col, tf.ones([1, nproc - 1], dtype=col.dtype)], axis=1)
 
 
-class SecondToyModel(ToyModel):
-    """A second POI-carrying model, with a DIFFERENT parameter name so its
-    deterministic draw differs from ToyModel's."""
-
-    def __init__(self, indata, **kwargs):
-        super().__init__(indata, **kwargs)
-        self.params = np.array([b"alphaS2"])
-
-
-class PouOnlyAdditiveModel(ParamModel):
-    """Declares blind_additive but carries no POIs, so it gets no vote."""
-
-    def __init__(self, indata):
-        super().__init__(indata)
-        self.npoi = 0
-        self.npou = 1
-        self.params = np.array([b"nuisance"])
-        self.xparamdefault = tf.constant([0.0], dtype=indata.dtype)
-        self.is_linear = True
-        self.allowNegativeParam = True
-        self.blind_additive = True
-
-    def compute(self, param, full=False):
-        return tf.ones([1, self.indata.nproc], dtype=self.indata.dtype)
-
-
 def make_tensor(path):
     np.random.seed(1234)
     ax = hist.axis.Regular(20, -5, 5, name="x")
