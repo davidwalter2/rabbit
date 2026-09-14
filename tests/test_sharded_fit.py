@@ -11,6 +11,8 @@ The bar everywhere is near-bitwise agreement with the single-device
 path: sharding is a memory layout, not an approximation.
 """
 
+import re
+import sys
 import tempfile
 
 import numpy as np
@@ -315,8 +317,8 @@ def test_regularizers_are_refused_rather_than_silently_dropped():
 @pytest.mark.parametrize(
     "method,flag",
     [
-        ("global_impacts_parms", "--doImpacts --impactType global"),
-        ("gaussian_global_impacts_parms", "--doImpacts"),
+        ("global_impacts_parms", "--globalImpacts"),
+        ("gaussian_global_impacts_parms", "--gaussianGlobalImpacts"),
         ("toyassign", "-t > 0"),
         # full_nll, not loss_val_valfull_grad_hess: the latter has no caller
         # in bin/, so testing it left the real --fullNll entry point uncovered
@@ -333,7 +335,7 @@ def test_unsharded_postfit_steps_fail_before_the_fit_not_after(method, flag):
     """
     with tempfile.TemporaryDirectory() as tmp:
         f = _make_fitter(make_test_tensor(tmp), ndevices=2)
-        with pytest.raises(NotImplementedError, match="multi-device mode"):
+        with pytest.raises(NotImplementedError, match=re.escape(flag)):
             getattr(f, method)()
 
 
@@ -656,6 +658,75 @@ def test_no_refusal_is_reachable_from_a_path_that_is_kept_working():
     )
 
 
+def test_refusal_messages_name_flags_the_fit_script_has():
+    """A refusal that names the wrong flag sends the reader nowhere.
+
+    _unsharded exists to tell the caller which option to drop, so the flag in
+    it is the whole payload -- and it had drifted: global impacts pointed at
+    --impactType, which add_impact_args defines for the print/plot scripts and
+    rabbit_fit.py never sees, and gaussian global impacts at --doImpacts,
+    which works sharded with --noBinByBinStat. CLI users are shielded by the
+    up-front list in rabbit_fit.py; anyone driving MultiDeviceFitter directly
+    is not.
+
+    Asks the real parser rather than grepping for quoted strings, so a flag
+    that exists only in a sibling script's parser does not count as known.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "_rabbit_fit_for_flags", root / "bin" / "rabbit_fit.py"
+    )
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    known = {opt for a in driver.make_parser()._actions for opt in a.option_strings}
+    assert "--globalImpacts" in known, "parser introspection is broken"
+
+    sharding = (root / "rabbit" / "sharding.py").read_text()
+    named = set()
+    for call in re.findall(r"_unsharded\(([^)]*)\)", sharding, re.S):
+        named |= set(re.findall(r"--[a-zA-Z][a-zA-Z0-9]*", call))
+
+    unknown = sorted(named - known)
+    assert not unknown, (
+        "refusal messages in rabbit/sharding.py name flags rabbit_fit.py does "
+        f"not define: {unknown}. Name the option that actually reaches the "
+        "refused path."
+    )
+
+
+@pytest.mark.parametrize(
+    "argv,match",
+    [
+        (["--nDevices", "2"], "--nDevices > 1 is not supported"),
+        (["--devices", "2"], "--devices is not supported"),
+    ],
+)
+def test_rabbit_limit_rejects_device_flags_it_cannot_honour(argv, match, monkeypatch):
+    """Both halves of the flag pair are inert here, so both must refuse.
+
+    rabbit_limit.py builds a plain Fitter and never calls pick_physical_gpus,
+    so --devices 2 would run on the default GPU -- silently colliding with
+    whatever the user was trying to step around, which is the one thing the
+    flag is for. --nDevices was already refused; --devices was not.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "_rabbit_limit_for_guard", root / "bin" / "rabbit_limit.py"
+    )
+    limit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(limit)
+
+    monkeypatch.setattr(sys, "argv", ["rabbit_limit.py", "nonexistent.hdf5"] + argv)
+    with pytest.raises(Exception, match=re.escape(match)):
+        limit.main()
+
+
 # Reached from rabbit/impacts/*.py rather than from the driver, and safe:
 # regexp bookkeeping on self.frozen_params, no tensor work.
 _HELPER_SAFE = {"freeze_params", "defreeze_params"}
@@ -671,7 +742,6 @@ def test_every_fitter_method_reached_from_the_impacts_helpers_is_classified():
     [npar, nbinsfull] jacobians. Pinning the helper layer down here means the
     safe list is checked rather than asserted.
     """
-    import re
     from pathlib import Path
 
     from rabbit.fitter import Fitter
@@ -712,7 +782,6 @@ def test_every_driver_called_fitter_method_is_classified_for_sharding():
     in MultiDeviceFitter (overridden, host-pinned or refused) or added to
     _SHARDED_SAFE with a reason.
     """
-    import re
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]

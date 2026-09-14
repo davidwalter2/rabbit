@@ -512,10 +512,10 @@ class MultiDeviceFitter(Fitter):
     # result down with them, so they refuse at the point of use instead, before
     # the fit starts.
     def global_impacts_parms(self, *args, **kwargs):
-        self._unsharded("Global impacts", "--doImpacts with --impactType global")
+        self._unsharded("Global impacts", "--globalImpacts")
 
     def gaussian_global_impacts_parms(self, *args, **kwargs):
-        self._unsharded("Gaussian global impacts", "--doImpacts")
+        self._unsharded("Gaussian global impacts", "--gaussianGlobalImpacts")
 
     def loss_val_grad_hess_beta(self, *args, **kwargs):
         """Beta-space EDM diagnostic (--diagnostics with bin-by-bin stat).

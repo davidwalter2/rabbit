@@ -263,6 +263,13 @@ def main():
             "generate toys, and toy generation is not available in "
             "multi-device mode. Run the limit single-device."
         )
+    if getattr(args, "devices", None):
+        raise Exception(
+            "--devices is not supported by rabbit_limit.py: the selection is "
+            "applied by pick_physical_gpus, which this script never calls, so "
+            "the run would land on the default GPU instead of the one asked "
+            "for. Use CUDA_VISIBLE_DEVICES to pin the limit scan."
+        )
 
     if args.eager:
         tf.config.run_functions_eagerly(True)
