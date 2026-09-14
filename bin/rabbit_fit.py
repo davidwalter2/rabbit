@@ -407,8 +407,32 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False, blind=Fal
             if saturated_indices is not None:
                 # saturated likelihood test
 
+                # Adopt the analysis model's positivity convention.
+                #
+                # The bin scales must stay positive either way (a negative one
+                # sends the expected yield negative and the Poisson log() to
+                # NaN). SaturatedProjectModel's default allowNegativeParam=False
+                # asks the FITTER to guarantee that by squaring the POI block --
+                # but the fitter applies one transform to the WHOLE block, so
+                # that is only available when the analysis model wants it too.
+                # Any model declaring allowNegativeParam=True (a POI that is a
+                # physical parameter, and/or one blinded additively -- and also
+                # plain `Mu --allowNegativeParam`) therefore made
+                # CompositeParamModel reject the mix, i.e. the projected
+                # saturated test was unreachable for those analyses.
+                #
+                # Passing the analysis model's flag through makes the two
+                # submodels agree by construction: with False nothing changes
+                # (the fitter squares the whole block, exactly as before), and
+                # with True SaturatedProjectModel squares its own slice inside
+                # compute() instead. Self-squaring is also the only form that
+                # composes with ADDITIVE POI blinding, since it happens after
+                # the offset is applied rather than before.
                 saturated_model = param_model.SaturatedProjectModel(
-                    fitter.indata, mapping.channel_info, saturated_indices
+                    fitter.indata,
+                    mapping.channel_info,
+                    saturated_indices,
+                    allowNegativeParam=fitter.param_model.allowNegativeParam,
                 )
                 composite_model = param_model.CompositeParamModel(
                     [fitter.param_model, saturated_model]
