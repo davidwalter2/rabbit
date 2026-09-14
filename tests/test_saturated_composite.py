@@ -440,6 +440,11 @@ def test_fitter_accepts_the_composite_and_keeps_the_layout(
         (True, True, True),
         (True, False, False),
         (False, False, False),
+        # Legacy `Mu`, blinded MULTIPLICATIVELY. Left out while the
+        # multiplicative frame was uncompensated, because the bin scales came
+        # out at 1 * exp(N(0, 5)) rather than 1; covered now that the reframing
+        # below this in the stack handles that form too.
+        (False, False, True),
     ],
 )
 def test_warm_start_sits_exactly_on_the_main_loss(
