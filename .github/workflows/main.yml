@@ -163,6 +163,7 @@ jobs:
           - test_global_asym_impacts.py
           - test_blinding.py
           - test_blinding_multiplicative.py
+          - test_blinding_noi.py
           - test_multi_systematic.py
           - test_ndfsat.py
           - test_sparse_fit.py

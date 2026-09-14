@@ -814,6 +814,73 @@ class Fitter:
             return xpoi * ratio + (add_old - add_new) / mul_new
         return xpoi * tf.sqrt(ratio)
 
+    def _theta_reframe(self, theta, add_old, add_new):
+        """Rewrite a stored nuisance coordinate for a new blinding offset,
+        holding the PHYSICAL value :meth:`get_theta` reports fixed.
+
+        Derived from :meth:`get_theta`, which is::
+
+            theta_physical = theta_stored + add
+
+        There is NO transform in front of it -- unlike :meth:`get_poi`, whose
+        squaring branch is what forces a square root there -- and no
+        multiplicative offset exists for nuisances at all. So holding
+        ``theta_physical`` fixed is the plain additive shift, the same form the
+        additive POI slots already used::
+
+            theta -> theta + (add_old - add_new)
+
+        Only nuisances of INTEREST carry a non-zero offset
+        (``init_blinding_values`` loops over ``indata.noiidxs``), so this is the
+        identity on every ordinary constrained nuisance.
+
+        The constraint term is unaffected by construction: ``_compute_lc``
+        penalises ``get_x() - self.x0``, i.e. it compares the MODEL frame
+        against ``x0``, which is also in the model frame and which this does not
+        touch. Holding ``theta_physical`` fixed therefore leaves both the value
+        and the minimum of the penalty exactly where they were.
+
+        Reduces to the identity when the offset does not change, which is what
+        makes :meth:`set_blinding_offsets` idempotent.
+        """
+        return theta + (add_old - add_new)
+
+    def _reframe_blinded_x(self, x, old, new):
+        """Rewrite a FULL parameter vector for a new set of blinding offsets,
+        holding every physical value :meth:`get_x` reports fixed.
+
+        ``old`` and ``new`` are ``(poi_mul, poi_add, theta_add)`` triples. The
+        POI block and the nuisance block are reframed by :meth:`_poi_reframe`
+        and :meth:`_theta_reframe`; the ParamModel's OWN nuisances (the ``npou``
+        block, between them) are never blinded and are deliberately left
+        untouched.
+        """
+        npoi = self.param_model.npoi
+        nparams = self.param_model.nparams
+        nsyst = self.indata.nsyst
+
+        idxs = []
+        updates = []
+        if npoi:
+            idxs.append(np.arange(npoi))
+            updates.append(self._poi_reframe(x[:npoi], old[0], old[1], new[0], new[1]))
+        if nsyst:
+            idxs.append(nparams + np.arange(nsyst))
+            updates.append(
+                self._theta_reframe(
+                    x[nparams : nparams + nsyst],
+                    old[2],
+                    new[2],
+                )
+            )
+        if not idxs:
+            return x
+        return tf.tensor_scatter_nd_update(
+            x,
+            np.concatenate(idxs)[:, None],
+            tf.concat(updates, axis=0),
+        )
+
     def set_blinding_offsets(self, blind=True):
         """Arm or disarm the blinding offsets, holding the PHYSICAL point fixed.
 
@@ -828,10 +895,11 @@ class Fitter:
         That is the 2026-09-09 alpha_s bug: the multiplicative form handed
         SCETlib a value outside its domain.
 
-        Both forms are compensated here, through :meth:`_poi_reframe`, so
-        ``get_poi()`` is invariant under arming and disarming in either
-        direction. Self-idempotent: re-arming the same offsets reframes by
-        exactly 1 / 0.
+        All three offsets are compensated here, through
+        :meth:`_reframe_blinded_x`, so ``get_x()`` is invariant under arming and
+        disarming in either direction -- for a multiplicative POI, an additive
+        POI and a blinded nuisance of interest alike. Self-idempotent:
+        re-arming the same offsets reframes by exactly 1 / 0.
         """
         if not self.do_blinding:
             return
@@ -844,18 +912,21 @@ class Fitter:
             poi_add_new = np.zeros(self.param_model.npoi, dtype=np.float64)
             theta_new = np.zeros(self.indata.nsyst, dtype=np.float64)
 
-        npoi = self.param_model.npoi
-        if npoi:
-            xpoi = self._poi_reframe(
-                self.x[:npoi],
-                self._blinding_offsets_poi.value(),
-                self._blinding_offsets_poi_add.value(),
-                tf.constant(poi_new, dtype=self.x.dtype),
-                tf.constant(poi_add_new, dtype=self.x.dtype),
+        self.x.assign(
+            self._reframe_blinded_x(
+                self.x,
+                (
+                    self._blinding_offsets_poi.value(),
+                    self._blinding_offsets_poi_add.value(),
+                    self._blinding_offsets_theta.value(),
+                ),
+                (
+                    tf.constant(poi_new, dtype=self.x.dtype),
+                    tf.constant(poi_add_new, dtype=self.x.dtype),
+                    tf.constant(theta_new, dtype=self.x.dtype),
+                ),
             )
-            self.x.assign(
-                tf.tensor_scatter_nd_update(self.x, np.arange(npoi)[:, None], xpoi)
-            )
+        )
 
         self._blinding_offsets_poi.assign(poi_new)
         self._blinding_offsets_poi_add.assign(poi_add_new)
@@ -1033,21 +1104,24 @@ class Fitter:
         # ordering -- and defaultassign()'s trailing disarm, which reframes
         # back, would no longer land on the declared default. See
         # set_blinding_offsets for the invariant.
-        if self.do_blinding and self.param_model.npoi:
+        #
+        # Gated on do_blinding alone, NOT on npoi: an analysis whose parameter
+        # of interest is a nuisance of interest (--poiAsNoi) can have npoi = 0
+        # and still need its theta block reframed.
+        if self.do_blinding:
             npoi = self.param_model.npoi
-            ones = tf.ones([npoi], dtype=self.x.dtype)
-            zeros = tf.zeros([npoi], dtype=self.x.dtype)
-            xpoi = self._poi_reframe(
-                self.x0default[:npoi],
-                ones,
-                zeros,
+            nsyst = self.indata.nsyst
+            identity = (
+                tf.ones([npoi], dtype=self.x.dtype),
+                tf.zeros([npoi], dtype=self.x.dtype),
+                tf.zeros([nsyst], dtype=self.x.dtype),
+            )
+            armed = (
                 self._blinding_offsets_poi.value(),
                 self._blinding_offsets_poi_add.value(),
+                self._blinding_offsets_theta.value(),
             )
-            x0 = tf.tensor_scatter_nd_update(
-                self.x0default, np.arange(npoi)[:, None], xpoi
-            )
-            self.x.assign(x0)
+            self.x.assign(self._reframe_blinded_x(self.x0default, identity, armed))
         else:
             self.x.assign(self.x0default)
 
