@@ -267,6 +267,27 @@ class Fitter:
                 trainable=False,
                 name="offset_theta",
             )
+            # Additive POI offsets, for models declaring blind_additive. Kept as
+            # a separate vector rather than folded into the multiplicative one
+            # so that get_poi() is a single affine expression and an
+            # unaffected analysis keeps exactly its current arithmetic
+            # (offset_poi = 1, offset_poi_add = 0 is the identity).
+            self._blinding_offsets_poi_add = tf.Variable(
+                tf.zeros([self.param_model.npoi], dtype=self.indata.dtype),
+                trainable=False,
+                name="offset_poi_add",
+            )
+            self._blind_additive = bool(
+                getattr(self.param_model, "blind_additive", False)
+            )
+            if self._blind_additive and not self.param_model.allowNegativeParam:
+                raise ValueError(
+                    "param_model.blind_additive=True requires "
+                    "allowNegativeParam=True: with allowNegativeParam=False the "
+                    "stored parameter is sqrt(poi), so an additive blinding "
+                    "offset could hand compute() a negative POI and destroy the "
+                    "positivity the squared storage exists to guarantee."
+                )
             self.init_blinding_values(unblind, blinding_group)
 
         self.parms = np.concatenate([self.param_model.params, self.indata.systs])
@@ -663,8 +684,38 @@ class Fitter:
             value = deterministic_random_from_string(seed)
             self._blinding_values_theta[i] = value
 
-        # add offset to pois
+        # Offset the POIs. MULTIPLICATIVELY by default -- right for a signal
+        # strength centred at 1, which scales yields and stays evaluable at any
+        # value -- or ADDITIVELY when the model declares blind_additive, which
+        # is right for a POI that is a physical parameter feeding a calculation
+        # with a restricted domain. The draw is the same either way, so seeding,
+        # --unblind, --blindingGroup and the _data suffix are unaffected; only
+        # how it is applied differs.
+        #
+        # Additive matters beyond evaluability: a translation has unit Jacobian,
+        # so the covariance, the uncertainties and the impacts stay EXACTLY
+        # unblinded, whereas the multiplicative form divides all of them by the
+        # random factor and leaves only relative uncertainties usable.
         self._blinding_values_poi = np.ones(self.param_model.npoi, dtype=np.float64)
+        self._blinding_values_poi_add = np.zeros(
+            self.param_model.npoi, dtype=np.float64
+        )
+        # The additive draw is NOT scale free the way exp(N(0, 5)) is: it is an
+        # absolute shift, so how well it hides depends on the POI's units. The
+        # model is the only thing that knows them, so it declares the scale.
+        # Default 1.0 == the historical draw.
+        #
+        # Scalar (one scale for all of a model's POIs) or per-POI vector, which
+        # is what CompositeParamModel produces: the scale is in each
+        # parameter's own units, so a composite cannot reduce its submodels'
+        # declarations to a single number.
+        additive_scale = np.broadcast_to(
+            np.asarray(
+                getattr(self.param_model, "blind_additive_scale", 1.0),
+                dtype=np.float64,
+            ),
+            (self.param_model.npoi,),
+        )
         for i in range(self.param_model.npoi):
             param = self.param_model.params[i]
             if param in unblind_parameters:
@@ -672,21 +723,108 @@ class Fitter:
             seed = param_to_seed.get(param, param)
             logger.debug(f"Blind parameter {param} (seed='{seed}')")
             value = deterministic_random_from_string(seed)
-            self._blinding_values_poi[i] = np.exp(value)
+            if self._blind_additive:
+                self._blinding_values_poi_add[i] = additive_scale[i] * value
+            else:
+                self._blinding_values_poi[i] = np.exp(value)
+
+        if self._blind_additive:
+            self._warn_if_additive_blinding_is_weak(unblind_parameters)
+
+    def _warn_if_additive_blinding_is_weak(self, unblind_parameters):
+        """Say so when an additive offset is too small to actually hide the POI.
+
+        The multiplicative form is scale free -- ``exp(N(0, 5))`` spans
+        ``e**+-10`` whatever the POI means -- so it hides by orders of
+        magnitude regardless of units. ``+ N(0, 5)`` does not: it is an
+        absolute shift, and a POI whose uncertainty is O(1) in its own fit
+        units ends up offset by well under a sigma, i.e. effectively
+        unblinded. That failure is SILENT, and the thing it fails at is
+        blinding, so it is worth a startup warning.
+
+        The natural yardstick is the prefit sigma, which for a POI exists only
+        where the model declared a Gaussian prior on it (``prior_sigmas``);
+        ``indata.constraintweights`` covers the nuisances, not this block.
+        Scaling the draw BY that sigma -- the obvious alternative -- is not
+        safe here: an unconstrained POI has no prior sigma at all, so the
+        offset would come out identically zero and blinding would silently
+        switch off completely. Hence a declared scale
+        (``blind_additive_scale``) plus this check wherever a sigma does
+        exist.
+        """
+        sigmas = getattr(self.param_model, "prior_sigmas", None)
+        if sigmas is None:
+            return
+        sigmas = np.asarray(sigmas, dtype=np.float64)
+
+        weak = []
+        for i in range(self.param_model.npoi):
+            param = self.param_model.params[i]
+            if param in unblind_parameters:
+                continue
+            sigma = sigmas[i]
+            if not np.isfinite(sigma) or sigma <= 0.0:
+                continue
+            offset = abs(self._blinding_values_poi_add[i])
+            if offset < 5.0 * sigma:
+                name = param.decode() if isinstance(param, bytes) else str(param)
+                weak.append((name, offset, offset / sigma))
+
+        if weak:
+            details = ", ".join(
+                f"{n} (|offset|={o:.4g}, {r:.2g} sigma)" for n, o, r in weak
+            )
+            logger.warning(
+                "Additive blinding may be INEFFECTIVE for "
+                f"{len(weak)} of {self.param_model.npoi} POIs: the drawn offset is "
+                "smaller than 5 prefit sigma, so the true value is recoverable to "
+                f"within a few sigma of the blinded one. {details}. Raise "
+                "param_model.blind_additive_scale to a few times the expected "
+                "uncertainty, in the POI's own fit units."
+            )
 
     def set_blinding_offsets(self, blind=True):
+        """Arm or disarm the blinding offsets, holding the PHYSICAL point fixed.
+
+        Blinding is a change of variables: ``self.x`` is the internal
+        (blinded) coordinate and ``get_x()`` is the physical value the model
+        and the likelihood see. Changing the offsets therefore moves the
+        physical point unless ``x`` is compensated, and for an ADDITIVE offset
+        that matters a great deal -- the fit would otherwise open at
+        ``xparamdefault + offset`` instead of at the start value the model
+        declared. That is the same class of failure as the 2026-09-09 alpha_s
+        bug, where the multiplicative form opened the fit at
+        ``xparamdefault * offset`` and handed SCETlib a value outside its
+        domain.
+
+        So shift ``x`` by ``off_old - off_new`` on the additive slots, which
+        keeps ``x + off`` invariant. Self-idempotent: arming twice shifts by
+        zero. Multiplicative slots are deliberately left alone -- their
+        physical start is preserved only when the declared default is 0, and
+        changing that would alter results for every analysis using them.
+        """
         if not self.do_blinding:
             return
         if blind:
-            self._blinding_offsets_poi.assign(self._blinding_values_poi)
-            self._blinding_offsets_theta.assign(self._blinding_values_theta)
+            poi_new = self._blinding_values_poi
+            poi_add_new = self._blinding_values_poi_add
+            theta_new = self._blinding_values_theta
         else:
-            self._blinding_offsets_poi.assign(
-                np.ones(self.param_model.npoi, dtype=np.float64)
+            poi_new = np.ones(self.param_model.npoi, dtype=np.float64)
+            poi_add_new = np.zeros(self.param_model.npoi, dtype=np.float64)
+            theta_new = np.zeros(self.indata.nsyst, dtype=np.float64)
+
+        npoi = self.param_model.npoi
+        if npoi:
+            off_old = self._blinding_offsets_poi_add.value()
+            shift = off_old - tf.constant(poi_add_new, dtype=self.x.dtype)
+            self.x.assign(
+                tf.tensor_scatter_nd_add(self.x, np.arange(npoi)[:, None], shift)
             )
-            self._blinding_offsets_theta.assign(
-                np.zeros(self.indata.nsyst, dtype=np.float64)
-            )
+
+        self._blinding_offsets_poi.assign(poi_new)
+        self._blinding_offsets_poi_add.assign(poi_add_new)
+        self._blinding_offsets_theta.assign(theta_new)
 
     def get_theta(self):
         start = self.param_model.nparams
@@ -726,7 +864,10 @@ class Fitter:
             self.frozen_params_mask[: self.param_model.npoi], tf.stop_gradient(poi), poi
         )
         if self.do_blinding:
-            return poi * self._blinding_offsets_poi
+            # Affine: one of the two offsets is always the identity (1 for the
+            # multiplicative slot, 0 for the additive one), so this is the
+            # existing arithmetic for an unaffected model.
+            return poi * self._blinding_offsets_poi + self._blinding_offsets_poi_add
         else:
             return poi
 
@@ -793,7 +934,22 @@ class Fitter:
     def xdefaultassign(self):
         # start every parameter at its constraint center (prior mean / theta0
         # default, and the model default for unpriored params)
-        self.x.assign(self.x0default)
+        #
+        # x0default is a PHYSICAL point, while self.x is the internal (blinded)
+        # coordinate, so subtract any armed additive offset. Without this the
+        # result would depend on whether the caller happens to run while
+        # disarmed -- which today's driver does, but only by accident of
+        # ordering. See set_blinding_offsets for the invariant.
+        if self.do_blinding and self.param_model.npoi:
+            npoi = self.param_model.npoi
+            x0 = tf.tensor_scatter_nd_sub(
+                self.x0default,
+                np.arange(npoi)[:, None],
+                self._blinding_offsets_poi_add.value(),
+            )
+            self.x.assign(x0)
+        else:
+            self.x.assign(self.x0default)
 
     def defaultassign(self):
         var_pre = self.prefit_variance(
