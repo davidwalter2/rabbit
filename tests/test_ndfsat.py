@@ -70,6 +70,9 @@ class PriorModel(ParamModel):
         )
 
 
+FREE_PARAM_NAME = "alphaS"  # the POI: free in every model here
+
+
 class NoPriorModel(PriorModel):
     """The backward-compatibility case: a model that declares no priors at all."""
 
@@ -128,10 +131,10 @@ def make_options(**kwargs):
     return SimpleNamespace(**defaults)
 
 
-def build(path, model):
+def build(path, model, **opts):
     ind = inputdata.FitInputData(path)
     m = model(ind) if callable(model) else model
-    f = fitter.Fitter(ind, m, make_options(), do_blinding=False)
+    f = fitter.Fitter(ind, m, make_options(**opts), do_blinding=False)
     f.defaultassign()
     f.set_nobs(f.expected_yield())
     return f
@@ -253,6 +256,55 @@ def test_not_a_noop_once_priors_are_declared(paths):
     """
     f = build(paths["two_free_systs"], lambda ind: PriorModel(ind, NPOU))
     assert _ndfsat(f) - _ndfsat_old(f) == NPOU
+
+
+# --- frozen parameters -------------------------------------------------------
+
+
+def test_freezing_a_free_param_buys_back_a_dof(paths):
+    """A frozen parameter is fixed, so it costs no degree of freedom.
+
+    ``cw`` records CONSTRAINTS; frozen-ness lives in ``frozen_params_mask``. An
+    unconstrained frozen parameter therefore has ``cw == 0`` and was counted as
+    free, making ndfsat too small and the saturated p-value too pessimistic by
+    exactly that many parameters.
+    """
+    free = build(paths["two_free_systs"], NoPriorModel)
+    frozen = build(
+        paths["two_free_systs"], NoPriorModel, freezeParameters=[FREE_PARAM_NAME]
+    )
+
+    assert frozen.nfreeparms == free.nfreeparms - 1
+    assert _ndfsat(frozen) == _ndfsat(free) + 1
+
+
+def test_freezing_an_already_constrained_param_changes_nothing(paths):
+    """It was already costing nothing, so freezing it cannot buy anything back.
+
+    Guards the obvious way to get this wrong -- subtracting the frozen count
+    from nfreeparms instead of intersecting it with the unconstrained set,
+    which would double-count and make ndfsat too large.
+    """
+    priored = build(paths["two_free_systs"], lambda ind: PriorModel(ind, NPOU))
+    name = priored.parms[priored.cw.numpy() != 0.0][0]
+    name = name.decode() if isinstance(name, bytes) else str(name)
+
+    frozen = build(
+        paths["two_free_systs"],
+        lambda ind: PriorModel(ind, NPOU),
+        freezeParameters=[name],
+    )
+    assert frozen.nfreeparms == priored.nfreeparms
+    assert _ndfsat(frozen) == _ndfsat(priored)
+
+
+def test_breakdown_also_excludes_frozen(paths):
+    """The logged decomposition must stay the same number the ndf uses."""
+    frozen = build(
+        paths["two_free_systs"], NoPriorModel, freezeParameters=[FREE_PARAM_NAME]
+    )
+    nfree_params, nfree_systs = frozen.nfreeparms_breakdown
+    assert nfree_params + nfree_systs == frozen.nfreeparms
 
 
 if __name__ == "__main__":

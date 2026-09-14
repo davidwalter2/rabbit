@@ -746,18 +746,34 @@ class Fitter:
         DECLARED, which is not a statistical property. A model parameter with a
         sigma = 1 prior and a card nuisance with a sigma = 1 prior are the same
         object and must be charged the same way.
+
+        FROZEN parameters are excluded as well. ``cw`` records constraints;
+        frozen-ness lives in ``frozen_params_mask``, so an unconstrained frozen
+        parameter has ``cw == 0`` yet is fixed and costs nothing. Counting it
+        would make ``ndfsat`` too small and ``chi2.sf(chi2_val, ndfsat)``
+        correspondingly too pessimistic, by exactly the number of such
+        parameters. (The old formula ignored frozen parameters too, so this is
+        not a regression -- but this is the property the name claims, so it
+        should hold.)
         """
-        return int(np.count_nonzero(self.cw.numpy() == 0.0))
+        return int(np.count_nonzero(self._free_parms_mask()))
+
+    def _free_parms_mask(self):
+        """Boolean mask over ``[ParamModel params | systs]``: unconstrained AND
+        not frozen, i.e. the parameters that actually cost a degree of freedom.
+        """
+        return (self.cw.numpy() == 0.0) & ~self.frozen_params_mask.numpy()
 
     @property
     def nfreeparms_breakdown(self):
         """``(free ParamModel params, free systs)``, for logging.
 
         The two entries of :attr:`nfreeparms`, split at the ParamModel /
-        systematics boundary. The second is ``indata.nsystnoconstraint`` by
-        construction; the first is what the old ndf formula got wrong.
+        systematics boundary. The second is ``indata.nsystnoconstraint`` minus
+        any frozen unconstrained nuisances; the first is what the old ndf
+        formula got wrong.
         """
-        free = self.cw.numpy() == 0.0
+        free = self._free_parms_mask()
         nparams = self.param_model.nparams
         return int(np.count_nonzero(free[:nparams])), int(
             np.count_nonzero(free[nparams:])
