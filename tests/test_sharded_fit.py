@@ -321,6 +321,7 @@ def test_regularizers_are_refused_rather_than_silently_dropped():
         # full_nll, not loss_val_valfull_grad_hess: the latter has no caller
         # in bin/, so testing it left the real --fullNll entry point uncovered
         ("full_nll", "--fullNll"),
+        ("_dxdvars", "--globalAsymImpacts --globalAsymImpactsLinearWarmstart"),
     ],
 )
 def test_unsharded_postfit_steps_fail_before_the_fit_not_after(method, flag):
@@ -533,15 +534,16 @@ def test_explicit_devices_rejects_negative_indices(devices):
 # Fitter methods rabbit_fit.py calls that are safe under sharding because they
 # reach the likelihood only through primitives MultiDeviceFitter replaces
 # (minimize / loss_val* / the HVP-assembled Hessian) or touch parameter-level
-# state only. Verified by checking that neither they nor the impacts helpers
-# they delegate to call _compute_nll, _compute_yields_with_beta or take a
-# jacobian over all bins.
+# state only. What the impacts helpers reach on their own behalf is checked
+# separately, by the second test below.
 _SHARDED_SAFE = {
     # re-minimise or evaluate through the sharded loss
     "minimize",
     "loss_val_grad",
     "loss_val_grad_hess",
     "asym_impacts_parms",
+    # repeated minimize() calls; its one all-bins primitive, _dxdvars under
+    # --globalAsymImpactsLinearWarmstart, refuses in MultiDeviceFitter
     "global_asym_impacts_parms",
     "nonprofiled_impacts_parms",
     "contour_scan",
@@ -556,6 +558,49 @@ _SHARDED_SAFE = {
     "prefit_covariance",
     "edmval_cov",
 }
+
+
+# Reached from rabbit/impacts/*.py rather than from the driver, and safe:
+# regexp bookkeeping on self.frozen_params, no tensor work.
+_HELPER_SAFE = {"freeze_params", "defreeze_params"}
+
+
+def test_every_fitter_method_reached_from_the_impacts_helpers_is_classified():
+    """The same enumeration, one call level down.
+
+    The test above walks driver -> Fitter. It cannot see driver -> helper
+    module -> Fitter, and that gap hid _dxdvars: global_asym_impacts_parms is
+    safe itself, but under --globalAsymImpactsLinearWarmstart it reaches a
+    private Fitter method that runs _compute_loss over all bins and takes
+    [npar, nbinsfull] jacobians. Pinning the helper layer down here means the
+    safe list is checked rather than asserted.
+    """
+    import re
+    from pathlib import Path
+
+    from rabbit.fitter import Fitter
+
+    root = Path(__file__).resolve().parents[1]
+    sharding = (root / "rabbit" / "sharding.py").read_text()
+    helpers = "\n".join(
+        p.read_text() for p in sorted((root / "rabbit" / "impacts").glob("*.py"))
+    )
+
+    reached = {
+        m
+        for m in re.findall(r"\bfitter\.([a-z_][a-zA-Z_0-9]*)", helpers)
+        if callable(getattr(Fitter, m, None))
+    }
+    handled = set(re.findall(r"^\s+def ([a-z_][a-zA-Z_0-9]*)", sharding, re.M))
+    handled |= set(re.findall(r"self\.([a-z_][a-zA-Z_0-9]*)\s*=", sharding))
+
+    unclassified = sorted(reached - handled - _SHARDED_SAFE - _HELPER_SAFE)
+    assert not unclassified, (
+        "fitter methods the impacts helpers reach that MultiDeviceFitter "
+        f"neither handles nor declares safe: {unclassified}. Override, pin or "
+        "refuse them in rabbit/sharding.py, or add them to _HELPER_SAFE with "
+        "the reason they survive sharding."
+    )
 
 
 def test_every_driver_called_fitter_method_is_classified_for_sharding():

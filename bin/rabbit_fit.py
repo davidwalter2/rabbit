@@ -871,6 +871,11 @@ def main():
             _md.append("--globalImpacts")
         if args.gaussianGlobalImpacts:
             _md.append("--gaussianGlobalImpacts")
+        if args.globalAsymImpacts and args.globalAsymImpactsLinearWarmstart:
+            # The warm start needs dx/dx0, the same all-bins jacobian as
+            # --gaussianGlobalImpacts. --globalAsymImpacts on its own is
+            # repeated minimize() calls and works sharded.
+            _md.append("--globalAsymImpacts with --globalAsymImpactsLinearWarmstart")
         if any(t > 0 for t in args.toys):
             _md.append("-t > 0 (toy generation)")
         if args.fullNll:

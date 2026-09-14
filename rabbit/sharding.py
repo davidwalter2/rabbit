@@ -517,6 +517,23 @@ class MultiDeviceFitter(Fitter):
     def gaussian_global_impacts_parms(self, *args, **kwargs):
         self._unsharded("Gaussian global impacts", "--doImpacts")
 
+    def _dxdvars(self, *args, **kwargs):
+        """Response of the postfit minimum to the constraint centers.
+
+        Reached from global_asym_impacts only under
+        --globalAsymImpactsLinearWarmstart, which uses dx/dx0 to predict each
+        refit's starting point. It is the same computation as
+        gaussian_global_impacts_parms above -- _compute_loss over all bins on
+        one device, then [npar, nbinsfull] jacobians -- so it belongs here for
+        the same reason. Without the warm start global_asym_impacts is only
+        repeated minimize() calls and runs sharded, so the refusal is on this
+        primitive rather than on the whole method.
+        """
+        self._unsharded(
+            "The constraint-center response dx/dx0",
+            "--globalAsymImpacts with --globalAsymImpactsLinearWarmstart",
+        )
+
     def loss_val_grad_hess_beta(self, *args, **kwargs):
         """Beta-space EDM diagnostic (--diagnostics with bin-by-bin stat).
 
