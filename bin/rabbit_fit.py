@@ -709,6 +709,12 @@ def fit(args, fitter, ws, dofit=True):
         or args.externalPostfit is None
         or not getattr(fitter, "external_cov_loaded", False)
     ):
+        if (args.noEDM or args.noHessian) and fitter.do_blinding:
+            logger.info(
+                "Not checking whether the blinding is wide enough to hide the "
+                "POIs: that needs the parameter uncertainties, and no "
+                "covariance is computed under --noHessian / --noEDM."
+            )
         if not args.noEDM and not args.noHessian:
             # compute the covariance matrix and estimated distance to minimum
             _, grad, hess = fitter.loss_val_grad_hess()
@@ -718,6 +724,10 @@ def fit(args, fitter, ws, dofit=True):
             ws.add_cov_hist(cov)
 
             fitter.cov.assign(cov)
+            # Whether the blinding actually hid anything can only be judged
+            # against the measured uncertainty, and the covariance is already
+            # here, so it costs nothing.
+            fitter.warn_if_blinding_is_weak(cov)
             del cov
 
             if fitter.bbstat.enabled and fitter.diagnostics:

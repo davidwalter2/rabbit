@@ -721,7 +721,6 @@ class Fitter:
             value = deterministic_random_from_string(seed)
             self._blinding_values_poi_add[i] = additive_scale[i] * value
 
-        self._warn_if_additive_blinding_scale_is_weak(unblind_parameters)
         self._warn_if_squared_storage_leaks_through_the_covariance()
 
     def _warn_if_squared_storage_leaks_through_the_covariance(self):
@@ -762,73 +761,68 @@ class Fitter:
             "uncertainty carries no such dependence."
         )
 
-    def _warn_if_additive_blinding_scale_is_weak(self, unblind_parameters):
-        """Say so when the CONFIGURED additive smearing is too narrow to hide a POI.
+    def warn_if_blinding_is_weak(self, cov):
+        """Say so when the smearing was too narrow to hide the POI it blinded.
 
-        The multiplicative form is scale free -- ``exp(N(0, 5))`` spans
-        ``e**+-10`` whatever the POI means. ``+ N(0, 5)`` does not: it is an
-        absolute shift, so a POI whose uncertainty is O(1) in its own fit units
-        ends up smeared by well under a sigma, i.e. effectively unblinded.
-        That failure is silent, and the thing it fails at is blinding, so it is
-        worth a startup warning.
+        The yardstick is the MEASURED uncertainty, which is the only thing that
+        decides whether a value is actually hidden: an offset of half a sigma
+        leaves the truth recoverable whatever units it is in. Judged against
+        ``cov``, so it costs nothing -- the driver has already computed it --
+        and it works for any number of POIs, where a prefit Asimov sigma would
+        need one linear solve per POI before the fit had even started.
 
-        Judged on the WIDTH OF THE DRAW, ``BLINDING_DRAW_STD *
-        blind_additive_scale``, and never on the value actually drawn. The
-        realised offset is a sample: a wide, perfectly adequate smearing lands
-        near zero some of the time, so testing the sample both misreports a
-        sound configuration and -- far worse -- makes the warning itself a
-        function of the secret. What is wrong in that case is the
-        configuration, and the configuration is what this reports.
+        This replaces a prefit check against ``prior_sigmas`` that could not
+        work: no baseline model declares that attribute, and a prior width only
+        exists for a CONSTRAINED POI, whereas the physical free parameter this
+        feature exists for has none. It also compared two numbers the same model
+        author had written, so it could only ever report that their own
+        declarations disagreed.
 
-        For the same reason the message names no numbers. Printing the drawn
-        offset hands over the secret outright; printing the prefit sigma hands
-        it over too once the declared scale is known, since the two determine
-        each other. The actionable content is WHICH parameters are
-        under-smeared and WHICH knob raises them, and neither requires a
-        magnitude.
+        Reports no numbers, for the same reason the rest of this machinery does
+        not: the offset and the smearing width each give the other away. The
+        verdict is a boolean about sigma, and sigma is not the secret.
 
-        The yardstick is the prefit sigma, which for a POI exists only where
-        the model declared a Gaussian prior on it (``prior_sigmas``);
-        ``indata.constraintweights`` covers the nuisances, not this block.
-        Scaling the draw BY that sigma -- the obvious alternative -- is not
-        safe: an unconstrained POI has no prior sigma at all, so the smearing
-        would collapse to zero and blinding would switch off completely. Hence
-        a declared scale plus this check wherever a sigma does exist.
+        Blinded-ness is read off the offsets rather than remembered from
+        ``init_blinding_values``: a POI left out by --unblind, or exempted by
+        the model, has an offset of exactly zero.
+
+        Skipped entirely under --noHessian, where there is no covariance to
+        read; the driver says so rather than failing.
         """
-        sigmas = getattr(self.param_model, "prior_sigmas", None)
-        if sigmas is None:
+        if not self.do_blinding or not self.param_model.npoi:
             return
-        sigmas = np.asarray(sigmas, dtype=np.float64)
+        npoi = self.param_model.npoi
 
+        cov = np.asarray(cov)
+        sigma = np.sqrt(np.diag(cov)[:npoi])
+        offsets = np.asarray(self._blinding_offsets_poi_add)[:npoi]
         scales = np.broadcast_to(
             np.asarray(
                 getattr(self.param_model, "blind_additive_scale", 1.0),
                 dtype=np.float64,
             ),
-            (self.param_model.npoi,),
+            (npoi,),
         )
 
         weak = []
-        for i in range(self.param_model.npoi):
-            param = self.param_model.params[i]
-            if param in unblind_parameters:
+        for i in range(npoi):
+            if offsets[i] == 0.0:  # not blinded: --unblind, or model-exempt
                 continue
-            sigma = sigmas[i]
-            if not np.isfinite(sigma) or sigma <= 0.0:
+            if not np.isfinite(sigma[i]) or sigma[i] <= 0.0:
                 continue
-            # width of the smearing distribution, not the sample drawn from it
-            if BLINDING_DRAW_STD * scales[i] < 5.0 * sigma:
+            if BLINDING_DRAW_STD * scales[i] < 5.0 * sigma[i]:
+                param = self.param_model.params[i]
                 weak.append(param.decode() if isinstance(param, bytes) else str(param))
 
         if weak:
             logger.warning(
-                "Additive blinding is configured too narrowly for "
-                f"{len(weak)} of {self.param_model.npoi} POIs: the smearing is "
-                "less than 5 prefit sigma wide, so the true value stays "
-                "recoverable to within a few sigma of the blinded one. "
+                "Blinding was too narrow to hide "
+                f"{len(weak)} of {npoi} POIs: the smearing is less than 5 sigma "
+                "of the uncertainty this fit measured, so the true value stays "
+                f"recoverable to within a few sigma of the blinded one. "
                 f"Affected: {', '.join(weak)}. Raise "
-                "param_model.blind_additive_scale for these, to a few times "
-                "the expected uncertainty in the POI's own fit units."
+                "param_model.blind_additive_scale for these and refit; the "
+                "result already written is not safely blinded."
             )
 
     def _check_blinded_start_is_evaluable(self):

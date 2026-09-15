@@ -38,7 +38,7 @@ START = 0.3
 class ToyModel(ParamModel):
     """One POI scaling the signal, linear so the fit solves exactly."""
 
-    def __init__(self, indata, blind_additive_scale=None, prior_sigma=None):
+    def __init__(self, indata, blind_additive_scale=None):
         super().__init__(indata)
         self.npoi = 1
         self.npou = 0
@@ -48,9 +48,6 @@ class ToyModel(ParamModel):
         self.allowNegativeParam = True
         if blind_additive_scale is not None:
             self.blind_additive_scale = blind_additive_scale
-        if prior_sigma is not None:
-            self.prior_sigmas = np.array([prior_sigma], dtype=np.float64)
-            self.prior_means = np.array([START], dtype=np.float64)
 
     def compute(self, param, full=False):
         # No numpy on `param`: compute() runs inside a tf.function, where it is
@@ -276,35 +273,49 @@ def test_default_scale_is_the_historical_draw(path):
     assert implicit._blinding_values_poi_add[0] == explicit._blinding_values_poi_add[0]
 
 
-def test_weak_additive_blinding_scale_is_reported(path, caplog):
-    """A smearing too narrow against the prefit sigma must not fail silently.
+def _postfit_cov(f, ind):
+    """Fit and hand back the covariance the driver would hand to the check."""
+    f.set_nobs(ind.data_obs)
+    f.minimize()
+    _, grad, hess = f.loss_val_grad_hess()
+    _, cov = f.edmval_cov(grad, hess)
+    return cov
 
-    Judged on the CONFIGURED width, so the verdict is a property of the setup
-    and not of the sample: a sound configuration whose draw happens to land
-    near zero is not reported, and an unsound one is reported every time.
+
+MSG = "Blinding was too narrow to hide"
+
+
+def test_weak_blinding_is_reported_against_the_measured_uncertainty(path, caplog):
+    """Judged on the smearing width against the sigma the fit measured.
+
+    That is the only yardstick that decides whether a value is hidden: an
+    offset of half a sigma leaves the truth recoverable whatever units it is
+    in. A narrow smearing must be reported and an ample one must not, with the
+    same model and the same data -- only the declared scale differs.
     """
     ind = inputdata.FitInputData(path)
-    MSG = "Additive blinding is configured too narrowly"
 
-    # smearing 5 * 1.0 wide against a sigma of 1e6: hopeless
+    # a smearing far smaller than the fit's own resolution
+    f = fitter.Fitter(
+        ind, ToyModel(ind, blind_additive_scale=1e-9), make_options(), do_blinding=True
+    )
+    f.defaultassign()
+    f.set_blinding_offsets(True)
+    cov = _postfit_cov(f, ind)
     with caplog.at_level("WARNING"):
-        fitter.Fitter(
-            ind,
-            ToyModel(ind, prior_sigma=1e6),
-            make_options(),
-            do_blinding=True,
-        )
+        f.warn_if_blinding_is_weak(cov)
     assert any(MSG in r.message for r in caplog.records)
 
-    # same smearing against a sigma of 1e-4: ample
+    # and an ample one
     caplog.clear()
+    f2 = fitter.Fitter(
+        ind, ToyModel(ind, blind_additive_scale=1e4), make_options(), do_blinding=True
+    )
+    f2.defaultassign()
+    f2.set_blinding_offsets(True)
+    cov2 = _postfit_cov(f2, ind)
     with caplog.at_level("WARNING"):
-        fitter.Fitter(
-            ind,
-            ToyModel(ind, prior_sigma=1e-4),
-            make_options(),
-            do_blinding=True,
-        )
+        f2.warn_if_blinding_is_weak(cov2)
     assert not any(MSG in r.message for r in caplog.records)
 
 
@@ -312,34 +323,100 @@ def test_the_weak_blinding_warning_does_not_leak_the_secret(path, caplog):
     """The warning must not print the numbers it is reasoning about.
 
     A message carrying the drawn offset hands over the secret outright; one
-    carrying the prefit sigma hands it over too, since sigma and the declared
-    scale determine each other. Only the parameter name and the knob to turn
+    carrying sigma hands it over too once the declared scale is known, since
+    the two determine each other. Only the parameter name and the knob to turn
     are safe, and those are the actionable part anyway.
     """
     ind = inputdata.FitInputData(path)
-    sigma = 1e6
+    f = fitter.Fitter(
+        ind, ToyModel(ind, blind_additive_scale=1e-9), make_options(), do_blinding=True
+    )
+    f.defaultassign()
+    f.set_blinding_offsets(True)
+    cov = _postfit_cov(f, ind)
+
     with caplog.at_level("WARNING"):
-        f = fitter.Fitter(
-            ind,
-            ToyModel(ind, prior_sigma=sigma),
-            make_options(),
-            do_blinding=True,
-        )
-    msgs = [r.message for r in caplog.records if "configured too narrowly" in r.message]
+        f.warn_if_blinding_is_weak(cov)
+    msgs = [r.message for r in caplog.records if MSG in r.message]
     assert msgs, "warning did not fire; test is vacuous"
     text = " ".join(msgs)
 
     offset = abs(float(f._blinding_values_poi_add[0]))
-    assert offset > 0.0, "vacuous: no offset was drawn"
+    sigma = float(np.sqrt(np.diag(np.asarray(cov))[0]))
+    assert offset > 0.0 and sigma > 0.0, "vacuous: nothing drawn or no curvature"
 
-    # neither the secret nor the yardstick that would reconstruct it
-    for forbidden, label in ((offset, "the drawn offset"), (sigma, "the prefit sigma")):
+    for forbidden, label in ((offset, "the drawn offset"), (sigma, "sigma")):
         for fmt in (f"{forbidden:.4g}", f"{forbidden:.3g}", f"{forbidden:g}"):
-            assert fmt not in text, f"warning leaked {label} as {fmt!r}: {text}"
+            assert fmt not in text, f"warning leaked {label} as {fmt!r}"
 
-    # it must still say which parameter and which knob
     assert "alphaS" in text
     assert "blind_additive_scale" in text
+
+
+def test_the_verdict_follows_the_measured_sigma_not_just_the_scale(path, caplog):
+    """Same declared scale, two different uncertainties, opposite verdicts.
+
+    This is what makes the MEASURED sigma the yardstick rather than a fixed
+    threshold on the declared scale: a smearing that amply hides a precise
+    measurement is useless for a loose one, and the criterion has to notice.
+    Without this, replacing ``5 * sigma`` with a bare constant passes the
+    suite -- it did.
+
+    The covariance is handed in directly rather than fitted twice, which keeps
+    the two cases differing in exactly one thing. Building two datasets with
+    different statistics would make the test depend on the fit as well as on
+    the criterion.
+    """
+    from rabbit.fitter import BLINDING_DRAW_STD
+
+    ind = inputdata.FitInputData(path)
+    f = fitter.Fitter(
+        ind, ToyModel(ind, blind_additive_scale=1.0), make_options(), do_blinding=True
+    )
+    f.defaultassign()
+    f.set_blinding_offsets(True)
+    assert float(f._blinding_offsets_poi_add[0].numpy()) != 0.0, "vacuous: not blinded"
+
+    n = int(f.x.shape[0])
+    smearing = BLINDING_DRAW_STD * 1.0
+
+    # sigma well below the smearing: amply hidden
+    tight = np.eye(n) * (smearing / 500.0) ** 2
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        f.warn_if_blinding_is_weak(tight)
+    assert not any(MSG in r.message for r in caplog.records)
+
+    # sigma well above it: the same smearing now hides nothing
+    loose = np.eye(n) * (smearing * 20.0) ** 2
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        f.warn_if_blinding_is_weak(loose)
+    assert any(MSG in r.message for r in caplog.records)
+
+
+def test_an_unblinded_poi_is_not_reported_as_weakly_blinded(path, caplog):
+    """--unblind leaves the offset at zero, which is not weak blinding.
+
+    Blinded-ness is read off the offsets rather than remembered, so a POI with
+    no offset must be skipped rather than judged -- otherwise every unblinded
+    run would warn that its unblinded POI is insufficiently hidden.
+    """
+    ind = inputdata.FitInputData(path)
+    f = fitter.Fitter(
+        ind,
+        ToyModel(ind, blind_additive_scale=1e-9),
+        make_options(unblind=["alphaS"]),
+        do_blinding=True,
+    )
+    f.defaultassign()
+    f.set_blinding_offsets(True)
+    assert float(f._blinding_offsets_poi_add[0].numpy()) == 0.0
+    cov = _postfit_cov(f, ind)
+
+    with caplog.at_level("WARNING"):
+        f.warn_if_blinding_is_weak(cov)
+    assert not any(MSG in r.message for r in caplog.records)
 
 
 # --- the scale must SURVIVE compositing -------------------------------------
