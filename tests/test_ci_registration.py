@@ -19,10 +19,10 @@ fails in the PR that opens the gap rather than silently months later.
 
 import ast
 import os
+import re
 import shlex
 
 import pytest
-import yaml
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(REPO, "tests")
@@ -33,9 +33,31 @@ PYTEST_FUNC_PREFIX = "test"
 PYTEST_CLASS_PREFIX = "Test"
 
 
-def _workflow():
+def _job_block(name):
+    """The lines of the ``name:`` job, delimited by indentation.
+
+    Read as text rather than with PyYAML: the CI runner has no yaml module, and
+    an ImportError here is not a skipped test but a collection error that
+    aborts the whole `pytest tests/` run -- the exact failure this file exists
+    to prevent, which is how it announced itself the first time this job ran.
+    The parse is cross-checked against a real YAML parser in
+    test_the_text_parse_agrees_with_pyyaml, wherever one is installed.
+
+    Returns None when there is no such job.
+    """
     with open(WORKFLOW) as f:
-        return yaml.safe_load(f)
+        lines = f.read().splitlines()
+    out, indent = None, None
+    for line in lines:
+        if out is None:
+            if re.match(rf"^(\s*){re.escape(name)}:\s*$", line):
+                indent = len(line) - len(line.rstrip("\n").lstrip())
+                out = []
+            continue
+        if line.strip() and (len(line) - len(line.lstrip())) <= indent:
+            break
+        out.append(line)
+    return out
 
 
 def _test_files():
@@ -48,8 +70,39 @@ def _test_files():
 
 def _matrix_entries():
     """Files named in the hand-maintained `unit-tests` matrix."""
-    job = _workflow()["jobs"]["unit-tests"]
-    return set(job["strategy"]["matrix"]["test"])
+    block = _job_block("unit-tests")
+    assert block is not None, "no `unit-tests` job in the workflow"
+    entries = {
+        m.group(1)
+        for m in (re.match(r"^\s*-\s*(test_\S+\.py)\s*$", ln) for ln in block)
+        if m
+    }
+    # A parse that silently returned nothing would make every check below pass
+    # vacuously; under- and over-reading are both caught by the tests, but an
+    # empty read is worth refusing outright.
+    assert entries, "parsed no entries from the `unit-tests` matrix"
+    return entries
+
+
+def _pytest_commands(job):
+    """Shell words of each command in ``job`` that invokes pytest.
+
+    Scans every line of the block rather than only inline ``run:`` values, so
+    a command inside a ``run: |`` block scalar counts too.
+    """
+    block = _job_block(job)
+    if block is None:
+        return None
+    cmds = []
+    for line in block:
+        text = line.split("#", 1)[0].strip()
+        text = re.sub(r"^-?\s*run:\s*", "", text)
+        if "pytest" in text:
+            try:
+                cmds.append(shlex.split(text))
+            except ValueError:
+                continue
+    return cmds
 
 
 def _collects_under_pytest(name):
@@ -77,22 +130,43 @@ def test_the_catch_all_job_exists_and_runs_the_whole_suite():
     Without this, deleting the catch-all job would leave every pytest-style
     file uncovered while this module still reported everything was fine.
     """
-    jobs = _workflow()["jobs"]
-    assert "all-unit-tests" in jobs, (
+    cmds = _pytest_commands("all-unit-tests")
+    assert cmds is not None, (
         "the catch-all job is gone; unlisted test files no longer run anywhere "
         "(see issue #173)"
     )
     # Token-wise, not substring: `pytest tests/test_bbstat.py` contains the
     # string "pytest tests/" while covering one file out of twenty.
-    runs = [step.get("run", "") for step in jobs["all-unit-tests"].get("steps", [])]
-    whole_suite = any(
-        "pytest" in run and {"tests", "tests/"} & set(shlex.split(run)) for run in runs
-    )
+    whole_suite = any({"tests", "tests/"} & set(words) for words in cmds)
     assert whole_suite, (
         "the catch-all job no longer runs pytest over the whole tests/ "
-        "directory, so it does not cover unlisted files; its steps run: "
-        f"{[r for r in runs if r]!r}"
+        f"directory, so it does not cover unlisted files; it runs: {cmds!r}"
     )
+
+
+def test_the_text_parse_agrees_with_pyyaml():
+    """Wherever PyYAML is installed, hold the hand-rolled parse to it.
+
+    The CI runner has no yaml module, so the parser above cannot use one; this
+    keeps it honest anywhere that does, rather than letting a text parse drift
+    from what the workflow actually means.
+    """
+    yaml = pytest.importorskip("yaml", reason="no PyYAML here; parser runs unchecked")
+    with open(WORKFLOW) as f:
+        jobs = yaml.safe_load(f)["jobs"]
+
+    assert _matrix_entries() == set(
+        jobs["unit-tests"]["strategy"]["matrix"]["test"]
+    ), "the text parse of the unit-tests matrix disagrees with PyYAML"
+
+    assert ("all-unit-tests" in jobs) == (
+        _pytest_commands("all-unit-tests") is not None
+    ), "the text parse disagrees with PyYAML on whether the catch-all job exists"
+
+    steps = " ".join(s.get("run", "") for s in jobs["all-unit-tests"].get("steps", []))
+    assert ("pytest" in steps) == bool(
+        _pytest_commands("all-unit-tests")
+    ), "the text parse disagrees with PyYAML on whether the catch-all runs pytest"
 
 
 @pytest.mark.parametrize("name", _test_files())
