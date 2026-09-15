@@ -273,13 +273,18 @@ def test_default_scale_is_the_historical_draw(path):
     assert implicit._blinding_values_poi_add[0] == explicit._blinding_values_poi_add[0]
 
 
-def _postfit_cov(f, ind):
-    """Fit and hand back the covariance the driver would hand to the check."""
+def _postfit_variances(f, ind):
+    """Fit and hand back the variance vector the driver passes to the check.
+
+    The driver builds this either as the covariance diagonal or, under
+    --noHessian, from the CG-solved POI rows; the check only ever reads the
+    diagonal, so it takes the vector.
+    """
     f.set_nobs(ind.data_obs)
     f.minimize()
     _, grad, hess = f.loss_val_grad_hess()
     _, cov = f.edmval_cov(grad, hess)
-    return cov
+    return np.diag(np.asarray(cov))
 
 
 MSG = "Blinding was too narrow to hide"
@@ -319,9 +324,9 @@ def test_weak_blinding_is_reported_against_the_measured_uncertainty(path, caplog
     )
     f.defaultassign()
     f.set_blinding_offsets(True)
-    cov = _postfit_cov(f, ind)
+    var = _postfit_variances(f, ind)
     with caplog.at_level("WARNING"):
-        f.warn_if_blinding_is_weak(cov)
+        f.warn_if_blinding_is_weak(var)
     assert any(MSG in r.message for r in caplog.records)
 
     # and an ample one
@@ -331,9 +336,9 @@ def test_weak_blinding_is_reported_against_the_measured_uncertainty(path, caplog
     )
     f2.defaultassign()
     f2.set_blinding_offsets(True)
-    cov2 = _postfit_cov(f2, ind)
+    var2 = _postfit_variances(f2, ind)
     with caplog.at_level("WARNING"):
-        f2.warn_if_blinding_is_weak(cov2)
+        f2.warn_if_blinding_is_weak(var2)
     assert not any(MSG in r.message for r in caplog.records)
 
 
@@ -351,16 +356,16 @@ def test_the_weak_blinding_warning_does_not_leak_the_secret(path, caplog):
     )
     f.defaultassign()
     f.set_blinding_offsets(True)
-    cov = _postfit_cov(f, ind)
+    var = _postfit_variances(f, ind)
 
     with caplog.at_level("WARNING"):
-        f.warn_if_blinding_is_weak(cov)
+        f.warn_if_blinding_is_weak(var)
     msgs = [r.message for r in caplog.records if MSG in r.message]
     assert msgs, "warning did not fire; test is vacuous"
     text = " ".join(msgs)
 
     offset = abs(float(f._blinding_values_poi_add[0]))
-    sigma = float(np.sqrt(np.diag(np.asarray(cov))[0]))
+    sigma = float(np.sqrt(var[0]))
     assert offset > 0.0 and sigma > 0.0, "vacuous: nothing drawn or no curvature"
 
     for forbidden, label in ((offset, "the drawn offset"), (sigma, "sigma")):
@@ -399,14 +404,14 @@ def test_the_verdict_follows_the_measured_sigma_not_just_the_scale(path, caplog)
     smearing = BLINDING_DRAW_STD * 1.0
 
     # sigma well below the smearing: amply hidden
-    tight = np.eye(n) * (smearing / 500.0) ** 2
+    tight = np.full(n, (smearing / 500.0) ** 2)
     caplog.clear()
     with caplog.at_level("WARNING"):
         f.warn_if_blinding_is_weak(tight)
     assert not any(MSG in r.message for r in caplog.records)
 
     # sigma well above it: the same smearing now hides nothing
-    loose = np.eye(n) * (smearing * 20.0) ** 2
+    loose = np.full(n, (smearing * 20.0) ** 2)
     caplog.clear()
     with caplog.at_level("WARNING"):
         f.warn_if_blinding_is_weak(loose)
@@ -430,10 +435,10 @@ def test_an_unblinded_poi_is_not_reported_as_weakly_blinded(path, caplog):
     f.defaultassign()
     f.set_blinding_offsets(True)
     assert float(f._blinding_offsets_poi_add[0].numpy()) == 0.0
-    cov = _postfit_cov(f, ind)
+    var = _postfit_variances(f, ind)
 
     with caplog.at_level("WARNING"):
-        f.warn_if_blinding_is_weak(cov)
+        f.warn_if_blinding_is_weak(var)
     assert not any(MSG in r.message for r in caplog.records)
 
 

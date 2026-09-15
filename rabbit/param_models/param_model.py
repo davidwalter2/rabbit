@@ -259,9 +259,10 @@ class CompositeParamModel(ParamModel):
         # Dropping this is NOT a benign default: the Fitter reads the scale off
         # its effective model, so a submodel declaring scale=7 would blind at
         # scale=1 the moment it is composited -- silently, and in the
-        # under-blinding direction. The weak-blinding warning cannot backstop
-        # it, because a blinded POI is typically free and so has no prefit
-        # sigma to compare against.
+        # under-blinding direction. The weak-blinding check would catch it after
+        # the fit, since it measures against the postfit sigma, but only after a
+        # run has already been spent -- propagating the declaration is what
+        # keeps the offset right the first time.
         # Guarded on npoi: with every submodel POI-less the comprehension below
         # is empty and np.concatenate raises. That composition is supported and
         # reached from the CLI -- load_models builds a composite straight from

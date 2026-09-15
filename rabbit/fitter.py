@@ -768,7 +768,7 @@ class Fitter:
             "uncertainty carries no such dependence."
         )
 
-    def warn_if_blinding_is_weak(self, cov):
+    def warn_if_blinding_is_weak(self, variances):
         """Say so when the smearing was too narrow to hide the POI it blinded.
 
         The yardstick is the MEASURED uncertainty, which is the only thing that
@@ -793,15 +793,18 @@ class Fitter:
         ``init_blinding_values``: a POI left out by --unblind, or exempted by
         the model, has an offset of exactly zero.
 
-        Skipped entirely under --noHessian, where there is no covariance to
-        read; the driver says so rather than failing.
+        Takes the per-parameter VARIANCE vector rather than a covariance matrix,
+        so it works wherever the driver has one. With a Hessian that is the full
+        diagonal; under --noHessian it is the POI and NOI entries alone, solved
+        for by edmval_cov_rows_hessfree, with the rest left NaN -- which is all
+        this needs, and non-finite entries are skipped. Only --noEDM computes
+        neither, and there the driver says the check was skipped.
         """
         if not self.do_blinding or not self.param_model.npoi:
             return
         npoi = self.param_model.npoi
 
-        cov = np.asarray(cov)
-        sigma = np.sqrt(np.diag(cov)[:npoi])
+        sigma = np.sqrt(np.asarray(variances)[:npoi])
         offsets = np.asarray(self._blinding_offsets_poi_add)[:npoi]
         scales = np.broadcast_to(
             np.asarray(
