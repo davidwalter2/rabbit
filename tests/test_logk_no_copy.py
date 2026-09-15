@@ -66,6 +66,36 @@ def test_logk_is_aliased_not_copied(sparse):
             assert f.logk_csr is indata.logk_csr, "logk_csr was rebuilt"
 
 
+def test_rnorm_init_is_the_value_the_hot_path_uses():
+    """The factor must be the model evaluated where the yields evaluate it.
+
+    ``compute()`` consumes PHYSICAL parameter values -- everywhere else it is
+    handed ``get_poi()``, which undoes the storage transform. ``xparamdefault``
+    is in x-space, so with the default ``allowNegativeParam=False`` it holds
+    ``sqrt(mu)``; passing it raw evaluates the model at ``sqrt(mu)`` and the
+    factor lands at ``1/sqrt(mu)`` of what the yield computation uses at the
+    same point.
+
+    Compared against ``compute(get_poi())`` rather than against a literal,
+    because the claim is an agreement between two call sites and not a
+    particular number. The check above cannot see this: ``rnorm_init != 1``
+    is satisfied by ``sqrt(1.7) = 1.304`` exactly as happily as by ``1.7``.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        indata, f = _make(tmp, sparse=False)
+        assert f.rnorm_init is not None, "scaling not armed; test is vacuous"
+        assert not f.param_model.allowNegativeParam, "squared storage is the case"
+
+        f.xdefaultassign()
+        hot = np.asarray(f.param_model.compute(f.get_poi(), True))
+        init = np.asarray(f.rnorm_init)
+
+        # and the default really is off 1, or sqrt() is the identity here
+        assert not np.allclose(hot[0], 1.0), "POI default is 1; test is vacuous"
+
+        np.testing.assert_allclose(init[0], hot[0], rtol=1e-12, atol=0)
+
+
 def test_scaling_factors_out_of_the_contraction():
     """The algebraic premise, on the tensors the fitter actually holds.
 

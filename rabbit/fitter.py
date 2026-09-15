@@ -2002,7 +2002,22 @@ class Fitter:
         if self.indata.systematic_type != "normal" or self.param_model.nparams == 0:
             return
 
-        rnorm_init = self.param_model.compute(self.param_model.xparamdefault, full=True)
+        # compute() consumes PHYSICAL parameter values: everywhere else it is
+        # fed get_poi(), which undoes the storage transform. xparamdefault is
+        # in x-space, so for allowNegativeParam=False -- the default -- it
+        # holds sqrt(mu), and handing it over raw evaluates the model at
+        # sqrt(mu) instead of mu. The factor then comes out at 1/sqrt(mu) of
+        # the value the yield computation uses at the very same point, which
+        # is the linearization point this is supposed to match.
+        #
+        # Only visible when the POI default differs from 1 (in practice
+        # --expectSignal != 1), since sqrt(1) == 1, which is why every test in
+        # the repo bar the ones below runs straight past it.
+        xdef = self.param_model.xparamdefault
+        if not self.param_model.allowNegativeParam:
+            npoi = self.param_model.npoi
+            xdef = tf.concat([tf.square(xdef[:npoi]), xdef[npoi:]], axis=0)
+        rnorm_init = self.param_model.compute(xdef, full=True)
         rnorm_init = tf.broadcast_to(
             rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
         )
