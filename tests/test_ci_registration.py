@@ -1,20 +1,23 @@
 """Every test file must be reachable by CI.
 
-CI runs unit tests two ways, and neither covers everything on its own:
+CI runs the unit tests one way: an `all-unit-tests` job invoking
+`pytest tests/`, which discovers test files rather than being told about them.
+That is the whole point. It replaced a hand-maintained matrix of filenames in
+which an unlisted file ran nowhere and nothing reported the omission -- the
+default was "don't run", a PR adding tests went green either way, and 137 tests
+across eight files had accumulated unrun before anyone measured it (issue #173).
 
-* ``unit-tests`` is a hand-maintained matrix invoking ``python tests/<file>``.
-  It is the only thing that runs the *script-style* files -- the ones whose
-  body is a ``main()`` rather than ``test_`` functions, which pytest collects
-  nothing from.
-* ``all-unit-tests`` runs ``pytest tests/`` and picks up every pytest-style
-  file automatically, including ones nobody remembered to list.
+Discovery closes that by construction, but it moves the failure rather than
+removing it: a file pytest cannot collect anything from is now the silent case,
+since there is no second mechanism to catch it. The four script-style files
+that used to need the matrix (a `main()` rather than `test_` functions) were
+converted for exactly that reason. These tests keep it that way.
 
-The failure this guards against is a file that falls between them: added,
-committed, and run by neither. Before the catch-all existed that was the
-default and nothing reported it -- a PR adding tests went green either way, and
-eight files holding 137 tests had accumulated unrun (issue #173). The catch-all
-closes that for pytest-style files; this module closes it for the rest, and
-fails in the PR that opens the gap rather than silently months later.
+What is deliberately not guarded: deleting the `all-unit-tests` job itself.
+Nothing would then run this file either. That is a visible, reviewable act --
+every unit-test check disappears from the PR at once -- rather than the quiet
+drift this module exists to catch, and a tripwire job would mean running some
+test file twice, which is what the unification removed.
 """
 
 import ast
@@ -27,6 +30,7 @@ import pytest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(REPO, "tests")
 WORKFLOW = os.path.join(REPO, ".github", "workflows", "main.yml")
+JOB = "all-unit-tests"
 
 # What `pytest tests/` picks up, by pytest's default naming conventions.
 PYTEST_FUNC_PREFIX = "test"
@@ -39,7 +43,7 @@ def _job_block(name):
     Read as text rather than with PyYAML: the CI runner has no yaml module, and
     an ImportError here is not a skipped test but a collection error that
     aborts the whole `pytest tests/` run -- the exact failure this file exists
-    to prevent, which is how it announced itself the first time this job ran.
+    to prevent, which is how it announced itself the first time the job ran.
     The parse is cross-checked against a real YAML parser in
     test_the_text_parse_agrees_with_pyyaml, wherever one is installed.
 
@@ -51,7 +55,7 @@ def _job_block(name):
     for line in lines:
         if out is None:
             if re.match(rf"^(\s*){re.escape(name)}:\s*$", line):
-                indent = len(line) - len(line.rstrip("\n").lstrip())
+                indent = len(line) - len(line.lstrip())
                 out = []
             continue
         if line.strip() and (len(line) - len(line.lstrip())) <= indent:
@@ -68,35 +72,18 @@ def _test_files():
     return names
 
 
-def _matrix_entries():
-    """Files named in the hand-maintained `unit-tests` matrix."""
-    block = _job_block("unit-tests")
-    assert block is not None, "no `unit-tests` job in the workflow"
-    entries = {
-        m.group(1)
-        for m in (re.match(r"^\s*-\s*(test_\S+\.py)\s*$", ln) for ln in block)
-        if m
-    }
-    # A parse that silently returned nothing would make every check below pass
-    # vacuously; under- and over-reading are both caught by the tests, but an
-    # empty read is worth refusing outright.
-    assert entries, "parsed no entries from the `unit-tests` matrix"
-    return entries
-
-
 def _pytest_commands(job):
     """Shell words of each command in ``job`` that invokes pytest.
 
-    Scans every line of the block rather than only inline ``run:`` values, so
-    a command inside a ``run: |`` block scalar counts too.
+    Scans every line of the block rather than only inline ``run:`` values, so a
+    command inside a ``run: |`` block scalar counts too.
     """
     block = _job_block(job)
     if block is None:
         return None
     cmds = []
     for line in block:
-        text = line.split("#", 1)[0].strip()
-        text = re.sub(r"^-?\s*run:\s*", "", text)
+        text = re.sub(r"^-?\s*run:\s*", "", line.split("#", 1)[0].strip())
         if "pytest" in text:
             try:
                 cmds.append(shlex.split(text))
@@ -124,23 +111,28 @@ def _collects_under_pytest(name):
     return False
 
 
-def test_the_catch_all_job_exists_and_runs_the_whole_suite():
-    """The other assertions here lean on `pytest tests/` actually running.
-
-    Without this, deleting the catch-all job would leave every pytest-style
-    file uncovered while this module still reported everything was fine.
-    """
-    cmds = _pytest_commands("all-unit-tests")
-    assert cmds is not None, (
-        "the catch-all job is gone; unlisted test files no longer run anywhere "
-        "(see issue #173)"
+@pytest.mark.parametrize("name", _test_files())
+def test_every_test_file_is_collected_by_pytest(name):
+    """A file pytest collects nothing from runs nowhere, silently."""
+    assert _collects_under_pytest(name), (
+        f"tests/{name} defines no top-level test_* function or Test* class, so "
+        "`pytest tests/` collects nothing from it and it runs nowhere in CI. "
+        "Script-style tests (a main() that asserts) are not picked up -- give "
+        "it test_* functions, as the four converted files do."
     )
+
+
+def test_the_unit_test_job_runs_the_whole_suite():
+    """Everything above assumes `pytest tests/` actually runs, over tests/."""
+    cmds = _pytest_commands(JOB)
+    assert (
+        cmds is not None
+    ), f"the `{JOB}` job is gone; no unit tests run in CI at all (see #173)"
     # Token-wise, not substring: `pytest tests/test_bbstat.py` contains the
     # string "pytest tests/" while covering one file out of twenty.
-    whole_suite = any({"tests", "tests/"} & set(words) for words in cmds)
-    assert whole_suite, (
-        "the catch-all job no longer runs pytest over the whole tests/ "
-        f"directory, so it does not cover unlisted files; it runs: {cmds!r}"
+    assert any({"tests", "tests/"} & set(words) for words in cmds), (
+        f"the `{JOB}` job no longer runs pytest over the whole tests/ "
+        f"directory, so it does not cover every file; it runs: {cmds!r}"
     )
 
 
@@ -155,50 +147,40 @@ def test_the_text_parse_agrees_with_pyyaml():
     with open(WORKFLOW) as f:
         jobs = yaml.safe_load(f)["jobs"]
 
-    assert _matrix_entries() == set(
-        jobs["unit-tests"]["strategy"]["matrix"]["test"]
-    ), "the text parse of the unit-tests matrix disagrees with PyYAML"
+    assert (JOB in jobs) == (
+        _pytest_commands(JOB) is not None
+    ), "the text parse disagrees with PyYAML on whether the unit test job exists"
 
-    assert ("all-unit-tests" in jobs) == (
-        _pytest_commands("all-unit-tests") is not None
-    ), "the text parse disagrees with PyYAML on whether the catch-all job exists"
-
-    steps = " ".join(s.get("run", "") for s in jobs["all-unit-tests"].get("steps", []))
+    steps = " ".join(s.get("run", "") for s in jobs[JOB].get("steps", []))
     assert ("pytest" in steps) == bool(
-        _pytest_commands("all-unit-tests")
-    ), "the text parse disagrees with PyYAML on whether the catch-all runs pytest"
+        _pytest_commands(JOB)
+    ), "the text parse disagrees with PyYAML on whether the job runs pytest"
 
 
-@pytest.mark.parametrize("name", _test_files())
-def test_every_test_file_is_run_by_something(name):
-    """Either pytest collects it, or the matrix names it explicitly."""
-    if _collects_under_pytest(name):
-        return
-    assert name in _matrix_entries(), (
-        f"tests/{name} defines no pytest-collectable tests, so `pytest tests/` "
-        "skips it, and it is not in the `unit-tests` matrix either -- it would "
-        "run nowhere in CI. Add it to the matrix in .github/workflows/main.yml, "
-        "or give it top-level test_* functions."
-    )
+def test_no_job_depends_on_a_job_that_does_not_exist():
+    """The matrix job was removed; seven jobs had named it in `needs`.
 
-
-def test_the_matrix_names_only_files_that_exist():
-    """A renamed or deleted file leaves an entry that fails the job outright;
-    catching it here says which file, rather than a bare `No such file`."""
-    missing = sorted(_matrix_entries() - set(_test_files()))
-    assert not missing, (
-        f"the `unit-tests` matrix names files that do not exist: {missing}. "
-        "Rename or drop the entries in .github/workflows/main.yml."
-    )
+    GitHub rejects the whole workflow for a dangling dependency, so this would
+    surface as every job failing to start rather than as a test failure.
+    """
+    yaml = pytest.importorskip("yaml", reason="no PyYAML here")
+    with open(WORKFLOW) as f:
+        jobs = yaml.safe_load(f)["jobs"]
+    dangling = []
+    for name, job in jobs.items():
+        needs = job.get("needs") or []
+        needs = [needs] if isinstance(needs, str) else needs
+        dangling += [f"{name} -> {n}" for n in needs if n not in jobs]
+    assert not dangling, f"jobs depend on jobs that do not exist: {dangling}"
 
 
 def test_cross_test_imports_are_not_bare():
-    """A bare `from test_x import ...` breaks the catch-all at collection time.
+    """A bare `from test_x import ...` breaks the suite at collection time.
 
     It resolves only when tests/ is itself on sys.path, which `pytest tests/`
     does not arrange, and the resulting ImportError aborts collection for the
     *whole run*, not just that file -- which is how one stray import kept the
-    catch-all from being turned on at all (issue #173).
+    directory-wide job from being turned on at all (issue #173).
 
     Both the forms already used in this suite are fine: relative
     (`from .test_x import ...`) and package-qualified
