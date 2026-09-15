@@ -81,19 +81,6 @@ def _exact_subproblem_solution(g, H, tr_radius):
     return p_of(hi)
 
 
-# Quarantined by #176, not by a change to the minimizer. This file had never
-# run in CI (issue #173); the first run that included it failed the
-# `0.98 * model(p_sp)` bar below on two indefinite cases -- 97.5% and 94.6% of
-# scipy's reduction, where the absolute bar against the exact optimum on the
-# line above still passed. That bar compares two iterative solvers that each
-# stop anywhere inside their k_easy/k_hard band, so which one lands better is
-# machine-dependent; it holds on the author's box and not on the runner.
-# strict=False deliberately: this passes locally, and a strict xfail would
-# turn that into an XPASS failure.
-@pytest.mark.xfail(
-    reason="#176: relative-to-scipy bar is machine-calibrated; fails on the CI runner",
-    strict=False,
-)
 @pytest.mark.parametrize("definite", [True, False])
 @pytest.mark.parametrize("tr_radius", [0.01, 1.0, 100.0])
 @pytest.mark.parametrize("cond", [None, 1e6])
@@ -133,6 +120,22 @@ def test_subproblem_matches_scipy(definite, tr_radius, cond):
         # optimum, where the native solver still reaches 0.987. So hold the
         # native solver to the absolute bar and only require that it is not
         # materially worse than scipy.
+        # #176: on the runner this one bar fails for the indefinite models at
+        # tr_radius = 1.0 -- 97.5% and 94.6% of scipy's reduction -- while the
+        # absolute bar above still passes. Two iterative solvers each stopping
+        # anywhere inside their k_easy/k_hard band can land either side of a 2%
+        # margin depending on the arithmetic. Softened only there, and only
+        # when it actually misses: every other combination, and every other
+        # assertion here, still gates on every platform.
+        if (
+            not (model(p_tf) <= 0.98 * model(p_sp))
+            and not definite
+            and tr_radius == 1.0
+        ):
+            pytest.xfail(
+                "#176: relative-to-scipy bar is machine-calibrated; "
+                f"native reached {model(p_tf) / model(p_sp):.3f} of scipy"
+            )
         assert model(p_tf) <= 0.98 * model(p_sp)
         if hb_tf != hb_sp:
             # can only disagree when the interior/boundary distinction is
@@ -621,16 +624,6 @@ def test_trust_krylov_rosenbrock():
     np.testing.assert_allclose(res.x, np.ones(n), atol=1e-5)
 
 
-# Quarantined by #176 -- see the note on test_subproblem_matches_scipy. The
-# runner returned s_est/s_true - 1 = -1.7e-8 at gap=1e-8, against the 1e-9
-# slack below. "Rayleigh quotient is an upper bound" is exact in real
-# arithmetic; the computed one carries rounding of order eps*cond, and
-# cond(A) ~ 1e9 there puts that at ~2e-7, so the slack is tighter than the
-# arithmetic supports rather than the estimator being wrong.
-@pytest.mark.xfail(
-    reason="#176: 1e-9 slack is tighter than float64 rounding at cond ~ 1e9",
-    strict=False,
-)
 def test_device_smallest_singular_estimator():
     """Inverse-iteration estimator vs the true sigma_min: near-singular
     matrices (the regime the hard case uses it in) must be essentially
@@ -638,6 +631,14 @@ def test_device_smallest_singular_estimator():
     from rabbit.minimizer.exact import estimate_smallest_singular_value_device
 
     rng = np.random.default_rng(5)
+    # #176: the lower bound below is exact in real arithmetic, but the computed
+    # Rayleigh quotient carries rounding of order eps*cond. Only gap=1e-8 has
+    # cond(A) ~ 1e9, where that is ~2e-7 against a 1e-9 slack; gap=1e-4 and
+    # 1e-1 sit at cond ~ 1e5 and ~1e2, where the slack is comfortable. Misses
+    # are collected rather than raised so the rest of the loop -- and every
+    # other assertion in it -- still gates, and only a miss confined to that
+    # one regime is excused, at the end.
+    machine_limited = []
     for gap in (1e-8, 1e-4, 1e-1):
         for n in (10, 50):
             Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
@@ -648,7 +649,13 @@ def test_device_smallest_singular_estimator():
             s_est, z_est = estimate_smallest_singular_value_device(L)
             s_true = math.sqrt(gap)
             # Rayleigh quotient is an upper bound on sigma_min
-            assert s_est >= s_true * (1 - 1e-9)
+            if s_est < s_true * (1 - 1e-9) and gap <= 1e-8:
+                machine_limited.append(
+                    f"gap={gap:g} n={n}: s_est/s_true - 1 = "
+                    f"{s_est / s_true - 1:.2e}"
+                )
+            else:
+                assert s_est >= s_true * (1 - 1e-9)
             if gap <= 1e-4:
                 # strong separation: inverse iteration is converged
                 assert s_est <= s_true * (1 + 1e-6)
@@ -658,6 +665,12 @@ def test_device_smallest_singular_estimator():
             else:
                 assert s_est <= s_true * 10  # same order even when hard
             assert abs(np.linalg.norm(z_est) - 1) < 1e-12
+
+    if machine_limited:
+        pytest.xfail(
+            "#176: 1e-9 slack is tighter than float64 rounding at cond ~ 1e9; "
+            + "; ".join(machine_limited)
+        )
 
 
 def test_nan_proposal_does_not_freeze_the_radius():
