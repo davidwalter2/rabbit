@@ -37,7 +37,7 @@ START = 0.3
 class ToyModel(ParamModel):
     """One POI scaling the signal, linear so the fit solves exactly."""
 
-    def __init__(self, indata, blind_additive_scale=None, prior_sigma=None):
+    def __init__(self, indata, blind_additive_scale=None):
         super().__init__(indata)
         self.npoi = 1
         self.npou = 0
@@ -47,9 +47,6 @@ class ToyModel(ParamModel):
         self.allowNegativeParam = True
         if blind_additive_scale is not None:
             self.blind_additive_scale = blind_additive_scale
-        if prior_sigma is not None:
-            self.prior_sigmas = np.array([prior_sigma], dtype=np.float64)
-            self.prior_means = np.array([START], dtype=np.float64)
 
     def compute(self, param, full=False):
         # No numpy on `param`: compute() runs inside a tf.function, where it is
