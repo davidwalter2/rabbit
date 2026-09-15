@@ -264,37 +264,24 @@ class Fitter:
         self._init_logk_scaled()
 
         if self.do_blinding:
-            self._blinding_offsets_poi = tf.Variable(
-                tf.ones([self.param_model.npoi], dtype=self.indata.dtype),
-                trainable=False,
-                name="offset_poi",
-            )
             self._blinding_offsets_theta = tf.Variable(
                 tf.zeros([self.indata.nsyst], dtype=self.indata.dtype),
                 trainable=False,
                 name="offset_theta",
             )
-            # Additive POI offsets, for models declaring blind_additive. Kept as
-            # a separate vector rather than folded into the multiplicative one
-            # so that get_poi() is a single affine expression and an
-            # unaffected analysis keeps exactly its current arithmetic
-            # (offset_poi = 1, offset_poi_add = 0 is the identity).
+            # POI offsets. Additive is the only form: a translation has unit
+            # Jacobian, so the covariance, the uncertainties and every impact
+            # come out EXACTLY unblinded, and applied before the positivity
+            # transform it composes with squared storage too. The
+            # multiplicative form divided all of those by the random factor --
+            # leaving only relative uncertainties usable, and making the
+            # reported sigma itself a channel for the offset, since
+            # sigma_true / sigma_reported WAS the offset.
             self._blinding_offsets_poi_add = tf.Variable(
                 tf.zeros([self.param_model.npoi], dtype=self.indata.dtype),
                 trainable=False,
                 name="offset_poi_add",
             )
-            self._blind_additive = bool(
-                getattr(self.param_model, "blind_additive", False)
-            )
-            if self._blind_additive and not self.param_model.allowNegativeParam:
-                raise ValueError(
-                    "param_model.blind_additive=True requires "
-                    "allowNegativeParam=True: with allowNegativeParam=False the "
-                    "stored parameter is sqrt(poi), so an additive blinding "
-                    "offset could hand compute() a negative POI and destroy the "
-                    "positivity the squared storage exists to guarantee."
-                )
             self.init_blinding_values(unblind, blinding_group)
 
         self.parms = np.concatenate([self.param_model.params, self.indata.systs])
@@ -703,19 +690,9 @@ class Fitter:
             value = deterministic_random_from_string(seed)
             self._blinding_values_theta[i] = value
 
-        # Offset the POIs. MULTIPLICATIVELY by default -- right for a signal
-        # strength centred at 1, which scales yields and stays evaluable at any
-        # value -- or ADDITIVELY when the model declares blind_additive, which
-        # is right for a POI that is a physical parameter feeding a calculation
-        # with a restricted domain. The draw is the same either way, so seeding,
-        # --unblind, --blindingGroup and the _data suffix are unaffected; only
-        # how it is applied differs.
-        #
-        # Additive matters beyond evaluability: a translation has unit Jacobian,
-        # so the covariance, the uncertainties and the impacts stay EXACTLY
-        # unblinded, whereas the multiplicative form divides all of them by the
-        # random factor and leaves only relative uncertainties usable.
-        self._blinding_values_poi = np.ones(self.param_model.npoi, dtype=np.float64)
+        # Offset the POIs, additively, in each parameter's own fit units. This
+        # is the only form: see the offset Variables in init_fit_parms for why
+        # the multiplicative one was removed.
         self._blinding_values_poi_add = np.zeros(
             self.param_model.npoi, dtype=np.float64
         )
@@ -742,13 +719,48 @@ class Fitter:
             seed = param_to_seed.get(param, param)
             logger.debug(f"Blind parameter {param} (seed='{seed}')")
             value = deterministic_random_from_string(seed)
-            if self._blind_additive:
-                self._blinding_values_poi_add[i] = additive_scale[i] * value
-            else:
-                self._blinding_values_poi[i] = np.exp(value)
+            self._blinding_values_poi_add[i] = additive_scale[i] * value
 
-        if self._blind_additive:
-            self._warn_if_additive_blinding_scale_is_weak(unblind_parameters)
+        self._warn_if_additive_blinding_scale_is_weak(unblind_parameters)
+        self._warn_if_squared_storage_leaks_through_the_covariance()
+
+    def _warn_if_squared_storage_leaks_through_the_covariance(self):
+        """Say so when the POI parameterisation leaks the value it is hiding.
+
+        With ``allowNegativeParam=False`` the stored coordinate is
+        ``sqrt(poi)``, so at the minimum ``d(poi)/dx = 2*sqrt(poi)`` and the
+        reported uncertainty is ``sigma_poi / (2*sqrt(poi))`` -- a function of
+        the TRUE value. The offset does not appear in it (blinding preserves
+        sigma_x exactly), but anyone holding an expected sigma_poi, which an
+        Asimov study gives for free, inverts it: ``sqrt(poi) = sigma_poi /
+        (2*sigma_x)``, and subtracting the reported coordinate leaves the
+        offset.
+
+        A linearly stored POI (``allowNegativeParam=True``) has unit Jacobian,
+        so its reported sigma is ``sigma_poi`` itself and carries nothing about
+        where the minimum sits. That is the configuration blinding actually
+        works in.
+
+        A warning rather than a refusal: the squaring is the default everywhere
+        in rabbit, blinding is on by default for a data fit, and refusing would
+        make every existing analysis unrunnable rather than merely leaky. The
+        leak also predates this code -- it is a property of reporting sqrt(poi)
+        and its uncertainty, not of any offset -- so the honest thing is to
+        name it and point at the fix.
+        """
+        if self.param_model.allowNegativeParam:
+            return
+        if not self.param_model.npoi:
+            return
+        logger.warning(
+            "Blinding a POI stored as sqrt(poi) (allowNegativeParam=False): the "
+            "reported uncertainty is sigma_poi / (2*sqrt(poi)), which depends on "
+            "the true value, so an expected sigma recovers the blinded value and "
+            "hence the offset. The offset itself is not in the covariance -- "
+            "sigma is preserved exactly -- but the parameterisation is. Pass "
+            "--allowNegativeParam for a linearly stored POI, whose reported "
+            "uncertainty carries no such dependence."
+        )
 
     def _warn_if_additive_blinding_scale_is_weak(self, unblind_parameters):
         """Say so when the CONFIGURED additive smearing is too narrow to hide a POI.
@@ -901,13 +913,9 @@ class Fitter:
         if not self.do_blinding:
             return
         if blind:
-            self._blinding_offsets_poi.assign(self._blinding_values_poi)
             self._blinding_offsets_poi_add.assign(self._blinding_values_poi_add)
             self._blinding_offsets_theta.assign(self._blinding_values_theta)
         else:
-            self._blinding_offsets_poi.assign(
-                np.ones(self.param_model.npoi, dtype=np.float64)
-            )
             self._blinding_offsets_poi_add.assign(
                 np.zeros(self.param_model.npoi, dtype=np.float64)
             )
@@ -948,20 +956,23 @@ class Fitter:
 
     def get_poi(self):
         xpoi = self.x[: self.param_model.npoi]
+        if self.do_blinding:
+            # BEFORE the positivity transform, not after. (x + off)**2 is
+            # non-negative for ANY offset, so an additive offset composes with
+            # the squared storage rather than fighting it -- x**2 + off is the
+            # form that can go negative, which is why additive blinding used to
+            # require allowNegativeParam. It also leaves the reported
+            # uncertainty exactly unblinded: at the minimum d(poi)/dx is
+            # 2*sqrt(poi) in both frames, so sigma_x is identical armed and
+            # disarmed.
+            xpoi = xpoi + self._blinding_offsets_poi_add
         if self.param_model.allowNegativeParam:
             poi = xpoi
         else:
             poi = tf.square(xpoi)
-        poi = tf.where(
+        return tf.where(
             self.frozen_params_mask[: self.param_model.npoi], tf.stop_gradient(poi), poi
         )
-        if self.do_blinding:
-            # Affine: one of the two offsets is always the identity (1 for the
-            # multiplicative slot, 0 for the additive one), so this is the
-            # existing arithmetic for an unaffected model.
-            return poi * self._blinding_offsets_poi + self._blinding_offsets_poi_add
-        else:
-            return poi
 
     def get_x(self):
         return tf.concat(

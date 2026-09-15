@@ -6,19 +6,12 @@ getters apply the offset on the way INTO ParamModel.compute() and the constraint
 term, so the model and the NLL see the physical value while ``fitter.x`` -- the
 minimizer's coordinate, and what gets written out -- is the blinded one.
 
-The two forms are not interchangeable, which is what these tests pin down:
-
-* MULTIPLICATIVE (the default for POIs) suits a signal strength centred at 1
-  that scales yields. But the reported coordinate is then ``poi_true / offset``,
-  so the curvature scales as ``offset**2`` and the reported uncertainty, the POI
-  row of the covariance and every impact on that POI are divided by the random
-  factor. Only the RELATIVE uncertainty survives. (That Jacobian is intended and
-  is unchanged; what the start point does is a separate question, covered in
-  tests/test_blinding_multiplicative.py.)
-* ADDITIVE, which a model opts into with ``blind_additive = True``, is a
-  translation. Its Jacobian is the identity, so the covariance, the
-  uncertainties and the impacts come out EXACTLY unblinded while the central
-  value is still hidden.
+Blinding is ADDITIVE, always: a translation, whose Jacobian is the identity,
+so the covariance, the uncertainties and every impact come out EXACTLY
+unblinded while the central value stays hidden. The multiplicative form that
+used to be the default divided all of those by the random factor -- leaving
+only relative uncertainties usable, and making the reported sigma itself a
+channel for the offset, since sigma_true / sigma_reported WAS the offset.
 
 Every check below is an INVARIANCE, so no test prints, returns or asserts on an
 offset value.
@@ -45,9 +38,7 @@ START = 0.3
 class ToyModel(ParamModel):
     """One POI scaling the signal, linear so the fit solves exactly."""
 
-    def __init__(
-        self, indata, blind_additive=False, blind_additive_scale=None, prior_sigma=None
-    ):
+    def __init__(self, indata, blind_additive_scale=None, prior_sigma=None):
         super().__init__(indata)
         self.npoi = 1
         self.npou = 0
@@ -55,8 +46,6 @@ class ToyModel(ParamModel):
         self.xparamdefault = tf.constant([START], dtype=indata.dtype)
         self.is_linear = True
         self.allowNegativeParam = True
-        if blind_additive:
-            self.blind_additive = True
         if blind_additive_scale is not None:
             self.blind_additive_scale = blind_additive_scale
         if prior_sigma is not None:
@@ -78,23 +67,6 @@ class SecondToyModel(ToyModel):
     def __init__(self, indata, **kwargs):
         super().__init__(indata, **kwargs)
         self.params = np.array([b"alphaS2"])
-
-
-class PouOnlyAdditiveModel(ParamModel):
-    """Declares blind_additive but carries no POIs, so it gets no vote."""
-
-    def __init__(self, indata):
-        super().__init__(indata)
-        self.npoi = 0
-        self.npou = 1
-        self.params = np.array([b"nuisance"])
-        self.xparamdefault = tf.constant([0.0], dtype=indata.dtype)
-        self.is_linear = True
-        self.allowNegativeParam = True
-        self.blind_additive = True
-
-    def compute(self, param, full=False):
-        return tf.ones([1, self.indata.nproc], dtype=self.indata.dtype)
 
 
 def make_tensor(path):
@@ -148,9 +120,9 @@ def path():
         yield p
 
 
-def build(path, blind_additive, do_blinding, **opts):
+def build(path, do_blinding, **opts):
     ind = inputdata.FitInputData(path)
-    model = ToyModel(ind, blind_additive=blind_additive)
+    model = ToyModel(ind)
     f = fitter.Fitter(ind, model, make_options(**opts), do_blinding=do_blinding)
     return ind, model, f
 
@@ -173,7 +145,7 @@ def test_model_sees_the_offset_while_x_does_not(path):
     declared default: that is what makes the coordinate safe to write out and
     what stops the offset being recoverable from it.
     """
-    _, _, fb = build(path, True, True)
+    _, _, fb = build(path, True)
     fb.defaultassign()
     fb.set_blinding_offsets(True)
 
@@ -187,39 +159,17 @@ def test_model_sees_the_offset_while_x_does_not(path):
 def test_x0_untouched_by_arming(path):
     """x0 is the model frame and must NOT be shifted; cheapest guard against
     someone 'symmetrising' the compensation later."""
-    _, _, f = build(path, True, True)
+    _, _, f = build(path, True)
     f.defaultassign()
     before = f.x0.numpy().copy()
     f.set_blinding_offsets(True)
     assert np.array_equal(before, f.x0.numpy())
 
 
-def test_multiplicative_path_keeps_its_arithmetic(path):
-    """A model that does not opt into ADDITIVE blinding keeps exactly its
-    ``get_poi`` arithmetic -- ``poi = x * offset``, no additive slot.
-
-    The Jacobian of the multiplicative form is intended and unchanged, which is
-    why only the RELATIVE uncertainty survives it. The stored coordinate stays
-    at the declared default, so the physical start is START * offset -- see
-    tests/test_blinding_start_point.py for why that is accepted.
-    """
-    _, _, f = build(path, False, True)
-    f.defaultassign()
-    f.set_blinding_offsets(True)
-    mul = float(f._blinding_offsets_poi[0].numpy())
-    assert float(f._blinding_offsets_poi_add[0].numpy()) == 0.0
-    assert not np.isclose(mul, 1.0), "vacuous: POI was not blinded"
-
-    assert np.isclose(
-        float(f.get_poi()[0].numpy()), float(f.x[0].numpy()) * mul, rtol=1e-14
-    )
-    assert np.isclose(float(f.x[0].numpy()), START, rtol=0, atol=1e-12)
-
-
 def test_determinism_across_fitters(path):
     """Same input, independent fitters: identical offsets, without printing one."""
-    _, _, f1 = build(path, True, True)
-    _, _, f2 = build(path, True, True)
+    _, _, f1 = build(path, True)
+    _, _, f2 = build(path, True)
     for f in (f1, f2):
         f.defaultassign()
         f.set_blinding_offsets(True)
@@ -231,7 +181,7 @@ def test_determinism_across_fitters(path):
 
 def test_unblind_disables_the_offset(path):
     """--unblind on the POI leaves the coordinate and the physical value equal."""
-    _, _, f = build(path, True, True, unblind=["alphaS"])
+    _, _, f = build(path, True, unblind=["alphaS"])
     f.defaultassign()
     f.set_blinding_offsets(True)
     assert np.isclose(
@@ -239,18 +189,33 @@ def test_unblind_disables_the_offset(path):
     )
 
 
-def test_additive_requires_allow_negative_param(path):
-    """With the squared storage an additive offset could hand compute() a
-    negative POI, so the combination must be refused."""
+def test_squared_storage_is_warned_about_not_refused(path, caplog):
+    """Squared storage leaks the value through the covariance, and is reported.
+
+    With ``allowNegativeParam=False`` the stored coordinate is ``sqrt(poi)``, so
+    at the minimum ``d(poi)/dx = 2*sqrt(poi)`` and the reported uncertainty is
+    ``sigma_poi / (2*sqrt(poi))`` -- a function of the TRUE value. The offset is
+    not in it (sigma is preserved exactly), but an expected ``sigma_poi``, which
+    an Asimov study gives for free, inverts it and the offset falls out.
+
+    A warning rather than a refusal because the squaring is rabbit's default and
+    blinding is on by default for a data fit: refusing would make every existing
+    analysis unrunnable rather than merely leaky. The leak also predates any
+    offset -- it is a property of reporting sqrt(poi) and its uncertainty.
+    """
     ind = inputdata.FitInputData(path)
-    model = ToyModel(ind, blind_additive=True)
+    model = ToyModel(ind)
     model.allowNegativeParam = False
-    try:
+
+    with caplog.at_level("WARNING"):
         fitter.Fitter(ind, model, make_options(), do_blinding=True)
-    except ValueError as exc:
-        assert "allowNegativeParam" in str(exc)
-    else:
-        raise AssertionError("expected a refusal for blind_additive + squared storage")
+    assert any("allowNegativeParam=False" in r.message for r in caplog.records)
+
+    # and a linearly stored POI is not warned about
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        fitter.Fitter(ind, ToyModel(ind), make_options(), do_blinding=True)
+    assert not any("allowNegativeParam=False" in r.message for r in caplog.records)
 
 
 # --- the additive draw's SCALE, which the multiplicative form does not need ---
@@ -259,19 +224,17 @@ def test_additive_requires_allow_negative_param(path):
 def test_additive_scale_multiplies_the_draw(path):
     """``blind_additive_scale`` rescales the offset and nothing else.
 
-    exp(N(0, 5)) hides a POI by orders of magnitude whatever it means, but
-    + N(0, 5) is an ABSOLUTE shift, so a POI whose sigma is O(1) in its own
-    units would be offset by well under a sigma. The model declares its units
-    here; the draw itself (seed, sign, magnitude) must be untouched, which is
-    what pins this as a rescale rather than a different random number.
+    The offset is an ABSOLUTE shift in the POI's own fit units, so a POI whose
+        sigma is O(1) in those units would be offset by well under a sigma. The
+        model declares its units here; the draw itself (seed, sign, magnitude) must
+        be untouched, which is what pins this as a rescale rather than a different
+        random number.
     """
     ind = inputdata.FitInputData(path)
-    base = fitter.Fitter(
-        ind, ToyModel(ind, blind_additive=True), make_options(), do_blinding=True
-    )
+    base = fitter.Fitter(ind, ToyModel(ind), make_options(), do_blinding=True)
     scaled = fitter.Fitter(
         ind,
-        ToyModel(ind, blind_additive=True, blind_additive_scale=1000.0),
+        ToyModel(ind, blind_additive_scale=1000.0),
         make_options(),
         do_blinding=True,
     )
@@ -280,20 +243,17 @@ def test_additive_scale_multiplies_the_draw(path):
 
     assert off_base != 0.0, "vacuous: the unscaled draw is already zero"
     assert np.isclose(off_scaled, 1000.0 * off_base, rtol=1e-12, atol=0)
-    # the multiplicative vector stays the identity in both
-    assert np.allclose(base._blinding_values_poi, 1.0)
-    assert np.allclose(scaled._blinding_values_poi, 1.0)
+    # a rescale, not a different random number: the sign is part of the draw
+    assert np.sign(off_scaled) == np.sign(off_base)
 
 
 def test_default_scale_is_the_historical_draw(path):
     """Not declaring a scale must reproduce the pre-existing offset exactly."""
     ind = inputdata.FitInputData(path)
-    implicit = fitter.Fitter(
-        ind, ToyModel(ind, blind_additive=True), make_options(), do_blinding=True
-    )
+    implicit = fitter.Fitter(ind, ToyModel(ind), make_options(), do_blinding=True)
     explicit = fitter.Fitter(
         ind,
-        ToyModel(ind, blind_additive=True, blind_additive_scale=1.0),
+        ToyModel(ind, blind_additive_scale=1.0),
         make_options(),
         do_blinding=True,
     )
@@ -314,7 +274,7 @@ def test_weak_additive_blinding_scale_is_reported(path, caplog):
     with caplog.at_level("WARNING"):
         fitter.Fitter(
             ind,
-            ToyModel(ind, blind_additive=True, prior_sigma=1e6),
+            ToyModel(ind, prior_sigma=1e6),
             make_options(),
             do_blinding=True,
         )
@@ -325,7 +285,7 @@ def test_weak_additive_blinding_scale_is_reported(path, caplog):
     with caplog.at_level("WARNING"):
         fitter.Fitter(
             ind,
-            ToyModel(ind, blind_additive=True, prior_sigma=1e-4),
+            ToyModel(ind, prior_sigma=1e-4),
             make_options(),
             do_blinding=True,
         )
@@ -345,7 +305,7 @@ def test_the_weak_blinding_warning_does_not_leak_the_secret(path, caplog):
     with caplog.at_level("WARNING"):
         f = fitter.Fitter(
             ind,
-            ToyModel(ind, blind_additive=True, prior_sigma=sigma),
+            ToyModel(ind, prior_sigma=sigma),
             make_options(),
             do_blinding=True,
         )
@@ -385,12 +345,10 @@ def test_composite_preserves_a_declared_scale(path):
     under-blinding direction, and with no warning possible for the free POIs
     this feature exists for.
     """
-    _, off_plain = _composite_offsets(
-        path, [lambda i: ToyModel(i, blind_additive=True)]
-    )
+    _, off_plain = _composite_offsets(path, [lambda i: ToyModel(i)])
     _, off_scaled = _composite_offsets(
         path,
-        [lambda i: ToyModel(i, blind_additive=True, blind_additive_scale=7.0)],
+        [lambda i: ToyModel(i, blind_additive_scale=7.0)],
     )
     assert off_plain[0] != 0.0
     assert np.isclose(off_scaled[0], 7.0 * off_plain[0], rtol=1e-12, atol=0)
@@ -406,8 +364,8 @@ def test_scale_is_per_poi_not_one_composite_value(path):
     composite, off = _composite_offsets(
         path,
         [
-            lambda i: ToyModel(i, blind_additive=True, blind_additive_scale=7.0),
-            lambda i: SecondToyModel(i, blind_additive=True, blind_additive_scale=0.5),
+            lambda i: ToyModel(i, blind_additive_scale=7.0),
+            lambda i: SecondToyModel(i, blind_additive_scale=0.5),
         ],
     )
     np.testing.assert_allclose(composite.blind_additive_scale, [7.0, 0.5])
@@ -415,10 +373,10 @@ def test_scale_is_per_poi_not_one_composite_value(path):
     # each offset is its own scale times the draw for its own NAME
     ind = inputdata.FitInputData(path)
     solo_a = fitter.Fitter(
-        ind, ToyModel(ind, blind_additive=True), make_options(), do_blinding=True
+        ind, ToyModel(ind), make_options(), do_blinding=True
     )._blinding_values_poi_add[0]
     solo_b = fitter.Fitter(
-        ind, SecondToyModel(ind, blind_additive=True), make_options(), do_blinding=True
+        ind, SecondToyModel(ind), make_options(), do_blinding=True
     )._blinding_values_poi_add[0]
     assert np.isclose(off[0], 7.0 * solo_a, rtol=1e-12, atol=0)
     assert np.isclose(off[1], 0.5 * solo_b, rtol=1e-12, atol=0)
@@ -429,8 +387,8 @@ def test_composite_of_composites_keeps_the_vector(path):
     ind = inputdata.FitInputData(path)
     inner = CompositeParamModel(
         [
-            ToyModel(ind, blind_additive=True, blind_additive_scale=7.0),
-            SecondToyModel(ind, blind_additive=True, blind_additive_scale=0.5),
+            ToyModel(ind, blind_additive_scale=7.0),
+            SecondToyModel(ind, blind_additive_scale=0.5),
         ]
     )
     outer = CompositeParamModel([inner])
@@ -442,18 +400,11 @@ def test_undeclared_submodels_get_one(path):
     composite, _ = _composite_offsets(
         path,
         [
-            lambda i: ToyModel(i, blind_additive=True, blind_additive_scale=7.0),
+            lambda i: ToyModel(i, blind_additive_scale=7.0),
             lambda i: SecondToyModel(i),
         ],
     )
     np.testing.assert_allclose(composite.blind_additive_scale, [7.0, 1.0])
-
-
-def test_a_poi_less_submodel_does_not_flip_the_form(path):
-    """The form governs the POI block, so only POI-carrying submodels vote."""
-    ind = inputdata.FitInputData(path)
-    composite = CompositeParamModel([ToyModel(ind), PouOnlyAdditiveModel(ind)])
-    assert not getattr(composite, "blind_additive", False)
 
 
 if __name__ == "__main__":

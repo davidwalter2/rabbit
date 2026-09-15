@@ -37,9 +37,7 @@ START = 0.3
 class ToyModel(ParamModel):
     """One POI scaling the signal, linear so the fit solves exactly."""
 
-    def __init__(
-        self, indata, blind_additive=False, blind_additive_scale=None, prior_sigma=None
-    ):
+    def __init__(self, indata, blind_additive_scale=None, prior_sigma=None):
         super().__init__(indata)
         self.npoi = 1
         self.npou = 0
@@ -47,8 +45,6 @@ class ToyModel(ParamModel):
         self.xparamdefault = tf.constant([START], dtype=indata.dtype)
         self.is_linear = True
         self.allowNegativeParam = True
-        if blind_additive:
-            self.blind_additive = True
         if blind_additive_scale is not None:
             self.blind_additive_scale = blind_additive_scale
         if prior_sigma is not None:
@@ -114,9 +110,9 @@ def path():
         yield p
 
 
-def build(path, blind_additive, do_blinding, **opts):
+def build(path, do_blinding, **opts):
     ind = inputdata.FitInputData(path)
-    model = ToyModel(ind, blind_additive=blind_additive)
+    model = ToyModel(ind)
     f = fitter.Fitter(ind, model, make_options(**opts), do_blinding=do_blinding)
     return ind, model, f
 
@@ -132,9 +128,9 @@ def _asimov(f):
     return f.expected_yield()
 
 
-def _fit(path, blind_additive, do_blinding):
+def _fit(path, do_blinding):
     """Minimise once, armed or not, and report the PHYSICAL answer."""
-    ind, _, f = build(path, blind_additive, do_blinding)
+    ind, _, f = build(path, do_blinding)
     f.defaultassign()
     if do_blinding:
         f.set_blinding_offsets(True)
@@ -149,15 +145,14 @@ def _fit(path, blind_additive, do_blinding):
     )
 
 
-@pytest.mark.parametrize("blind_additive", [True, False])
-def test_arming_does_not_touch_x(path, blind_additive):
+def test_arming_does_not_touch_x(path):
     """The whole point: arming assigns offsets and nothing else.
 
     If this ever starts failing because a compensation was reintroduced, read
     test_offset_is_not_recoverable_from_the_prefit_coordinate below for why it
     must not be.
     """
-    _, _, f = build(path, blind_additive, True)
+    _, _, f = build(path, True)
     f.defaultassign()
     before = f.x.numpy().copy()
     f.set_blinding_offsets(True)
@@ -169,8 +164,7 @@ def test_arming_does_not_touch_x(path, blind_additive):
     np.testing.assert_array_equal(before, f.x.numpy())
 
 
-@pytest.mark.parametrize("blind_additive", [True, False])
-def test_offset_is_not_recoverable_from_the_prefit_coordinate(path, blind_additive):
+def test_offset_is_not_recoverable_from_the_prefit_coordinate(path):
     """Stated as the attack it prevents.
 
     ``x0default`` is public, so an attacker who can read the prefit ``x``
@@ -178,77 +172,61 @@ def test_offset_is_not_recoverable_from_the_prefit_coordinate(path, blind_additi
     offset, i.e. it must be identically zero -- while the offset itself is
     non-zero, or the test proves nothing.
     """
-    _, _, f = build(path, blind_additive, True)
+    _, _, f = build(path, True)
     f.defaultassign()
     f.set_blinding_offsets(True)
 
     npoi = f.param_model.npoi
-    armed = (
-        f._blinding_offsets_poi_add.numpy()[:npoi]
-        if blind_additive
-        else f._blinding_offsets_poi.numpy()[:npoi]
-    )
-    identity = 0.0 if blind_additive else 1.0
-    assert not np.allclose(armed, identity), "offset is the identity; test is vacuous"
+    armed = f._blinding_offsets_poi_add.numpy()[:npoi]
+    assert not np.allclose(armed, 0.0), "offset is the identity; test is vacuous"
 
     leak = f.x0default.numpy()[:npoi] - f.x.numpy()[:npoi]
     np.testing.assert_array_equal(leak, np.zeros_like(leak))
 
 
-# Agreement is to the MINIMISER's convergence tolerance, not bit-for-bit, and
-# the two forms are not equally good. The additive start is offset by
-# blind_additive_scale * N(0, 5) in the POI's own units; the multiplicative one
-# by a factor exp(N(0, 5)), which is exponentially further away, so the same
-# stopping criterion leaves a larger residual. Measured on this model:
-# additive agrees to < 1e-6 relative, multiplicative to ~6e-5. The tolerances
-# below are those measurements with margin -- tightening them is welcome, but
-# loosening one means the start point is costing real precision and the
-# compensation trade in set_blinding_offsets should be revisited.
-@pytest.mark.parametrize(
-    "blind_additive,rtol",
-    [(True, 1e-6), (False, 1e-3)],
-    ids=["additive", "multiplicative"],
-)
-def test_physical_minimum_is_the_same_armed_and_disarmed(path, blind_additive, rtol):
+def test_physical_minimum_is_the_same_armed_and_disarmed(path):
     """The assumption the uncompensated start rests on.
 
     The blinded fit opens at a different physical point, so this is the claim
     that makes that harmless: the minimiser converges to the same physical
-    minimum and the same NLL either way. If it ever fails, the uncompensated
-    start is not safe and the trade in set_blinding_offsets has to be revisited.
-    """
-    armed = _fit(path, blind_additive, True)
-    plain = _fit(path, blind_additive, False)
+    minimum either way.
 
-    # the starts really did differ, or there is nothing to prove
+    Judged against the fit's OWN uncertainty rather than an absolute tolerance,
+    which would be a property of whichever offset the seed happens to draw. A
+    milli-sigma is the statement that matters: blinding does not move the answer
+    by anything that could be mistaken for a result.
+    """
+    armed = _fit(path, True)
+    plain = _fit(path, False)
+
     assert not np.allclose(
         armed["x"], plain["x"], rtol=1e-6
     ), "armed and disarmed fits used the same coordinates; test is vacuous"
 
-    np.testing.assert_allclose(
-        armed["physical"], plain["physical"], rtol=rtol, atol=1e-9
+    sigma = np.sqrt(np.diag(np.linalg.inv(plain["hess"])))
+    assert np.all(sigma > 0)
+    shift = np.abs(armed["physical"] - plain["physical"]) / sigma
+    assert np.all(shift < 1e-3), (
+        f"blinding moved the minimum by up to {shift.max():.2e} sigma, which is "
+        "too much to call the same minimum"
     )
-    # the NLL is flat to second order at the minimum, so it agrees far better
-    # than the coordinates do
     assert np.isclose(armed["loss"], plain["loss"], rtol=0, atol=1e-6)
 
 
-def test_additive_leaves_the_postfit_hessian_unblinded(path):
+def test_blinding_leaves_the_postfit_hessian_unblinded(path):
     """sigma = sqrt(diag(H^-1)), so 'sigma unblinded' IS 'H unchanged'.
 
-    Checked AT THE MINIMUM rather than at a shared coordinate: without
-    compensation the two runs pass through different points on the way, and it
-    is the answer that has to match, not the path. The additive form has unit
-    Jacobian so the Hessian is untouched; the multiplicative form scales the
-    POI row and is included as the contrast, so a vacuous pass is visible.
+    The additive form is a translation, so its Jacobian is the identity and the
+    whole Hessian -- not just the POI row -- is untouched. Checked AT THE
+    MINIMUM rather than at a shared coordinate: without compensation the two
+    runs pass through different points on the way, and it is the answer that has
+    to match, not the path.
     """
-    add = _fit(path, True, True)
-    ref = _fit(path, True, False)
-    mul = _fit(path, False, True)
+    armed = _fit(path, True)
+    plain = _fit(path, False)
 
-    assert abs(ref["hess"][0, 0]) > 1e-6, f"no POI curvature: {ref['hess'][0, 0]}"
-    np.testing.assert_allclose(add["hess"], ref["hess"], rtol=1e-6, atol=0)
-    assert not np.isclose(mul["hess"][0, 0], ref["hess"][0, 0], rtol=1e-6)
+    assert abs(plain["hess"][0, 0]) > 1e-6, f"no POI curvature: {plain['hess'][0, 0]}"
+    np.testing.assert_allclose(armed["hess"], plain["hess"], rtol=1e-6, atol=0)
 
 
 if __name__ == "__main__":
