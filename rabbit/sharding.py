@@ -272,6 +272,24 @@ def shard_edges(nbins, n):
     return [(int(edges[i]), int(edges[i + 1])) for i in range(n)]
 
 
+# The blinding offsets get_poi() and get_theta() read. The shard evaluators are
+# duck-typed attribute containers, so every one of these has to be threaded to
+# them explicitly -- and as a tensor, because XLA cannot read a Variable that
+# lives on another device.
+#
+# Listed once rather than at each of the three sites that thread them: a Fitter
+# that grows or drops an offset would otherwise have to be matched in all three,
+# and missing one is silent until the first armed sharded fit. That is exactly
+# how _blinding_offsets_poi_add arrived -- added to get_poi() on main, threaded
+# nowhere. test_sharded_fit.py checks this tuple against what a blinded Fitter
+# actually creates.
+_BLINDING_OFFSET_ATTRS = (
+    "_blinding_offsets_poi",
+    "_blinding_offsets_poi_add",
+    "_blinding_offsets_theta",
+)
+
+
 class MultiDeviceFitter(Fitter):
     """Bins-sharded Fitter for multi-device (typically multi-GPU) fits.
 
@@ -447,8 +465,8 @@ class MultiDeviceFitter(Fitter):
         gview.frozen_params_mask = self.frozen_params_mask
         gview.do_blinding = self.do_blinding
         if self.do_blinding:
-            gview._blinding_offsets_poi = self._blinding_offsets_poi
-            gview._blinding_offsets_theta = self._blinding_offsets_theta
+            for _name in _BLINDING_OFFSET_ATTRS:
+                setattr(gview, _name, getattr(self, _name))
         gview.cw = self.cw
         gview.x0 = self.x0
         for name in ("get_poi", "get_model_nui", "get_theta", "get_x", "_compute_lc"):
@@ -691,8 +709,8 @@ class MultiDeviceFitter(Fitter):
                 shard.x = x
                 shard.frozen_params_mask = aux[0]
                 if shard.do_blinding:
-                    shard._blinding_offsets_poi = aux[1]
-                    shard._blinding_offsets_theta = aux[2]
+                    for _k, _name in enumerate(_BLINDING_OFFSET_ATTRS, start=1):
+                        setattr(shard, _name, aux[_k])
 
             def nll_local(x, aux):
                 _pin(x, aux)
@@ -811,8 +829,10 @@ class MultiDeviceFitter(Fitter):
         def _read_aux():
             aux = [tf.identity(self.frozen_params_mask)]
             if self.do_blinding:
-                aux.append(tf.identity(self._blinding_offsets_poi))
-                aux.append(tf.identity(self._blinding_offsets_theta))
+                aux.extend(
+                    tf.identity(getattr(self, _name))
+                    for _name in _BLINDING_OFFSET_ATTRS
+                )
             return tuple(aux)
 
         def _to_device(aux):

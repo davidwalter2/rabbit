@@ -24,14 +24,18 @@ from rabbit.param_models.helpers import load_model
 from tests.test_sparse_fit import make_options, make_test_tensor
 
 
-def _make_fitter(filename, ndevices=1, **kw):
+def _make_fitter(filename, ndevices=1, do_blinding=False, **kw):
     indata_obj = inputdata.FitInputData(filename, host_memory=ndevices > 1)
     param_model = load_model("Mu", indata_obj)
     options = make_options(nDevices=ndevices, **kw)
     # pass the kwargs rabbit_fit passes, so the factory can never silently
     # drop one again (it did once: globalImpactsFromJVP)
     f = fitter.make_fitter(
-        indata_obj, param_model, options, do_blinding=False, globalImpactsFromJVP=True
+        indata_obj,
+        param_model,
+        options,
+        do_blinding=do_blinding,
+        globalImpactsFromJVP=True,
     )
     f.set_nobs(indata_obj.data_obs)
     return f
@@ -71,6 +75,54 @@ def test_sharded_loss_grad_hvp_hess_match(ndevices):
         _, _, H1 = f1.loss_val_grad_hess()
         _, _, Hn = fn.loss_val_grad_hess()
         np.testing.assert_allclose(Hn.numpy(), H1.numpy(), rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("ndevices", [2, 3])
+def test_sharded_loss_matches_single_device_with_blinding_armed(ndevices):
+    """The sharded loss must agree with the single-device one while blinded.
+
+    Blinding is armed by default for an observed-data fit and is not in the
+    up-front refusal list, so `--nDevices N` on data is the headline use case,
+    not an exotic one. Every other test in this file builds with
+    do_blinding=False, which is why a get_poi() that grew a third offset on main
+    could reach the shards unthreaded and crash the first loss evaluation with
+    AttributeError -- the offsets are read whatever their value, so an
+    all-identity run does not dodge it either.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        fname = make_test_tensor(tmp)
+        f1 = _make_fitter(fname, 1, do_blinding=True)
+        fn = _make_fitter(fname, ndevices, do_blinding=True)
+        for f in (f1, fn):
+            f.set_blinding_offsets(True)
+
+        v1, g1 = f1.loss_val_grad()
+        vn, gn = fn.loss_val_grad()
+        assert np.isclose(float(v1.numpy()), float(vn.numpy()), rtol=RTOL, atol=0)
+        np.testing.assert_allclose(g1.numpy(), gn.numpy(), rtol=1e-10, atol=0)
+
+
+def test_every_blinding_offset_is_threaded_to_the_shards():
+    """The shard evaluators are duck-typed, so a missed offset is an
+    AttributeError at the first armed fit rather than a type error at import.
+
+    _BLINDING_OFFSET_ATTRS is what the three threading sites iterate; this
+    pins it against what a blinded Fitter actually creates. Adding an offset to
+    the Fitter without listing it, or listing one the Fitter no longer has,
+    fails here instead of in somebody's fit.
+    """
+    from rabbit.sharding import _BLINDING_OFFSET_ATTRS
+
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _make_fitter(make_test_tensor(tmp), 1, do_blinding=True)
+
+    created = {n for n in vars(f) if n.startswith("_blinding_offsets_")}
+    assert created, "no offsets created; test is vacuous"
+    assert created == set(_BLINDING_OFFSET_ATTRS), (
+        "the offsets a blinded Fitter creates and the ones sharding threads have "
+        f"diverged: Fitter has {sorted(created)}, sharding threads "
+        f"{sorted(_BLINDING_OFFSET_ATTRS)}"
+    )
 
 
 def test_sharded_profile_beta_matches():
