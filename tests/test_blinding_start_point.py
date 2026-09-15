@@ -28,9 +28,9 @@ import tensorflow as tf
 from rabbit import fitter, inputdata, tensorwriter
 from rabbit.param_models.param_model import ParamModel
 
-# Deliberately NON-ZERO. A zero default would satisfy the start-invariance test
-# by accident -- ``0 * offset == 0`` for the multiplicative form -- which is
-# exactly the accident this machinery replaces with a guarantee.
+# Deliberately NON-ZERO, so that the stored coordinate and the physical value
+# are distinguishable: with a default of 0 an offset test cannot tell "x was
+# left alone" from "x was set to the offset".
 START = 0.3
 
 

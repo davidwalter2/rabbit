@@ -29,9 +29,9 @@ import tensorflow as tf
 from rabbit import fitter, inputdata, tensorwriter
 from rabbit.param_models.param_model import CompositeParamModel, ParamModel
 
-# Deliberately NON-ZERO. A zero default would satisfy the start-invariance test
-# by accident -- ``0 * offset == 0`` for the multiplicative form -- which is
-# exactly the accident this machinery replaces with a guarantee.
+# Deliberately NON-ZERO, so that the stored coordinate and the physical value
+# are distinguishable: with a default of 0 an offset test cannot tell "x was
+# left alone" from "x was set to the offset".
 START = 0.3
 
 
@@ -170,8 +170,11 @@ def test_model_sees_the_offset_while_x_does_not(path):
 
 
 def test_x0_untouched_by_arming(path):
-    """x0 is the model frame and must NOT be shifted; cheapest guard against
-    someone 'symmetrising' the compensation later."""
+    """x0 is the model frame and must NOT be shifted.
+
+    The constraint compares get_x() against x0, so offsetting both would
+    double-count the shift and move the penalty's minimum.
+    """
     _, _, f = build(path, True)
     f.defaultassign()
     before = f.x0.numpy().copy()
@@ -231,7 +234,7 @@ def test_squared_storage_is_warned_about_not_refused(path, caplog):
     assert not any("allowNegativeParam=False" in r.message for r in caplog.records)
 
 
-# --- the additive draw's SCALE, which the multiplicative form does not need ---
+# --- the SCALE of the draw, which carries the parameter's units --------------
 
 
 def test_additive_scale_multiplies_the_draw(path):
