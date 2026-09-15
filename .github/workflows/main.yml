@@ -158,6 +158,10 @@ jobs:
       fail-fast: false
       matrix:
         test:
+          # Registered here as well as collected by all-unit-tests: it is the
+          # guard on that job's existence, so it has to keep running if the
+          # job is ever removed.
+          - test_ci_registration.py
           - test_bbstat.py
           - test_external_term.py
           - test_global_asym_impacts.py
@@ -188,6 +192,37 @@ jobs:
 
       - name: run ${{ matrix.test }}
         run: python tests/${{ matrix.test }}
+
+  # Catch-all companion to the matrix above. The matrix names files by hand, so
+  # an unlisted one runs nowhere and nothing reports the omission -- a PR adding
+  # tests goes green either way (see issue #173). This job collects everything
+  # pytest can find, so a new test file is covered from the moment it lands.
+  #
+  # It does not replace the matrix: four of the test files are script-style
+  # (a main() rather than test_ functions) and pytest collects nothing from
+  # them, so they are only ever run by `python tests/<file>` above. The matrix
+  # also keeps per-file isolation and parallelism, which this job gives up.
+  # tests/test_ci_registration.py holds that split together.
+  all-unit-tests:
+    runs-on: [self-hosted, linux, x64]
+    needs: setenv
+
+    steps:
+      - env:
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
+        run: |
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v5
+
+      # Per job, from its own checkout -- see the note on the concurrency group.
+      - name: setup python path
+        run: |
+          echo "PYTHONPATH=$GITHUB_WORKSPACE:$PYTHONPATH" >> $GITHUB_ENV
+          echo "PATH=$GITHUB_WORKSPACE/bin:$PATH" >> $GITHUB_ENV
+
+      - name: run the whole test suite
+        run: python -m pytest tests/ -q
 
   make-tensor:
     runs-on: [self-hosted, linux, x64]
