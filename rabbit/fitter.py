@@ -14,11 +14,7 @@ from rabbit import external_likelihood, io_tools
 from rabbit import preconditioner as precond
 from rabbit import tfhelpers as tfh
 from rabbit.bbstat.bbstat import BinByBinStat
-from rabbit.callbacks import (
-    RESTART_MIN_IMPROVEMENT,
-    FitterCallback,
-    merge_callbacks,
-)
+from rabbit.callbacks import RESTART_MIN_IMPROVEMENT, FitterCallback, merge_callbacks
 from rabbit.impacts import (
     asym_impacts,
     global_asym_impacts,
@@ -26,6 +22,12 @@ from rabbit.impacts import (
     nonprofiled_impacts,
     traditional_impacts,
 )
+from rabbit.minimizer import (
+    minimize_trust_exact,
+    minimize_trust_krylov,
+    minimize_trust_ncg,
+)
+from rabbit.snapshot import Snapshotter, snapshot_on_signal
 from rabbit.tfhelpers import edmval_cov
 
 logger = logging.child_logger(__name__)
@@ -65,6 +67,16 @@ def match_regexp_params(regular_expressions, parameter_names):
     return matched
 
 
+# Options from --minimizerMaxiter/--minimizerGtol/--minimizerFtol that each
+# native minimizer actually reads. Anything else passed for these methods is
+# warned about rather than silently dropped (see Fitter.fit).
+NATIVE_MINIMIZER_OPTIONS = {
+    "tf-trust-exact": {"gtol", "maxiter"},
+    "tf-trust-ncg": {"gtol", "maxiter"},
+    "tf-trust-krylov": {"gtol", "maxiter"},
+}
+
+
 class Fitter:
     valid_systematic_types = ["log_normal", "normal"]
 
@@ -74,6 +86,7 @@ class Fitter:
         self.indata = indata
 
         self.earlyStopping = options.earlyStopping
+        self.stallRelTol = getattr(options, "stallRelTol", 0.0)
         self.globalImpactsFromJVP = globalImpactsFromJVP
 
         if self.indata.systematic_type not in Fitter.valid_systematic_types:
@@ -95,10 +108,16 @@ class Fitter:
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
         # Optional parameter preconditioning (see rabbit/preconditioner.py).
         # getattr so callers that build options objects by hand keep working.
+        # Parameter snapshots (see rabbit/snapshot.py). Everything the fit has
+        # learned lives in memory until the output is written at the very end,
+        # so without these an interrupted fit leaves nothing at all.
+        self.snapshot_file = getattr(options, "snapshotFile", None)
+        self.snapshot_interval = float(getattr(options, "snapshotInterval", 0.0) or 0.0)
         self.precondition = getattr(options, "precondition", False)
         self.precondition_params = getattr(options, "preconditionParams", None)
         self.precondition_from = getattr(options, "preconditionFrom", "hessian")
         self.precondition_blocks = getattr(options, "preconditionBlocks", "auto")
+        self.precondition_transform = getattr(options, "preconditionTransform", "ridge")
         self.precondition_block_threshold = getattr(
             options, "preconditionBlockThreshold", 0.1
         )
@@ -248,6 +267,27 @@ class Fitter:
                 trainable=False,
                 name="offset_theta",
             )
+            # Additive POI offsets, for models declaring blind_additive. Kept as
+            # a separate vector rather than folded into the multiplicative one
+            # so that get_poi() is a single affine expression and an
+            # unaffected analysis keeps exactly its current arithmetic
+            # (offset_poi = 1, offset_poi_add = 0 is the identity).
+            self._blinding_offsets_poi_add = tf.Variable(
+                tf.zeros([self.param_model.npoi], dtype=self.indata.dtype),
+                trainable=False,
+                name="offset_poi_add",
+            )
+            self._blind_additive = bool(
+                getattr(self.param_model, "blind_additive", False)
+            )
+            if self._blind_additive and not self.param_model.allowNegativeParam:
+                raise ValueError(
+                    "param_model.blind_additive=True requires "
+                    "allowNegativeParam=True: with allowNegativeParam=False the "
+                    "stored parameter is sqrt(poi), so an additive blinding "
+                    "offset could hand compute() a negative POI and destroy the "
+                    "positivity the squared storage exists to guarantee."
+                )
             self.init_blinding_values(unblind, blinding_group)
 
         self.parms = np.concatenate([self.param_model.params, self.indata.systs])
@@ -644,8 +684,38 @@ class Fitter:
             value = deterministic_random_from_string(seed)
             self._blinding_values_theta[i] = value
 
-        # add offset to pois
+        # Offset the POIs. MULTIPLICATIVELY by default -- right for a signal
+        # strength centred at 1, which scales yields and stays evaluable at any
+        # value -- or ADDITIVELY when the model declares blind_additive, which
+        # is right for a POI that is a physical parameter feeding a calculation
+        # with a restricted domain. The draw is the same either way, so seeding,
+        # --unblind, --blindingGroup and the _data suffix are unaffected; only
+        # how it is applied differs.
+        #
+        # Additive matters beyond evaluability: a translation has unit Jacobian,
+        # so the covariance, the uncertainties and the impacts stay EXACTLY
+        # unblinded, whereas the multiplicative form divides all of them by the
+        # random factor and leaves only relative uncertainties usable.
         self._blinding_values_poi = np.ones(self.param_model.npoi, dtype=np.float64)
+        self._blinding_values_poi_add = np.zeros(
+            self.param_model.npoi, dtype=np.float64
+        )
+        # The additive draw is NOT scale free the way exp(N(0, 5)) is: it is an
+        # absolute shift, so how well it hides depends on the POI's units. The
+        # model is the only thing that knows them, so it declares the scale.
+        # Default 1.0 == the historical draw.
+        #
+        # Scalar (one scale for all of a model's POIs) or per-POI vector, which
+        # is what CompositeParamModel produces: the scale is in each
+        # parameter's own units, so a composite cannot reduce its submodels'
+        # declarations to a single number.
+        additive_scale = np.broadcast_to(
+            np.asarray(
+                getattr(self.param_model, "blind_additive_scale", 1.0),
+                dtype=np.float64,
+            ),
+            (self.param_model.npoi,),
+        )
         for i in range(self.param_model.npoi):
             param = self.param_model.params[i]
             if param in unblind_parameters:
@@ -653,21 +723,215 @@ class Fitter:
             seed = param_to_seed.get(param, param)
             logger.debug(f"Blind parameter {param} (seed='{seed}')")
             value = deterministic_random_from_string(seed)
-            self._blinding_values_poi[i] = np.exp(value)
+            if self._blind_additive:
+                self._blinding_values_poi_add[i] = additive_scale[i] * value
+            else:
+                self._blinding_values_poi[i] = np.exp(value)
+
+        if self._blind_additive:
+            self._warn_if_additive_blinding_is_weak(unblind_parameters)
+
+    def _warn_if_additive_blinding_is_weak(self, unblind_parameters):
+        """Say so when an additive offset is too small to actually hide the POI.
+
+        The multiplicative form is scale free -- ``exp(N(0, 5))`` spans
+        ``e**+-10`` whatever the POI means -- so it hides by orders of
+        magnitude regardless of units. ``+ N(0, 5)`` does not: it is an
+        absolute shift, and a POI whose uncertainty is O(1) in its own fit
+        units ends up offset by well under a sigma, i.e. effectively
+        unblinded. That failure is SILENT, and the thing it fails at is
+        blinding, so it is worth a startup warning.
+
+        The natural yardstick is the prefit sigma, which for a POI exists only
+        where the model declared a Gaussian prior on it (``prior_sigmas``);
+        ``indata.constraintweights`` covers the nuisances, not this block.
+        Scaling the draw BY that sigma -- the obvious alternative -- is not
+        safe here: an unconstrained POI has no prior sigma at all, so the
+        offset would come out identically zero and blinding would silently
+        switch off completely. Hence a declared scale
+        (``blind_additive_scale``) plus this check wherever a sigma does
+        exist.
+        """
+        sigmas = getattr(self.param_model, "prior_sigmas", None)
+        if sigmas is None:
+            return
+        sigmas = np.asarray(sigmas, dtype=np.float64)
+
+        weak = []
+        for i in range(self.param_model.npoi):
+            param = self.param_model.params[i]
+            if param in unblind_parameters:
+                continue
+            sigma = sigmas[i]
+            if not np.isfinite(sigma) or sigma <= 0.0:
+                continue
+            offset = abs(self._blinding_values_poi_add[i])
+            if offset < 5.0 * sigma:
+                name = param.decode() if isinstance(param, bytes) else str(param)
+                weak.append((name, offset, offset / sigma))
+
+        if weak:
+            details = ", ".join(
+                f"{n} (|offset|={o:.4g}, {r:.2g} sigma)" for n, o, r in weak
+            )
+            logger.warning(
+                "Additive blinding may be INEFFECTIVE for "
+                f"{len(weak)} of {self.param_model.npoi} POIs: the drawn offset is "
+                "smaller than 5 prefit sigma, so the true value is recoverable to "
+                f"within a few sigma of the blinded one. {details}. Raise "
+                "param_model.blind_additive_scale to a few times the expected "
+                "uncertainty, in the POI's own fit units."
+            )
+
+    def _poi_reframe(self, xpoi, mul_old, add_old, mul_new, add_new):
+        """Rewrite a stored POI coordinate for a new pair of blinding offsets,
+        holding the PHYSICAL value :meth:`get_poi` reports fixed.
+
+        ``get_poi`` is affine in the model frame::
+
+            poi = T(x) * mul + add        T = identity, or square when
+                                          allowNegativeParam is False
+
+        so the coordinate that reproduces the same ``poi`` under
+        ``(mul_new, add_new)`` is ``T^-1((T(x)*mul_old + add_old - add_new) /
+        mul_new)``. Both branches below are that expression, specialised:
+
+        * ``allowNegativeParam=True``: ``T`` is the identity, so it is the
+          affine map directly.
+        * ``allowNegativeParam=False``: the stored coordinate is
+          ``sqrt(poi/mul)``, and ``add`` is IDENTICALLY ZERO on this branch --
+          ``blind_additive`` raises unless ``allowNegativeParam`` is True (see
+          :meth:`init_fit_parms`) -- so the whole reframing collapses to
+          ``x * sqrt(mul_old / mul_new)``. Note the SQUARE ROOT: the ratio
+          itself would be the right factor only for a model whose POI is not
+          squared, and the default ``Mu`` is squared.
+
+        Reduces to the identity when the offsets do not change, which is what
+        makes :meth:`set_blinding_offsets` idempotent.
+        """
+        ratio = mul_old / mul_new
+        if self.param_model.allowNegativeParam:
+            return xpoi * ratio + (add_old - add_new) / mul_new
+        return xpoi * tf.sqrt(ratio)
+
+    def _theta_reframe(self, theta, add_old, add_new):
+        """Rewrite a stored nuisance coordinate for a new blinding offset,
+        holding the PHYSICAL value :meth:`get_theta` reports fixed.
+
+        Derived from :meth:`get_theta`, which is::
+
+            theta_physical = theta_stored + add
+
+        There is NO transform in front of it -- unlike :meth:`get_poi`, whose
+        squaring branch is what forces a square root there -- and no
+        multiplicative offset exists for nuisances at all. So holding
+        ``theta_physical`` fixed is the plain additive shift, the same form the
+        additive POI slots already used::
+
+            theta -> theta + (add_old - add_new)
+
+        Only nuisances of INTEREST carry a non-zero offset
+        (``init_blinding_values`` loops over ``indata.noiidxs``), so this is the
+        identity on every ordinary constrained nuisance.
+
+        The constraint term is unaffected by construction: ``_compute_lc``
+        penalises ``get_x() - self.x0``, i.e. it compares the MODEL frame
+        against ``x0``, which is also in the model frame and which this does not
+        touch. Holding ``theta_physical`` fixed therefore leaves both the value
+        and the minimum of the penalty exactly where they were.
+
+        Reduces to the identity when the offset does not change, which is what
+        makes :meth:`set_blinding_offsets` idempotent.
+        """
+        return theta + (add_old - add_new)
+
+    def _reframe_blinded_x(self, x, old, new):
+        """Rewrite a FULL parameter vector for a new set of blinding offsets,
+        holding every physical value :meth:`get_x` reports fixed.
+
+        ``old`` and ``new`` are ``(poi_mul, poi_add, theta_add)`` triples. The
+        POI block and the nuisance block are reframed by :meth:`_poi_reframe`
+        and :meth:`_theta_reframe`; the ParamModel's OWN nuisances (the ``npou``
+        block, between them) are never blinded and are deliberately left
+        untouched.
+        """
+        npoi = self.param_model.npoi
+        nparams = self.param_model.nparams
+        nsyst = self.indata.nsyst
+
+        idxs = []
+        updates = []
+        if npoi:
+            idxs.append(np.arange(npoi))
+            updates.append(self._poi_reframe(x[:npoi], old[0], old[1], new[0], new[1]))
+        if nsyst:
+            idxs.append(nparams + np.arange(nsyst))
+            updates.append(
+                self._theta_reframe(
+                    x[nparams : nparams + nsyst],
+                    old[2],
+                    new[2],
+                )
+            )
+        if not idxs:
+            return x
+        return tf.tensor_scatter_nd_update(
+            x,
+            np.concatenate(idxs)[:, None],
+            tf.concat(updates, axis=0),
+        )
 
     def set_blinding_offsets(self, blind=True):
+        """Arm or disarm the blinding offsets, holding the PHYSICAL point fixed.
+
+        Blinding is a change of variables: ``self.x`` is the internal
+        (blinded) coordinate and ``get_x()`` is the physical value the model
+        and the likelihood see. Changing the offsets therefore moves the
+        physical point unless ``x`` is compensated. ``self.x`` is initialised
+        to ``xparamdefault``, i.e. in the UNBLINDED frame, so arming the
+        offsets without compensating opens the fit at ``xparamdefault + off``
+        for an additive offset and at ``xparamdefault * off`` for a
+        multiplicative one, rather than at the start value the model declared.
+        For a signal strength that is merely a slow start; for a POI fed into
+        a calculation with a restricted domain it is an evaluation error, the
+        calculation being handed a value it cannot evaluate at all.
+
+        All three offsets are compensated here, through
+        :meth:`_reframe_blinded_x`, so ``get_x()`` is invariant under arming and
+        disarming in either direction -- for a multiplicative POI, an additive
+        POI and a blinded nuisance of interest alike. Self-idempotent:
+        re-arming the same offsets reframes by exactly 1 / 0.
+        """
         if not self.do_blinding:
             return
         if blind:
-            self._blinding_offsets_poi.assign(self._blinding_values_poi)
-            self._blinding_offsets_theta.assign(self._blinding_values_theta)
+            poi_new = self._blinding_values_poi
+            poi_add_new = self._blinding_values_poi_add
+            theta_new = self._blinding_values_theta
         else:
-            self._blinding_offsets_poi.assign(
-                np.ones(self.param_model.npoi, dtype=np.float64)
+            poi_new = np.ones(self.param_model.npoi, dtype=np.float64)
+            poi_add_new = np.zeros(self.param_model.npoi, dtype=np.float64)
+            theta_new = np.zeros(self.indata.nsyst, dtype=np.float64)
+
+        self.x.assign(
+            self._reframe_blinded_x(
+                self.x,
+                (
+                    self._blinding_offsets_poi.value(),
+                    self._blinding_offsets_poi_add.value(),
+                    self._blinding_offsets_theta.value(),
+                ),
+                (
+                    tf.constant(poi_new, dtype=self.x.dtype),
+                    tf.constant(poi_add_new, dtype=self.x.dtype),
+                    tf.constant(theta_new, dtype=self.x.dtype),
+                ),
             )
-            self._blinding_offsets_theta.assign(
-                np.zeros(self.indata.nsyst, dtype=np.float64)
-            )
+        )
+
+        self._blinding_offsets_poi.assign(poi_new)
+        self._blinding_offsets_poi_add.assign(poi_add_new)
+        self._blinding_offsets_theta.assign(theta_new)
 
     def get_theta(self):
         start = self.param_model.nparams
@@ -707,13 +971,71 @@ class Fitter:
             self.frozen_params_mask[: self.param_model.npoi], tf.stop_gradient(poi), poi
         )
         if self.do_blinding:
-            return poi * self._blinding_offsets_poi
+            # Affine: one of the two offsets is always the identity (1 for the
+            # multiplicative slot, 0 for the additive one), so this is the
+            # existing arithmetic for an unaffected model.
+            return poi * self._blinding_offsets_poi + self._blinding_offsets_poi_add
         else:
             return poi
 
     def get_x(self):
         return tf.concat(
             [self.get_poi(), self.get_model_nui(), self.get_theta()], axis=0
+        )
+
+    @property
+    def nfreeparms(self):
+        """Number of fit parameters that cost a degree of freedom.
+
+        A parameter with a Gaussian constraint adds one parameter AND one
+        pseudo-measurement, so it costs NET ZERO degrees of freedom. Only
+        genuinely free parameters reduce the ndf of a goodness-of-fit test.
+
+        ``self.cw`` is the single place that records which parameters are
+        constrained, over the whole vector ``[ParamModel params | systs]``:
+        declared ParamModel priors on one side (``prior_sigmas`` entries that
+        are finite and > 0, folded in by :meth:`init_fit_parms`) and
+        ``indata.constraintweights`` on the other. ``cw == 0`` is exactly the
+        set the likelihood treats as unconstrained, so counting it here cannot
+        drift from what ``_compute_lc`` actually penalises.
+
+        Deliberately NOT ``param_model.nparams + indata.nsystnoconstraint``:
+        that charges every model parameter but only the unconstrained card
+        systematics, i.e. it distinguishes parameters by WHERE THEY ARE
+        DECLARED, which is not a statistical property. A model parameter with a
+        sigma = 1 prior and a card nuisance with a sigma = 1 prior are the same
+        object and must be charged the same way.
+
+        FROZEN parameters are excluded as well. ``cw`` records constraints;
+        frozen-ness lives in ``frozen_params_mask``, so an unconstrained frozen
+        parameter has ``cw == 0`` yet is fixed and costs nothing. Counting it
+        would make ``ndfsat`` too small and ``chi2.sf(chi2_val, ndfsat)``
+        correspondingly too pessimistic, by exactly the number of such
+        parameters. (The old formula ignored frozen parameters too, so this is
+        not a regression -- but this is the property the name claims, so it
+        should hold.)
+        """
+        return int(np.count_nonzero(self._free_parms_mask()))
+
+    def _free_parms_mask(self):
+        """Boolean mask over ``[ParamModel params | systs]``: unconstrained AND
+        not frozen, i.e. the parameters that actually cost a degree of freedom.
+        """
+        return (self.cw.numpy() == 0.0) & ~self.frozen_params_mask.numpy()
+
+    @property
+    def nfreeparms_breakdown(self):
+        """``(free ParamModel params, free systs)``, for logging.
+
+        The two entries of :attr:`nfreeparms`, split at the ParamModel /
+        systematics boundary. The second is ``indata.nsystnoconstraint`` minus
+        any frozen unconstrained nuisances; the first is what the old ndf
+        formula got wrong.
+        """
+        free = self._free_parms_mask()
+        nparams = self.param_model.nparams
+        return int(np.count_nonzero(free[:nparams])), int(
+            np.count_nonzero(free[nparams:])
         )
 
     def prefit_variance(self, unconstrained_err=0.0):
@@ -774,7 +1096,35 @@ class Fitter:
     def xdefaultassign(self):
         # start every parameter at its constraint center (prior mean / theta0
         # default, and the model default for unpriored params)
-        self.x.assign(self.x0default)
+        #
+        # x0default is the stored coordinate at the IDENTITY offsets, while
+        # self.x is the internal (blinded) coordinate, so reframe it into
+        # whichever offsets are currently armed. Without this the physical
+        # start point would depend on whether the caller happens to run while
+        # disarmed -- which today's driver does, but only by accident of
+        # ordering -- and defaultassign()'s trailing disarm, which reframes
+        # back, would no longer land on the declared default. See
+        # set_blinding_offsets for the invariant.
+        #
+        # Gated on do_blinding alone, NOT on npoi: an analysis whose parameter
+        # of interest is a nuisance of interest (--poiAsNoi) can have npoi = 0
+        # and still need its theta block reframed.
+        if self.do_blinding:
+            npoi = self.param_model.npoi
+            nsyst = self.indata.nsyst
+            identity = (
+                tf.ones([npoi], dtype=self.x.dtype),
+                tf.zeros([npoi], dtype=self.x.dtype),
+                tf.zeros([nsyst], dtype=self.x.dtype),
+            )
+            armed = (
+                self._blinding_offsets_poi.value(),
+                self._blinding_offsets_poi_add.value(),
+                self._blinding_offsets_theta.value(),
+            )
+            self.x.assign(self._reframe_blinded_x(self.x0default, identity, armed))
+        else:
+            self.x.assign(self.x0default)
 
     def defaultassign(self):
         var_pre = self.prefit_variance(
@@ -2324,7 +2674,16 @@ class Fitter:
         # formed (memory, or a tracing failure on a large model) fall back to an
         # unpreconditioned fit rather than taking the whole job down.
         try:
+            _t_ref = time.time()
             hess_np = self._reference_matrix()
+            # Time it: this is a FULL Hessian at the current point, and it is
+            # the entire cost of a preconditioner rebuild. Whether restarting
+            # aggressively is worth it is exactly this number against the
+            # remaining iterations, so it should not have to be guessed.
+            logger.debug(
+                f"Preconditioner reference matrix ({self.precondition_from}) "
+                f"took {time.time() - _t_ref:.1f} s"
+            )
         except Exception as ex:
             logger.warning(
                 f"Could not compute the reference Hessian for preconditioning ({ex}); "
@@ -2356,6 +2715,13 @@ class Fitter:
             theta_ref,
             index_blocks,
             ridge=self.precondition_ridge,
+            transform=self.precondition_transform,
+            # names so the per-block log says WHICH parameters each block holds;
+            # "block of 14 parameters" alone leaves no way to tell from a log
+            # which directions the transform actually helped. astype(str), not
+            # str() per element: indata.systs comes out of h5py as an object
+            # array of bytes, so str() would render every name as b'...'.
+            names=self.parms.astype(str),
         )
 
     def fit(self):
@@ -2398,6 +2764,62 @@ class Fitter:
                 logger.info(f"  - edmval: {edmval}")
             return pc.hess_to_internal(hess.__array__())
 
+        # Native (TF) minimizer counterparts of the callbacks above. Same
+        # contract and the same internal coordinates, but the gradient and
+        # Hessian stay tf tensors: with preconditioning off they never leave
+        # the device, and the subproblem factorizes there either way.
+        def native_loss(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
+            return float(self.loss_val())
+
+        def native_closure(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
+            val, grad, hess = self.loss_val_grad_hess()
+            if self.diagnostics:
+                cond_number = tfh.cond_number(hess)
+                logger.info(f"  - Condition number: {cond_number}")
+                edmval = tfh.edmval(grad, hess)
+                logger.info(f"  - edmval: {edmval}")
+            if pc.enabled:
+                grad = tf.constant(pc.grad_to_internal(grad.__array__()))
+                hess = tf.constant(pc.hess_to_internal(hess.__array__()))
+            return float(val), grad, hess
+
+        def native_grad_closure(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
+            val, grad = self.loss_val_grad()
+            if pc.enabled:
+                grad = tf.constant(pc.grad_to_internal(grad.__array__()))
+            return float(val), grad
+
+        def native_set_point(yval):
+            pc = pc_cell[0]
+            self.x.assign(pc.to_physical(yval))
+
+        def native_hessp():
+            # internal-coordinate HVP, graph-compatible: the pc transform runs
+            # inside the compiled CG loop (numpy per CG iteration would defeat
+            # the on-device solve). Rebuilt per restart along with pc.
+            pc = pc_cell[0]
+            transforms = pc.tf_transforms()
+            if transforms is None:
+
+                def hessp(v):
+                    _, _, hp = self.loss_val_grad_hessp(v)
+                    return hp
+
+            else:
+                apply_T, apply_TT = transforms
+
+                def hessp(v):
+                    _, _, hp = self.loss_val_grad_hessp(apply_T(v))
+                    return apply_TT(hp)
+
+            return hessp
+
         # scipy works in internal coordinates throughout; y = 0 at the point the
         # transform was built.
         xval = pc_cell[0].from_physical(self.x.numpy())
@@ -2430,6 +2852,24 @@ class Fitter:
             sci_opts["ftol"] = float(self.minimizer_ftol)
         logger.info(f"[minimize] method={self.minimizer_method} options={sci_opts}")
 
+        # The native minimizers take gtol and maxiter and nothing else, so any
+        # other key here is silently dropped -- scipy at least raises an
+        # OptimizeWarning for an option its method does not recognize, and
+        # without this the user sees the option echoed in the line above and
+        # then has no signal that it did nothing. --minimizerFtol is the one
+        # that reaches this today.
+        if self.minimizer_method in NATIVE_MINIMIZER_OPTIONS:
+            ignored = sorted(
+                set(sci_opts) - NATIVE_MINIMIZER_OPTIONS[self.minimizer_method]
+            )
+            if ignored:
+                logger.warning(
+                    f"{self.minimizer_method} does not implement "
+                    f"{', '.join(ignored)}; ignoring "
+                    f"{', '.join(f'--minimizer{o.capitalize()}' for o in ignored)}. "
+                    "Use a scipy --minimizerMethod if you need it."
+                )
+
         # Restart loop. scipy's trust-region methods shrink the trust radius by
         # 4x on every rejected step with no lower bound, and the radius is a
         # local of scipy's loop -- so once it has collapsed the method takes
@@ -2442,80 +2882,143 @@ class Fitter:
         callback = None
         prev_loss = None
         attempt = 0
-        while True:
-            cb = FitterCallback(xval, self.earlyStopping)
-            try:
-                res = scipy.optimize.minimize(
-                    scipy_loss,
+
+        # to_physical is the whole reason this is built here rather than in the
+        # callback: under preconditioning the minimiser's iterate is in internal
+        # coordinates, and a snapshot of those would load without complaint and
+        # be wrong. pc_cell is read at save time, not captured, so a rebuilt
+        # transform is picked up.
+        snapshotter = Snapshotter(
+            self.snapshot_file,
+            self.parms,
+            to_physical=lambda v: pc_cell[0].to_physical(v),
+            interval_hours=self.snapshot_interval,
+        )
+        snapshotter.update(xval)
+
+        with snapshot_on_signal(snapshotter):
+            while True:
+                cb = FitterCallback(
                     xval,
-                    method=self.minimizer_method,
-                    jac=True,
-                    tol=0.0,
-                    callback=cb,
-                    options=sci_opts,
-                    **info_minimize,
+                    self.earlyStopping,
+                    snapshotter=snapshotter,
+                    stall_rel_tol=self.stallRelTol,
                 )
-            except Exception as ex:
-                # minimizer could have called the loss or hessp functions with "random" values, so restore the
-                # state from the end of the last iteration before the exception
-                xval = cb.xval
-                self.minimizer_result = None
+                try:
+                    if self.minimizer_method == "tf-trust-exact":
+                        res = minimize_trust_exact(
+                            native_loss,
+                            native_closure,
+                            xval,
+                            gtol=sci_opts.get("gtol", 0.0),
+                            maxiter=sci_opts.get("maxiter"),
+                            callback=cb,
+                        )
+                    elif self.minimizer_method == "tf-trust-ncg":
+                        res = minimize_trust_ncg(
+                            native_loss,
+                            native_grad_closure,
+                            native_hessp(),
+                            native_set_point,
+                            xval,
+                            gtol=sci_opts.get("gtol", 0.0),
+                            maxiter=sci_opts.get("maxiter"),
+                            callback=cb,
+                        )
+                    elif self.minimizer_method == "tf-trust-krylov":
+                        res = minimize_trust_krylov(
+                            native_loss,
+                            native_grad_closure,
+                            native_hessp(),
+                            native_set_point,
+                            xval,
+                            gtol=sci_opts.get("gtol", 0.0),
+                            maxiter=sci_opts.get("maxiter"),
+                            callback=cb,
+                        )
+                    else:
+                        res = scipy.optimize.minimize(
+                            scipy_loss,
+                            xval,
+                            method=self.minimizer_method,
+                            jac=True,
+                            tol=0.0,
+                            callback=cb,
+                            options=sci_opts,
+                            **info_minimize,
+                        )
+                except Exception as ex:
+                    # minimizer could have called the loss or hessp functions with "random" values, so restore the
+                    # state from the end of the last iteration before the exception
+                    xval = cb.xval
+                    self.minimizer_result = None
+                    if not cb.stopped_early:
+                        # a real failure, not a stall: surface it rather than
+                        # letting a broken callback look like a converged fit
+                        logger.warning(f"Minimizer raised: {ex}")
+                        # the expensive case: a failure here used to discard the
+                        # whole fit, however close to the minimum it had got
+                        snapshotter.save(
+                            cb.xval, "minimizer-failed", error=str(ex)[:200]
+                        )
+                    logger.debug(ex)
+                else:
+                    xval = res["x"]
+                    self.minimizer_result = res
+                    logger.debug(res)
+
+                callback = merge_callbacks(callback, cb)
+                last_loss = cb.loss_history[-1] if cb.loss_history else None
+
                 if not cb.stopped_early:
-                    # a real failure, not a stall: surface it rather than
-                    # letting a broken callback look like a converged fit
-                    logger.warning(f"Minimizer raised: {ex}")
-                logger.debug(ex)
-            else:
-                xval = res["x"]
-                self.minimizer_result = res
-                logger.debug(res)
-
-            callback = merge_callbacks(callback, cb)
-            last_loss = cb.loss_history[-1] if cb.loss_history else None
-
-            if not cb.stopped_early:
-                break
-            # The only reason to stop restarting is that the last restart
-            # bought nothing: a round can never end above where it started
-            # (the trust region accepts improving steps only), so "not below
-            # the previous round" means the descent is genuinely exhausted.
-            if (
-                prev_loss is not None
-                and last_loss is not None
-                and last_loss
-                >= prev_loss - RESTART_MIN_IMPROVEMENT * max(1.0, abs(prev_loss))
-            ):
+                    break
+                # The only reason to stop restarting is that the last restart
+                # bought nothing: a round can never end above where it started
+                # (the trust region accepts improving steps only), so "not below
+                # the previous round" means the descent is genuinely exhausted.
+                if (
+                    prev_loss is not None
+                    and last_loss is not None
+                    and last_loss
+                    >= prev_loss - RESTART_MIN_IMPROVEMENT * max(1.0, abs(prev_loss))
+                ):
+                    logger.info(
+                        f"Restart did not reduce the loss further ({prev_loss} -> "
+                        f"{last_loss}); stopping after {attempt} restart(s)."
+                    )
+                    break
+                if 0 <= self.max_restarts <= attempt:
+                    logger.warning(
+                        f"Minimizer still stalling at loss {last_loss} after "
+                        f"{self.max_restarts} restart(s) and the loss was still "
+                        "coming down; raise --maxRestarts to let it continue."
+                    )
+                    break
+                attempt += 1
                 logger.info(
-                    f"Restart did not reduce the loss further ({prev_loss} -> "
-                    f"{last_loss}); stopping after {attempt} restart(s)."
+                    f"Minimizer stalled at loss {last_loss}; restarting "
+                    f"(#{attempt}) to reset the trust radius."
                 )
-                break
-            if 0 <= self.max_restarts <= attempt:
-                logger.warning(
-                    f"Minimizer still stalling at loss {last_loss} after "
-                    f"{self.max_restarts} restart(s) and the loss was still "
-                    "coming down; raise --maxRestarts to let it continue."
-                )
-                break
-            attempt += 1
-            logger.info(
-                f"Minimizer stalled at loss {last_loss}; restarting "
-                f"(#{attempt}) to reset the trust radius."
-            )
-            prev_loss = last_loss
+                prev_loss = last_loss
 
-            # Rebuild the transform at the point we are restarting from. The
-            # one built at the start whitens the Hessian *there*; by the time
-            # the fit has stalled somewhere else that Hessian has changed and
-            # the transform no longer conditions anything. Refreshing costs one
-            # Hessian evaluation and is a no-op when preconditioning is off.
-            self.x.assign(pc_cell[0].to_physical(xval))
-            pc_cell[0] = self._build_preconditioner()
-            xval = pc_cell[0].from_physical(self.x.numpy())
+                # Rebuild the transform at the point we are restarting from. The
+                # one built at the start whitens the Hessian *there*; by the time
+                # the fit has stalled somewhere else that Hessian has changed and
+                # the transform no longer conditions anything. Refreshing costs one
+                # Hessian evaluation and is a no-op when preconditioning is off.
+                self.x.assign(pc_cell[0].to_physical(xval))
+                pc_cell[0] = self._build_preconditioner()
+                xval = pc_cell[0].from_physical(self.x.numpy())
 
         # xval (and callback.xval) are internal coordinates; everything outside
         # fit() expects physical parameters.
         self.x.assign(pc_cell[0].to_physical(xval))
+
+        # The minimum itself. Writing it costs nothing next to the fit and
+        # covers the stretch that is otherwise unprotected: everything between
+        # here and the output file being closed, which on a large model means
+        # the Hessian, the impacts and the postfit histograms.
+        snapshotter.save(xval, "converged")
 
         return callback
 

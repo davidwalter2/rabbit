@@ -164,6 +164,22 @@ def add_style_args(parser):
     )
 
 
+def _stall_rel_tol(value):
+    """--stallRelTol: a relative improvement, so negative is meaningless.
+
+    A negative threshold would require the loss to WORSEN before the fit counts
+    as stalled, i.e. it weakens the test rather than tightening it, which is
+    the opposite of what anyone reaching for the option wants.
+    """
+    x = float(value)
+    if x < 0.0:
+        raise argparse.ArgumentTypeError(
+            f"must be >= 0, got {x}: a negative threshold would require the "
+            "loss to worsen before the fit counts as stalled"
+        )
+    return x
+
+
 def common_parser():
     """Return a parser with common arguments for fitting scripts (rabbit_fit, rabbit_limit)."""
     parser = argparse.ArgumentParser()
@@ -193,6 +209,27 @@ def common_parser():
         "no progress rather than exiting. Specify -1 to disable.",
     )
     parser.add_argument(
+        "--stallRelTol",
+        default=0.0,
+        type=_stall_rel_tol,
+        help="Relative loss improvement over the --earlyStopping window below "
+        "which the fit counts as stalled. The default 0.0 is exactly the "
+        "original test, which fires only on literally NO improvement -- so a "
+        "fit that crawls is never detected and, with --maxRestarts, never gets "
+        "its preconditioner rebuilt at the point it has actually reached. "
+        "Something like 1e-4 treats 'improving by a hundredth of a percent per "
+        "hundred iterations' as the stall it is. WARNING: the test cannot tell a "
+        "crawl from convergence -- flat over the window is also what approaching "
+        "a minimum looks like -- so a non-zero value will also fire near a good "
+        "minimum, at one reference-Hessian evaluation per restart. Leave it at 0 "
+        "unless a fit is demonstrably crawling. For the upper bound: a descent "
+        "at factor f per iteration is declared stalled exactly when "
+        "tol >= 1 - f^N for a window of N = --earlyStopping, so a healthy fit "
+        "converging at 0.1%% per iteration over a window of 20 is flagged by "
+        "anything above 0.0198. Pick the value from your own f and N rather "
+        "than in the abstract.",
+    )
+    parser.add_argument(
         "--maxRestarts",
         default=-1,
         type=int,
@@ -212,13 +249,29 @@ def common_parser():
         choices=[
             "trust-krylov",
             "trust-exact",
+            "tf-trust-exact",
+            "tf-trust-ncg",
+            "tf-trust-krylov",
             "BFGS",
             "L-BFGS-B",
             "CG",
             "trust-ncg",
             "dogleg",
         ],
-        help="Mnimizer method used in scipy.optimize.minimize for the nominal fit minimization",
+        help="Minimizer method used for the nominal fit minimization. The "
+        "'tf-' prefixed methods are native TensorFlow implementations, the rest "
+        "are dispatched to scipy.optimize.minimize. 'tf-trust-exact' ports "
+        "trust-exact keeping the Hessian and the subproblem's Cholesky "
+        "factorizations on the TensorFlow device instead of round-tripping "
+        "through LAPACK; 'tf-trust-ncg' is the matrix-free Steihaug-CG "
+        "counterpart (the same subproblem as scipy's trust-ncg, and the "
+        "practical stand-in for trust-krylov) with the whole CG inner loop "
+        "compiled as one TF graph call, i.e. no python round trip per "
+        "Hessian-vector product; 'tf-trust-krylov' is a native GLTR (the "
+        "trust-krylov algorithm): Lanczos on device with the subproblem "
+        "solved to optimality within the Krylov subspace via host-side "
+        "tridiagonal solves, reusing the radius-independent Krylov data "
+        "across re-solves after rejected steps",
     )
     parser.add_argument(
         "--precondition",
@@ -257,7 +310,10 @@ def common_parser():
         "'expressions' makes one block per --preconditionParams entry. 'none' does "
         "no grouping at all and factorises the whole selected scope as a single "
         "block, which keeps every cross-correlation but is the most expensive and "
-        "fails entirely if any part of the scope is singular.",
+        "fails entirely if any part of the scope is singular. What blocking is "
+        "FOR depends on --preconditionTransform (under 'ridge' it is a "
+        "correctness tool, under 'spectral' only a cost limit): see CHOOSING "
+        "THE OPTIONS in rabbit/preconditioner.py.",
     )
     parser.add_argument(
         "--preconditionBlockThreshold",
@@ -266,7 +322,9 @@ def common_parser():
         help="Correlation threshold for --preconditionBlocks auto. Correlations "
         "below it are left unpreconditioned. Too low and every parameter "
         "percolates into a single block; too high and genuinely coupled "
-        "parameters are split apart.",
+        "parameters are split apart. Only used by --preconditionBlocks auto, "
+        "and under --preconditionTransform spectral it works against you: see "
+        "CHOOSING THE OPTIONS in rabbit/preconditioner.py.",
     )
     parser.add_argument(
         "--preconditionFrom",
@@ -281,7 +339,9 @@ def common_parser():
         "exact Hessian is indefinite at the starting point, whitening with it leaves "
         "those directions negative and the fit stalls, so 'hessian' is usually the "
         "better choice; prefer 'gaussnewton' only where the Hessian is positive "
-        "definite anyway, e.g. near a minimum.",
+        "definite anyway, e.g. near a minimum. Under --preconditionTransform "
+        "spectral there is no reason to choose 'gaussnewton' at all: see "
+        "CHOOSING THE OPTIONS in rabbit/preconditioner.py.",
     )
     parser.add_argument(
         "--preconditionRidge",
@@ -290,7 +350,49 @@ def common_parser():
         help="Ridge added to the preconditioning block diagonal, relative to its largest "
         "diagonal entry, to keep near-degenerate blocks factorisable. Escalated "
         "automatically if the Cholesky still fails; a block that cannot be factorised "
-        "falls back to no preconditioning.",
+        "falls back to no preconditioning. Applies to "
+        "--preconditionTransform ridge only; spectral derives its floor from "
+        "the numerical rank of the block instead.",
+    )
+    parser.add_argument(
+        "--preconditionTransform",
+        default="ridge",
+        type=str,
+        choices=["ridge", "spectral"],
+        help="How to whiten each block. 'ridge' (the default) factorises "
+        "H + eps*I, raising eps until the Cholesky succeeds. 'spectral' "
+        "factorises |H| = Q |Lambda| Q^T instead, giving every eigendirection "
+        "its own scale. They agree exactly on a positive definite block -- both "
+        "return the identity -- and differ where H is indefinite, which away "
+        "from the minimum it generally is: one scalar ridge swamps every "
+        "direction softer than |lam_min| and leaves them near-null, where "
+        "spectral does not. Costs an eigendecomposition rather than a Cholesky, "
+        "~1.7 s once per build at m=2112. For the measurements, and for how "
+        "this interacts with the other --precondition* options, see WHITENING "
+        "EACH BLOCK in rabbit/preconditioner.py.",
+    )
+    parser.add_argument(
+        "--snapshotFile",
+        default=None,
+        type=str,
+        help="Write parameter snapshots to this file. A snapshot holds the "
+        "parameter values and names -- enough to resume with --externalPostfit "
+        "<file>, either to carry on minimizing or, with --noFit, to run only "
+        "the postfit step at that point. One is written when the minimizer is "
+        "interrupted (SIGINT/SIGTERM), when it fails, and when it converges, "
+        "so a long fit killed at any stage still leaves its parameters behind. "
+        "Snapshots are written atomically, so an interrupted write cannot "
+        "destroy the previous one. Default: <outdir>/<outname stem>_snapshot.hdf5 "
+        "when --snapshotInterval is set, otherwise off.",
+    )
+    parser.add_argument(
+        "--snapshotInterval",
+        default=0.0,
+        type=float,
+        help="Also snapshot every this many hours of fitting (0 disables the "
+        "periodic ones; the interrupt, failure and convergence snapshots do not "
+        "depend on it). Costs one small file write per interval. Worth setting "
+        "on any fit long enough that losing it would hurt.",
     )
     parser.add_argument(
         "--hvpMethod",
