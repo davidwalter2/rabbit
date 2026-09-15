@@ -88,6 +88,11 @@ def test_subproblem_matches_scipy(definite, tr_radius, cond):
     from scipy.optimize._trustregion_exact import IterativeSubproblem as ScipySubproblem
 
     rng = np.random.default_rng(1234)
+    # #176: misses of the relative bar below are collected, not raised, so an
+    # excused one does not abort the trials after it -- pytest.xfail() raises,
+    # and on the platforms where a miss actually happens that would drop every
+    # later trial's assertions, which is the coverage this test exists for.
+    machine_limited = []
     for trial in range(5):
         g, H = _random_model(10, rng, definite, cond=cond)
 
@@ -124,23 +129,27 @@ def test_subproblem_matches_scipy(definite, tr_radius, cond):
         # tr_radius = 1.0 -- 97.5% and 94.6% of scipy's reduction -- while the
         # absolute bar above still passes. Two iterative solvers each stopping
         # anywhere inside their k_easy/k_hard band can land either side of a 2%
-        # margin depending on the arithmetic. Softened only there, and only
-        # when it actually misses: every other combination, and every other
-        # assertion here, still gates on every platform.
-        if (
-            not (model(p_tf) <= 0.98 * model(p_sp))
-            and not definite
-            and tr_radius == 1.0
-        ):
-            pytest.xfail(
-                "#176: relative-to-scipy bar is machine-calibrated; "
-                f"native reached {model(p_tf) / model(p_sp):.3f} of scipy"
+        # margin depending on the arithmetic. Excused only there: every other
+        # combination gates as before, as does every other assertion in every
+        # trial. Written as `>` rather than `not (<=)` so a NaN model value
+        # falls through to the assert and fails instead of being excused.
+        if model(p_tf) > 0.98 * model(p_sp) and not definite and tr_radius == 1.0:
+            machine_limited.append(
+                f"trial {trial}: native reached "
+                f"{model(p_tf) / model(p_sp):.3f} of scipy"
             )
-        assert model(p_tf) <= 0.98 * model(p_sp)
+        else:
+            assert model(p_tf) <= 0.98 * model(p_sp)
         if hb_tf != hb_sp:
             # can only disagree when the interior/boundary distinction is
             # marginal, i.e. the unconstrained step ~ on the boundary
             assert abs(np.linalg.norm(p_exact) - tr_radius) / tr_radius < 0.15
+
+    if machine_limited:
+        pytest.xfail(
+            "#176: relative-to-scipy bar is machine-calibrated; "
+            + "; ".join(machine_limited)
+        )
 
 
 # --- 2. minimizer vs scipy trust-exact ------------------------------------
