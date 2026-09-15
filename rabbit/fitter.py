@@ -244,16 +244,8 @@ class Fitter:
     ):
         self.param_model = param_model
 
-        # Internal (scaled) copy of indata.logk used by the yield-computation
-        # hot path. For systematic_type == "normal" with a non-trivial param
-        # model, the linearized additive variation Δ does not naturally scale
-        # with the param-model factor rnorm(poi), so a ±20% variation defined
-        # at the MC nominal becomes a different relative effect once rnorm
-        # moves away from 1. Pre-multiplying logk by rnorm_init (the param
-        # model evaluated at xparamdefault) restores the relative size of the
-        # variation at the linearization point, without introducing a θ·poi
-        # bilinearity in the hot path. For log_normal systematics the
-        # multiplicative form already has this property so no copy is made.
+        # Param-model scaling of the systematic variations for the
+        # yield-computation hot path; see _init_logk_scaled.
         self._init_logk_scaled()
 
         if self.do_blinding:
