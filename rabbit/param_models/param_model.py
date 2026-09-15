@@ -35,11 +35,24 @@ class ParamModel:
         # self.prior_means  = # np.ndarray, shape (nparams,). Optional; defaults
         #                     # to self.xparamdefault when not provided.
         #
+        # # optional: declare that this model's POIs are NOT results and must
+        # # never be blinded -- auxiliary parameters that absorb something
+        # # rather than quantities anyone is keeping from the analyst.
+        # # SaturatedProjectModel's per-bin scales are the case this exists
+        # # for: they would be blinded only as a side effect of sharing a POI
+        # # block with the analysis model, and a blinded bin scale does not
+        # # open at the 1.0 the saturated test requires of it.
+        # #
+        # # CompositeParamModel turns the declarations of its submodels into
+        # # `blind_exempt_params`, the NAMES of the exempt parameters, because
+        # # the Fitter resolves blinding by name and names survive the POI-block
+        # # permutation that indices would not.
+        # self.blind_exempt = # bool, default False.
+        #
         # # optional: the SCALE of the blinding draw, in the POI's own units.
-        # # Unlike the multiplicative form, additive blinding is NOT scale
-        # # free: exp(N(0, 5)) spans e^+-10 whatever the POI means, but
-        # # + N(0, 5) is an absolute shift, so how well it hides depends on
-        # # the units. A POI whose uncertainty is O(1) in its fit units is
+        # # The draw is an absolute shift, so unlike a multiplicative factor it
+        # # is NOT scale free: how well it hides depends on the parameter's
+        # # units. A POI whose uncertainty is O(1) in its fit units is
         # # offset by well under a sigma and is effectively unblinded.
         # #
         # # The model is the only thing that knows its own units, so it
@@ -225,12 +238,6 @@ class CompositeParamModel(ParamModel):
                 + [v[m.npoi :] for v, m in zip(means, param_models)]
             )
 
-        # Blinding form: a boolean, so unlike prior_sigmas there is no index
-        # permutation to track. Any submodel asking for additive blinding makes
-        # the composite additive -- the composite's POI block is the
-        # concatenation of the submodels' POIs, and mixing forms within one POI
-        # block is exactly what the Fitter refuses for a blinding group.
-        #
         # Parameters no submodel wants blinded. Names rather than indices: the
         # Fitter resolves blinding by name, and names survive the POI-block
         # permutation that indices would not.
@@ -255,18 +262,25 @@ class CompositeParamModel(ParamModel):
         # under-blinding direction. The weak-blinding warning cannot backstop
         # it, because a blinded POI is typically free and so has no prefit
         # sigma to compare against.
-        self.blind_additive_scale = np.concatenate(
-            [
-                np.broadcast_to(
-                    np.asarray(
-                        getattr(m, "blind_additive_scale", 1.0), dtype=np.float64
-                    ),
-                    (m.npoi,),
-                )
-                for m in param_models
-                if m.npoi > 0
-            ]
-        )
+        # Guarded on npoi: with every submodel POI-less the comprehension below
+        # is empty and np.concatenate raises. That composition is supported and
+        # reached from the CLI -- load_models builds a composite straight from
+        # --paramModel, and the whole ABCD family is POI-less -- and it has no
+        # POI block to scale in the first place. The Fitter falls back to 1.0
+        # through getattr when the attribute is absent.
+        if self.npoi:
+            self.blind_additive_scale = np.concatenate(
+                [
+                    np.broadcast_to(
+                        np.asarray(
+                            getattr(m, "blind_additive_scale", 1.0), dtype=np.float64
+                        ),
+                        (m.npoi,),
+                    )
+                    for m in param_models
+                    if m.npoi > 0
+                ]
+            )
 
         # impact groups are name-based, so a plain merge survives the
         # permutation

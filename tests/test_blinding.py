@@ -69,6 +69,22 @@ class SecondToyModel(ToyModel):
         self.params = np.array([b"alphaS2"])
 
 
+class PouOnlyModel(ParamModel):
+    """Carries no POIs, like every model in the ABCD family."""
+
+    def __init__(self, indata, name=b"nui"):
+        super().__init__(indata)
+        self.npoi = 0
+        self.npou = 1
+        self.params = np.array([name])
+        self.xparamdefault = tf.constant([0.0], dtype=indata.dtype)
+        self.is_linear = True
+        self.allowNegativeParam = True
+
+    def compute(self, param, full=False):
+        return tf.ones([1, self.indata.nproc], dtype=self.indata.dtype)
+
+
 def make_tensor(path):
     np.random.seed(1234)
     ax = hist.axis.Regular(20, -5, 5, name="x")
@@ -393,6 +409,21 @@ def test_composite_of_composites_keeps_the_vector(path):
     )
     outer = CompositeParamModel([inner])
     np.testing.assert_allclose(outer.blind_additive_scale, [7.0, 0.5])
+
+
+def test_a_composite_of_poi_less_models_constructs(path):
+    """The blinding scale must not be built when there is no POI block.
+
+    Every model in the ABCD family is POI-less, and load_models composes
+    straight from --paramModel, so composing two of them is a reachable
+    configuration -- and np.concatenate raises on an empty list, which turned a
+    supported composition into a constructor crash. There is nothing to scale
+    here, so the attribute is simply absent and the Fitter falls back to 1.0.
+    """
+    ind = inputdata.FitInputData(path)
+    composite = CompositeParamModel([PouOnlyModel(ind), PouOnlyModel(ind, b"nui2")])
+    assert composite.npoi == 0
+    assert not hasattr(composite, "blind_additive_scale")
 
 
 def test_undeclared_submodels_get_one(path):
