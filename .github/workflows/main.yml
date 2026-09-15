@@ -165,6 +165,7 @@ jobs:
           - test_blinding_multiplicative.py
           - test_blinding_noi.py
           - test_saturated_blinding.py
+          - test_logk_no_copy.py
           - test_multi_systematic.py
           - test_ndfsat.py
           - test_saturated_composite.py
