@@ -39,6 +39,8 @@ function of the parameter vector, which every device has in full, and it
 is evaluated once in the global term.
 """
 
+import gc
+
 import numpy as np
 import tensorflow as tf
 from wums import logging
@@ -48,6 +50,11 @@ from rabbit.bbstat.bbstat import BinByBinStat
 from rabbit.fitter import Fitter
 
 logger = logging.child_logger(__name__)
+
+
+# Buffered messages from pick_physical_gpus, drained by the driver once the
+# logger exists (see drain_selection_log).
+selection_log = []
 
 
 def pick_physical_gpus(n, explicit=None):
@@ -62,6 +69,30 @@ def pick_physical_gpus(n, explicit=None):
     here the orders coincide, and --devices remains the explicit escape
     hatch.
     """
+    if n < 1:
+        # Otherwise n = 0 hides every GPU (sorted(order[:0]) == [], which the
+        # caller treats as a real selection) while make_fitter normalizes
+        # 0 -> 1 and builds a single-device Fitter, so the run lands silently
+        # on the CPU; n = -1 drops one GPU and leaves n_devices negative.
+        raise ValueError(f"--nDevices must be >= 1, got {n}")
+    # Validate the inputs before looking at the hardware: otherwise a bad
+    # --devices is rejected on a GPU node and silently ignored on a CPU one
+    # (the no-GPU early return below fires first), so CI never sees it.
+    if explicit is not None:
+        if len(explicit) != n:
+            # Otherwise the mismatch falls through to select_devices' round
+            # robin, which silently puts two shards on one GPU (or leaves one
+            # idle) rather than doing what --devices promises.
+            raise ValueError(
+                f"--devices lists {len(explicit)} device(s) but --nDevices is "
+                f"{n}; they must match."
+            )
+        if any(int(i) < 0 for i in explicit):
+            # Python would wrap these: gpus[-1] silently selects the last GPU,
+            # so a negative index picks a device the user never named while a
+            # positive out-of-range one raises.
+            raise ValueError(f"--devices indices must be >= 0, got {explicit}")
+
     gpus = tf.config.list_physical_devices("GPU")
     if not gpus:
         return None
@@ -95,15 +126,36 @@ def pick_physical_gpus(n, explicit=None):
             usage[int(idx)] = int(used)
         order = sorted(range(len(gpus)), key=lambda i: usage.get(i, 0))
         chosen = sorted(order[:n])
-        logger.info(
-            f"Selecting GPU(s) {chosen} by occupancy " f"(memory used per GPU: {usage})"
+        selection_log.append(
+            (
+                "info",
+                f"Selecting GPU(s) {chosen} by occupancy "
+                f"(memory used per GPU: {usage})",
+            )
         )
         return [gpus[i] for i in chosen]
     except Exception as ex:
-        logger.warning(
-            f"Could not query GPU occupancy ({ex}); using the first {n} GPU(s)."
+        selection_log.append(
+            (
+                "warning",
+                f"Could not query GPU occupancy ({ex}); using the first {n} GPU(s).",
+            )
         )
         return gpus[:n]
+
+
+def drain_selection_log():
+    """Emit and clear whatever pick_physical_gpus buffered.
+
+    That runs before TF may touch a GPU, which is before the driver has set
+    up the logger, so logging from inside it drops the records at every
+    verbosity -- and the GPU choice is the one thing there worth a record.
+    The caller drains this once the logger exists.
+    """
+    global selection_log
+    for level, msg in selection_log:
+        getattr(logger, level)(msg)
+    selection_log = []
 
 
 def select_devices(n):
@@ -165,6 +217,12 @@ class ShardIndataView:
         self.systematic_type = indata.systematic_type
         self.sparse = False
         self.dtype = indata.dtype
+        # bbstat.profile_and_apply reads this before its `and full` short
+        # circuits, so it has to exist even in lite mode. It is bin x bin
+        # (the full-mode profile contracts over the bin axis with
+        # einsum("ijk,jk->ik")), hence genuinely unshardable -- _build_shards
+        # refuses the non-None case rather than slicing it wrongly.
+        self.betavar = indata.betavar
 
 
 class ShardParamModel:
@@ -236,6 +294,10 @@ class MultiDeviceFitter(Fitter):
         "_hessp_batch_sharded",
         "_global_view",
         "_global_graph_fns",
+        # Instance-level tf.function whose traced graph captures every
+        # shard's logk, so it is dynamic machinery like the rest: stripped
+        # on __deepcopy__ and dropped before a rebuild.
+        "_profile_beta",
     }
 
     def __init__(self, indata, param_model, options, **kwargs):
@@ -273,6 +335,25 @@ class MultiDeviceFitter(Fitter):
                 "Multi-device fits (--nDevices > 1) are not supported in "
                 "sparse mode."
             )
+        if (
+            self.bbstat.enabled
+            and self.bbstat.binByBinStatMode == "full"
+            and getattr(self.indata, "betavar", None) is not None
+        ):
+            raise NotImplementedError(
+                "--binByBinStatMode full with a per-bin beta covariance "
+                "(indata.betavar) is not supported in multi-device mode "
+                "(--nDevices > 1): betavar is bin x bin and the full-mode "
+                "profile contracts over the bin axis, so it cannot be split "
+                "along with the rest. Use --binByBinStatMode lite, or run "
+                "single-device."
+            )
+        # Drop the previous generation before allocating the next one. The
+        # old shard tensors stay reachable through the old graph closures
+        # otherwise, so a rebuild -- arm_regularizers with a regularizer
+        # attached, deepcopy (the saturated-model path in save_hists), any
+        # re-init_fit_parms -- transiently doubles device memory on exactly
+        # the tensors this class exists to keep small.
         if self.covarianceFit:
             raise NotImplementedError(
                 "Multi-device fits are not supported with --covarianceFit "
@@ -286,6 +367,7 @@ class MultiDeviceFitter(Fitter):
             f"device(s): {[f'{d}:[{a},{b})' for d, (a, b) in zip(devices, edges)]}"
         )
 
+        self._shard_graph_fns = []
         self.shards = []
         for device, (a, b) in zip(devices, edges):
             view = ShardIndataView(self.indata, a, b, device)
@@ -376,35 +458,6 @@ class MultiDeviceFitter(Fitter):
     def _hessp_batch_dispatch(self, P):
         return self._hessp_batch_sharded(P)
 
-    def _reference_matrix(self):
-        """Preconditioner reference Hessian, built unsharded on the host.
-
-        The sharded path cannot produce this. A per-shard jacobian vectorises
-        the Hessian over every parameter at once, so it needs one
-        [nbins_shard, 9] intermediate per parameter *on its own device* -- 70 GB
-        for a 6538-parameter model with 23036 bins per shard. The build then
-        fails and the fit silently falls back to running unpreconditioned, which
-        is easy to miss because the fit itself proceeds normally.
-
-        Chunking it instead turns the vectorised pfor into a while_loop, which
-        XLA unrolls: compilation never finishes. And pinning the *call* to the
-        host does not help either, because the shard graphs carry their own
-        device placement.
-
-        So bypass the shard machinery: MultiDeviceFitter does not override the
-        base likelihood methods, which still operate on the full (host-resident,
-        see FitInputData(host_memory=True)) tensors. Running those on the CPU
-        needs ~43 GB of host RAM, which is plentiful, and happens once per
-        preconditioner build rather than inside the minimiser loop.
-        """
-        # Assembled from the already-sharded HVPs, so the work distributes over
-        # the GPUs and the peak memory is one [k, npar] batch rather than the
-        # [npar, nbins, 9] the vectorised jacobian needs. Building it on the
-        # host with the base (unsharded) likelihood was the obvious
-        # alternative and does not work either: the same pfor intermediates
-        # reached 161 GB of RSS on a 187 GB node before producing anything.
-        return self.hessian_from_hvps()
-
     def arm_regularizers(self):
         """Accept parameter-only regularizers; refuse yield-dependent ones.
 
@@ -459,10 +512,40 @@ class MultiDeviceFitter(Fitter):
     # result down with them, so they refuse at the point of use instead, before
     # the fit starts.
     def global_impacts_parms(self, *args, **kwargs):
-        self._unsharded("Global impacts", "--doImpacts with --impactType global")
+        self._unsharded("Global impacts", "--globalImpacts")
 
     def gaussian_global_impacts_parms(self, *args, **kwargs):
-        self._unsharded("Gaussian global impacts", "--doImpacts")
+        self._unsharded("Gaussian global impacts", "--gaussianGlobalImpacts")
+
+    def loss_val_grad_hess_beta(self, *args, **kwargs):
+        """Beta-space EDM diagnostic (--diagnostics with bin-by-bin stat).
+
+        The base implementation evaluates the loss over the full logk on one
+        device and then takes a jacobian over the full-length ubeta, i.e. an
+        [nbinsfull, nbinsfull] Hessian. Like the other entries here it would
+        succeed on a small model and fail on the sizes --nDevices exists for,
+        after the minimiser has already finished.
+        """
+        self._unsharded(
+            "The beta-space EDM diagnostic", "--diagnostics with bin-by-bin stat"
+        )
+
+    def impacts_parms(self, *args, **kwargs):
+        """Per-nuisance impacts. Refused only when bin-by-bin stat is on.
+
+        With BBB enabled the base implementation needs a second Hessian at
+        profile=False to split out the stat-only covariance, and the sharded
+        loss_val_grad_hess supports profile=True only. With BBB off that
+        branch is skipped and the sharded path works, so this must not be a
+        blanket refusal -- --doImpacts --nDevices N --noBinByBinStat is a
+        working combination.
+        """
+        if self.bbstat.enabled:
+            self._unsharded(
+                "Impacts with bin-by-bin statistical uncertainties",
+                "--doImpacts without --noBinByBinStat",
+            )
+        return super().impacts_parms(*args, **kwargs)
 
     def toyassign(self, *args, **kwargs):
         self._unsharded("Toy generation", "-t > 0")
@@ -505,6 +588,57 @@ class MultiDeviceFitter(Fitter):
         with tf.device("/CPU:0"):
             return super().expected_yield(profile=profile, full=full)
 
+    def expected_events(self, *args, **kwargs):
+        """Postfit yields and their variances, computed on the host.
+
+        Same reasoning as expected_yield above, and the same tensor: this is
+        the all-bins path, so on the default device it materialises the full
+        logk on GPU:0. --saveHists calls it once per mapping immediately after
+        the minimiser, so leaving it unpinned turns a finished multi-hour fit
+        into an OOM at the point of writing the output.
+
+        Pinned rather than refused: refusing would leave a sharded fit unable
+        to write histograms at all, which is a large usability loss for a
+        feature whose point is to make big fits runnable. The cost is one slow
+        host pass per mapping, outside the minimiser loop.
+        """
+        with tf.device("/CPU:0"):
+            return super().expected_events(*args, **kwargs)
+
+    def expected_with_variance(self, *args, **kwargs):
+        """Host-pinned; see expected_events."""
+        with tf.device("/CPU:0"):
+            return super().expected_with_variance(*args, **kwargs)
+
+    def expected_variations(self, *args, **kwargs):
+        """Host-pinned; see expected_events."""
+        with tf.device("/CPU:0"):
+            return super().expected_variations(*args, **kwargs)
+
+    def chi2(self, *args, **kwargs):
+        """Host-pinned; see expected_events."""
+        with tf.device("/CPU:0"):
+            return super().chi2(*args, **kwargs)
+
+    def _dxdvars(self, *args, **kwargs):
+        """Response of the postfit minimum to the constraint centers, on the host.
+
+        An all-bins computation -- _compute_loss over every bin, then
+        [npar, nbinsfull] jacobians -- so on the default device it
+        materialises the full logk on GPU:0.
+
+        Pinned rather than refused, because it is a shared primitive rather
+        than an entry point: _dndvars calls it unconditionally, which puts it
+        under chi2(profile=True) and the gaussian-global-impacts branch of
+        expected_with_variance, i.e. the --saveHists path this class
+        deliberately keeps working. Refusing here would take those down with
+        it. The one entry point that is genuinely unsupported,
+        --globalAsymImpacts with --globalAsymImpactsLinearWarmstart, is
+        refused up front in rabbit_fit.py instead.
+        """
+        with tf.device("/CPU:0"):
+            return super()._dxdvars(*args, **kwargs)
+
     def set_nobs(self, values, variances=None):
         super().set_nobs(values, variances)
         nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
@@ -529,6 +663,22 @@ class MultiDeviceFitter(Fitter):
         collect the [nparams]-sized partials and sum them. See
         rabbit/sharding.py for why both choices are load-bearing.
         """
+        # Release the previous generation before _build_shards allocates the
+        # next one, or both exist at once and device memory peaks at 2x on
+        # exactly the tensors this class is for. Rebuilds happen on
+        # arm_regularizers with a regularizer attached, on deepcopy (the
+        # saturated-model path in save_hists) and on any re-init_fit_parms.
+        #
+        # Both steps are required. self._profile_beta holds a live reference to
+        # the old shards until it is replaced at the end of this method, so the
+        # attributes have to go first; what remains is cyclic (a tf.function
+        # graph references its captures and its siblings), so refcounting alone
+        # cannot reclaim it and the device memory would be held until the
+        # generational collector happened to run.
+        for name in self._DYNAMIC_TF_FUNCS:
+            self.__dict__.pop(name, None)
+        gc.collect()
+
         self._build_shards()
 
         jit = self.jit_compile
@@ -610,6 +760,16 @@ class MultiDeviceFitter(Fitter):
             # every device has in full. gvg and gvgp both differentiate
             # gnll_local, so gradient, HVP and Hessian follow automatically.
             if len(self.regularizers):
+                # Same guard as Fitter._compute_nll_components: an unarmed
+                # regularizer would otherwise contribute a penalty whose
+                # internals were never set, or be omitted entirely if the
+                # graphs were traced before it was attached -- either way the
+                # objective drifts silently.
+                if not getattr(self, "_regularizers_armed", False):
+                    raise RuntimeError(
+                        "Regularizers not armed; call arm_regularizers() "
+                        "after attaching them (defaultassign does this)."
+                    )
                 penalty = tf.add_n(
                     [
                         reg.compute_nll_penalty(gview.get_x(), None)
@@ -709,6 +869,13 @@ class MultiDeviceFitter(Fitter):
             GPUs. vectorized_map is a pfor of width k, unlike tape.jacobian's
             non-pfor path whose while_loop XLA unrolls, so memory scales with k
             and compilation stays bounded.
+
+            Deliberately NOT wrapped in tf.function, unlike every sibling
+            here: hessian_from_hvps halves k and retries on
+            ResourceExhaustedError, which needs the error to surface from the
+            eager call rather than from a traced graph, and k changes between
+            calls so a wrapper would retrace on every new batch width anyway.
+            The retracing warning this produces is expected.
             """
             x0 = tf.identity(self.x)
             aux = _read_aux()

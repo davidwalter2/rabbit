@@ -955,6 +955,51 @@ def main():
     if chosen is not None:
         tf.config.set_visible_devices(chosen, "GPU")
 
+    # Multi-device incompatibilities that the sharded Fitter would otherwise
+    # only discover at the point of use -- i.e. after the minimiser and the
+    # postfit Hessian have already run, taking the completed fit down with
+    # them. Checked here so the run ends in seconds with the flags named.
+    if args.nDevices > 1:
+        _md = []
+        if args.doImpacts and not args.noBinByBinStat:
+            # impacts_parms needs a second Hessian at profile=False to split
+            # out the stat-only covariance; the sharded loss supports
+            # profile=True only. Without bin-by-bin stat that branch is
+            # skipped, so --noBinByBinStat is a working combination.
+            _md.append("--doImpacts (unless --noBinByBinStat)")
+        if args.globalImpacts:
+            _md.append("--globalImpacts")
+        if args.gaussianGlobalImpacts:
+            _md.append("--gaussianGlobalImpacts")
+        if args.globalAsymImpacts and args.globalAsymImpactsLinearWarmstart:
+            # The warm start needs dx/dx0, the same all-bins jacobian as
+            # --gaussianGlobalImpacts. --globalAsymImpacts on its own is
+            # repeated minimize() calls and works sharded.
+            _md.append("--globalAsymImpacts with --globalAsymImpactsLinearWarmstart")
+        if any(t > 0 for t in args.toys):
+            _md.append("-t > 0 (toy generation)")
+        if args.fullNll:
+            _md.append("--fullNll")
+        if args.lCurveScan or args.lCurveOptimize:
+            # compute_curvature calls fitter._compute_nll and
+            # _compute_yields_with_beta directly and takes a dense full-bins
+            # jacobian; MultiDeviceFitter overrides none of those, so the
+            # curvature would run unsharded -- and for --lCurveScan it runs
+            # after each per-tau minimize, discarding finished fits mid-scan.
+            _md.append("--lCurveScan / --lCurveOptimize")
+        if args.diagnostics and not args.noBinByBinStat:
+            # loss_val_grad_hess_beta takes a jacobian over the full-length
+            # ubeta on one device; see MultiDeviceFitter.
+            _md.append("--diagnostics (unless --noBinByBinStat)")
+        if _md:
+            raise Exception(
+                "--nDevices > 1 is incompatible with: "
+                + ", ".join(_md)
+                + ". These run over all bins on one device, which is what "
+                "sharding exists to avoid. Drop --nDevices, or rerun the step "
+                "single-device from the fit output."
+            )
+
     # --noHessian skips computing the postfit Hessian, so the dense
     # parameter covariance matrix is never available. Any feature that
     # needs the covariance is incompatible.
@@ -981,6 +1026,12 @@ def main():
 
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
+
+    # The GPU selection above has to run before TF may touch a GPU, i.e. before
+    # the logger exists, so it buffers its messages rather than dropping them.
+    from rabbit.sharding import drain_selection_log
+
+    drain_selection_log()
 
     # make list of fits with -1: asimov; 0: fit to data; >=1: toy
     fits = np.concatenate(

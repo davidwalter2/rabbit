@@ -95,6 +95,24 @@ NATIVE_MINIMIZER_OPTIONS = {
 }
 
 
+def make_fitter(indata, param_model, options, **kwargs):
+    """Construct the Fitter appropriate for the requested device count.
+
+    The device layout is fixed at initialization, so the choice is a
+    static one: --nDevices > 1 returns the bins-sharded
+    :class:`rabbit.sharding.MultiDeviceFitter` subclass, anything else the
+    plain single-device Fitter. Imported lazily to avoid a module cycle
+    (sharding subclasses Fitter). All keyword arguments are forwarded
+    verbatim, so this wrapper cannot drift from Fitter.__init__'s
+    signature.
+    """
+    if int(getattr(options, "nDevices", 1) or 1) > 1:
+        from rabbit.sharding import MultiDeviceFitter
+
+        return MultiDeviceFitter(indata, param_model, options, **kwargs)
+    return Fitter(indata, param_model, options, **kwargs)
+
+
 class Fitter:
     # Dynamically-built tf.function wrappers holding un-copyable FuncGraph
     # state; stripped on deepcopy and rebuilt. Subclasses extend this with
@@ -136,7 +154,9 @@ class Fitter:
         # outcome can be written to the output. None if the minimizer raised.
         self.minimizer_result = None
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
-        self.hvp_batch = int(getattr(options, "hvpBatch", 256) or 256)
+        hvp_batch = getattr(options, "hvpBatch", 256)
+        # `or 256` would turn an explicit 0 into the default; test None
+        self.hvp_batch = 256 if hvp_batch is None else int(hvp_batch)
         # Optional parameter preconditioning (see rabbit/preconditioner.py).
         # getattr so callers that build options objects by hand keep working.
         # Parameter snapshots (see rabbit/snapshot.py). Everything the fit has
@@ -2055,10 +2075,21 @@ class Fitter:
             # Dense logk: [nbinsfull, nproc, nsyst] symmetric, or
             # [nbinsfull, nproc, 2, nsyst] asymmetric. Broadcast rnorm_init
             # over the trailing axes.
-            if self.indata.symmetric_tensor:
-                self.logk = self.indata.logk * rnorm_init[..., None]
-            else:
-                self.logk = self.indata.logk * rnorm_init[..., None, None]
+            # Multi-device only: indata.logk is host-resident under
+            # FitInputData(host_memory=True), and without a scope this eager
+            # copy of the FULL [nbinsfull, nproc, nsyst] tensor lands on the
+            # default device before any shard exists, defeating both that
+            # pinning and the host-side slicing in _build_shards. Single-device
+            # keeps the default placement, so the copy stays wherever
+            # indata.logk is and nothing is duplicated across host and device.
+            # Only reachable for systematic_type == "normal"; the log_normal
+            # branch above aliases indata.logk and inherits its placement.
+            device = "/CPU:0" if int(getattr(self, "n_devices", 1)) > 1 else None
+            with tf.device(device):
+                if self.indata.symmetric_tensor:
+                    self.logk = self.indata.logk * rnorm_init[..., None]
+                else:
+                    self.logk = self.indata.logk * rnorm_init[..., None, None]
 
     def _compute_yields_noBBB(self, full=True, compute_norm=True):
         # full: compute yields inclduing masked channels
