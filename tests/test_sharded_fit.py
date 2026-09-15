@@ -21,12 +21,13 @@ import tensorflow as tf
 
 from rabbit import fitter, inputdata
 from rabbit.param_models.helpers import load_model
+from tests.test_logk_no_copy import _normal_tensor
 from tests.test_sparse_fit import make_options, make_test_tensor
 
 
-def _make_fitter(filename, ndevices=1, do_blinding=False, **kw):
+def _make_fitter(filename, ndevices=1, do_blinding=False, expect_signal=None, **kw):
     indata_obj = inputdata.FitInputData(filename, host_memory=ndevices > 1)
-    param_model = load_model("Mu", indata_obj)
+    param_model = load_model("Mu", indata_obj, expectSignal=expect_signal)
     options = make_options(nDevices=ndevices, **kw)
     # pass the kwargs rabbit_fit passes, so the factory can never silently
     # drop one again (it did once: globalImpactsFromJVP)
@@ -123,6 +124,73 @@ def test_every_blinding_offset_is_threaded_to_the_shards():
         f"diverged: Fitter has {sorted(created)}, sharding threads "
         f"{sorted(_BLINDING_OFFSET_ATTRS)}"
     )
+
+
+# rnorm_init is the identity unless the param model's default differs from 1,
+# so a model left at mu = 1 cannot tell a threaded factor from a missing one.
+NORMAL_EXPECT_SIGNAL = [("sig", 1.7)]
+
+
+@pytest.mark.parametrize("ndevices", [2, 3])
+def test_sharded_normal_systematics_match_single_device(ndevices):
+    """systematic_type == "normal" reaches the shards through rnorm_init.
+
+    Every other fixture in this file is log_normal, where the multiplicative
+    form carries the param-model scaling itself and the hot path never reads
+    rnorm_init. That blind spot is why the whole suite stayed green when the
+    post-contraction scaling arrived on main and was threaded to no shard:
+    the shard evaluators are duck-typed, so the first sharded "normal" fit
+    died with AttributeError while all 38 tests here passed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        fname = _normal_tensor(tmp, sparse=False)
+        f1 = _make_fitter(fname, 1, expect_signal=NORMAL_EXPECT_SIGNAL)
+        fn = _make_fitter(fname, ndevices, expect_signal=NORMAL_EXPECT_SIGNAL)
+        assert f1.indata.systematic_type == "normal"
+        assert f1.rnorm_init is not None, "no scaling to thread; test is vacuous"
+        assert not np.allclose(
+            f1.rnorm_init.numpy(), 1.0
+        ), "rnorm_init is the identity; test is vacuous"
+
+        rng = np.random.default_rng(11)
+        xval = f1.x.numpy() + 0.1 * rng.standard_normal(f1.x.shape[0])
+        f1.x.assign(xval)
+        fn.x.assign(xval)
+
+        v1, g1 = f1.loss_val_grad()
+        vn, gn = fn.loss_val_grad()
+        assert np.isclose(float(v1.numpy()), float(vn.numpy()), rtol=RTOL, atol=0)
+        np.testing.assert_allclose(g1.numpy(), gn.numpy(), rtol=1e-10, atol=0)
+
+
+def test_rnorm_init_is_sharded_to_each_shards_own_bins():
+    """Each shard gets its own bin slice of rnorm_init, not the whole tensor.
+
+    The hot path indexes it as rnorm_init[:nbins] against the shard's *local*
+    bin count, so handing over the full [nbinsfull, nproc] tensor would silently
+    scale every shard by the leading bins instead of its own. The behavioural
+    test above cannot see that: Mu.compute returns one row broadcast over bins,
+    so a mis-slice is numerically invisible for the only models this fixture can
+    build. The shapes still differ, which is what this pins.
+    """
+    from rabbit.sharding import shard_edges
+
+    ndevices = 3
+    with tempfile.TemporaryDirectory() as tmp:
+        fn = _make_fitter(
+            _normal_tensor(tmp, sparse=False),
+            ndevices,
+            expect_signal=NORMAL_EXPECT_SIGNAL,
+        )
+        assert fn.rnorm_init is not None, "no scaling to thread; test is vacuous"
+        edges = shard_edges(fn.indata.nbins, ndevices)
+        assert len(edges) == len(fn.shards)
+        for shard, (a, b) in zip(fn.shards, edges):
+            assert shard.rnorm_init is not None, "shard lost the scaling factor"
+            assert shard.rnorm_init.shape[0] == b - a == shard.indata.nbins
+            np.testing.assert_array_equal(
+                shard.rnorm_init.numpy(), fn.rnorm_init.numpy()[a:b]
+            )
 
 
 def test_sharded_profile_beta_matches():

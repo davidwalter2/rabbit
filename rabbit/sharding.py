@@ -397,10 +397,27 @@ class MultiDeviceFitter(Fitter):
             # FitInputData and exhausting the card before any shard exists (a
             # 92144-bin, 4618-systematic model needs 30.6 GB for that one
             # tensor, against 7.66 GB for the shard actually wanted).
+            #
+            # rnorm_init is the systematic_type == "normal" param-model factor
+            # the hot path applies to the [nbins, nproc] contraction result
+            # (see Fitter._init_logk_scaled). It is bin-indexed, so it shards
+            # exactly like logk; None for log_normal, where the multiplicative
+            # form already carries the scaling. The sparse companion
+            # (rnorm_init_at_norm) is deliberately not threaded -- sharding
+            # refuses sparse mode above, and the hot path only reads it behind
+            # `if self.indata.sparse`, which is False on every shard view.
             with tf.device("/CPU:0"):
                 logk_shard = tf.identity(self.logk[a:b])
+                rnorm_init_shard = (
+                    None
+                    if self.rnorm_init is None
+                    else tf.identity(self.rnorm_init[a:b])
+                )
             with tf.device(device):
                 shard.logk = tf.identity(logk_shard)
+                shard.rnorm_init = (
+                    None if rnorm_init_shard is None else tf.identity(rnorm_init_shard)
+                )
                 shard.nobs = tf.Variable(
                     tf.zeros([b - a], dtype=self.indata.dtype),
                     trainable=False,
