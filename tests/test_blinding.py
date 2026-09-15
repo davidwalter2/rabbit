@@ -285,6 +285,24 @@ def _postfit_cov(f, ind):
 MSG = "Blinding was too narrow to hide"
 
 
+def test_squared_storage_is_not_reported_when_nothing_is_blinded(path, caplog):
+    """--unblind on every POI means there is no offset, so nothing to leak.
+
+    The standard "now unblind my result" run still has do_blinding on and still
+    uses the default squared storage, so a guard that looks only at the
+    parametrisation warns about a leak that cannot happen -- and tells the
+    reader to change parametrisation for no reason.
+    """
+    ind = inputdata.FitInputData(path)
+    model = ToyModel(ind)
+    model.allowNegativeParam = False
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        fitter.Fitter(ind, model, make_options(unblind=["alphaS"]), do_blinding=True)
+    assert not any("allowNegativeParam=False" in r.message for r in caplog.records)
+
+
 def test_weak_blinding_is_reported_against_the_measured_uncertainty(path, caplog):
     """Judged on the smearing width against the sigma the fit measured.
 

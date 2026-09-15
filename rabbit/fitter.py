@@ -751,6 +751,13 @@ class Fitter:
             return
         if not self.param_model.npoi:
             return
+        # Nothing is leaked if nothing was blinded. --unblind and model-declared
+        # exemptions leave the drawn value at exactly zero, and the standard
+        # "now unblind my result" run has every POI in that state, so without
+        # this the default squared Mu setup warns about an offset that does not
+        # exist and pushes the reader to change parametrisation for no reason.
+        if not np.any(self._blinding_values_poi_add[: self.param_model.npoi]):
+            return
         logger.warning(
             "Blinding a POI stored as sqrt(poi) (allowNegativeParam=False): the "
             "reported uncertainty is sigma_poi / (2*sqrt(poi)), which depends on "
