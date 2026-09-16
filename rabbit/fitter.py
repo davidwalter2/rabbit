@@ -67,6 +67,24 @@ def match_regexp_params(regular_expressions, parameter_names):
     return matched
 
 
+def make_fitter(indata, param_model, options, **kwargs):
+    """Construct the Fitter appropriate for the requested device count.
+
+    The device layout is fixed at initialization, so the choice is a
+    static one: --nDevices > 1 returns the bins-sharded
+    :class:`rabbit.sharding.MultiDeviceFitter` subclass, anything else the
+    plain single-device Fitter. Imported lazily to avoid a module cycle
+    (sharding subclasses Fitter). All keyword arguments are forwarded
+    verbatim, so this wrapper cannot drift from Fitter.__init__'s
+    signature.
+    """
+    if int(getattr(options, "nDevices", 1) or 1) > 1:
+        from rabbit.sharding import MultiDeviceFitter
+
+        return MultiDeviceFitter(indata, param_model, options, **kwargs)
+    return Fitter(indata, param_model, options, **kwargs)
+
+
 # Options from --minimizerMaxiter/--minimizerGtol/--minimizerFtol that each
 # native minimizer actually reads. Anything else passed for these methods is
 # warned about rather than silently dropped (see Fitter.fit).
@@ -77,7 +95,26 @@ NATIVE_MINIMIZER_OPTIONS = {
 }
 
 
+# Standard deviation of the deterministic blinding draw. The multiplicative
+# form is scale free, so this is only meaningful for the additive form, where
+# the smearing distribution is BLINDING_DRAW_STD * blind_additive_scale wide in
+# the parameter's own fit units.
+BLINDING_DRAW_STD = 5.0
+
+
 class Fitter:
+    # Dynamically-built tf.function wrappers holding un-copyable FuncGraph
+    # state; stripped on deepcopy and rebuilt. Subclasses extend this with
+    # their own dynamic machinery (see rabbit.sharding.MultiDeviceFitter).
+    _DYNAMIC_TF_FUNCS = frozenset(
+        {
+            "loss_val",
+            "loss_val_grad",
+            "loss_val_grad_hessp",
+            "loss_val_grad_hessp_fwdrev",
+            "loss_val_grad_hessp_revrev",
+        }
+    )
     valid_systematic_types = ["log_normal", "normal"]
 
     def __init__(
@@ -106,6 +143,9 @@ class Fitter:
         # outcome can be written to the output. None if the minimizer raised.
         self.minimizer_result = None
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
+        hvp_batch = getattr(options, "hvpBatch", 256)
+        # `or 256` would turn an explicit 0 into the default; test None
+        self.hvp_batch = 256 if hvp_batch is None else int(hvp_batch)
         # Optional parameter preconditioning (see rabbit/preconditioner.py).
         # getattr so callers that build options objects by hand keep working.
         # Parameter snapshots (see rabbit/snapshot.py). Everything the fit has
@@ -244,28 +284,28 @@ class Fitter:
     ):
         self.param_model = param_model
 
-        # Internal (scaled) copy of indata.logk used by the yield-computation
-        # hot path. For systematic_type == "normal" with a non-trivial param
-        # model, the linearized additive variation Δ does not naturally scale
-        # with the param-model factor rnorm(poi), so a ±20% variation defined
-        # at the MC nominal becomes a different relative effect once rnorm
-        # moves away from 1. Pre-multiplying logk by rnorm_init (the param
-        # model evaluated at xparamdefault) restores the relative size of the
-        # variation at the linearization point, without introducing a θ·poi
-        # bilinearity in the hot path. For log_normal systematics the
-        # multiplicative form already has this property so no copy is made.
+        # Param-model scaling of the systematic variations for the
+        # yield-computation hot path; see _init_logk_scaled.
         self._init_logk_scaled()
 
         if self.do_blinding:
-            self._blinding_offsets_poi = tf.Variable(
-                tf.ones([self.param_model.npoi], dtype=self.indata.dtype),
-                trainable=False,
-                name="offset_poi",
-            )
             self._blinding_offsets_theta = tf.Variable(
                 tf.zeros([self.indata.nsyst], dtype=self.indata.dtype),
                 trainable=False,
                 name="offset_theta",
+            )
+            # POI offsets. Additive is the only form: a translation has unit
+            # Jacobian, so the covariance, the uncertainties and every impact
+            # come out EXACTLY unblinded, and applied before the positivity
+            # transform it composes with squared storage too. The
+            # multiplicative form divided all of those by the random factor --
+            # leaving only relative uncertainties usable, and making the
+            # reported sigma itself a channel for the offset, since
+            # sigma_true / sigma_reported WAS the offset.
+            self._blinding_offsets_poi_add = tf.Variable(
+                tf.zeros([self.param_model.npoi], dtype=self.indata.dtype),
+                trainable=False,
+                name="offset_poi_add",
             )
             self.init_blinding_values(unblind, blinding_group)
 
@@ -485,14 +525,7 @@ class Fitter:
         }
         # Also strip the dynamically-built loss/grad/HVP tf.function wrappers,
         # which hold un-copyable FuncGraph state and will be rebuilt below.
-        dynamic_tf_funcs = {
-            "loss_val",
-            "loss_val_grad",
-            "loss_val_grad_hessp",
-            "loss_val_grad_hessp_fwdrev",
-            "loss_val_grad_hessp_revrev",
-        }
-        skip = jit_overrides | dynamic_tf_funcs
+        skip = jit_overrides | set(self._DYNAMIC_TF_FUNCS)
         state = {k: v for k, v in self.__dict__.items() if k not in skip}
         cls = type(self)
         obj = cls.__new__(cls)
@@ -598,6 +631,18 @@ class Fitter:
         unblind_parameters = match_regexp_params(
             unblind_parameter_expressions, all_param_names
         )
+
+        # Parameters the MODEL declares exempt, on top of whatever --unblind
+        # asked for. These are auxiliary quantities that are not results (the
+        # saturated test's per-bin scales), so blinding them buys nothing and
+        # costs them their declared start point.
+        exempt = getattr(self.param_model, "blind_exempt_params", None)
+        if exempt is None and getattr(self.param_model, "blind_exempt", False):
+            exempt = self.param_model.params[: self.param_model.npoi]
+        if exempt is not None and len(exempt):
+            unblind_parameters = list(unblind_parameters) + [
+                q for q in exempt if q not in unblind_parameters
+            ]
         # unblinding is sensitive: always report exactly which parameters the
         # expressions resolved to, so an over-broad pattern is visible
         if unblind_parameters:
@@ -612,7 +657,7 @@ class Fitter:
             np.equal(self.indata.data_obs, np.floor(self.indata.data_obs))
         )
 
-        def deterministic_random_from_string(s, mean=0.0, std=5.0):
+        def deterministic_random_from_string(s, mean=0.0, std=BLINDING_DRAW_STD):
             # random value with seed taken based on string of parameter name
             if isinstance(s, str):
                 s = s.encode("utf-8")
@@ -672,8 +717,28 @@ class Fitter:
             value = deterministic_random_from_string(seed)
             self._blinding_values_theta[i] = value
 
-        # add offset to pois
-        self._blinding_values_poi = np.ones(self.param_model.npoi, dtype=np.float64)
+        # Offset the POIs, additively, in each parameter's own fit units. This
+        # is the only form: see the offset Variables in init_fit_parms for why
+        # the multiplicative one was removed.
+        self._blinding_values_poi_add = np.zeros(
+            self.param_model.npoi, dtype=np.float64
+        )
+        # The additive draw is NOT scale free the way exp(N(0, 5)) is: it is an
+        # absolute shift, so how well it hides depends on the POI's units. The
+        # model is the only thing that knows them, so it declares the scale.
+        # Default 1.0 == the historical draw.
+        #
+        # Scalar (one scale for all of a model's POIs) or per-POI vector, which
+        # is what CompositeParamModel produces: the scale is in each
+        # parameter's own units, so a composite cannot reduce its submodels'
+        # declarations to a single number.
+        additive_scale = np.broadcast_to(
+            np.asarray(
+                getattr(self.param_model, "blind_additive_scale", 1.0),
+                dtype=np.float64,
+            ),
+            (self.param_model.npoi,),
+        )
         for i in range(self.param_model.npoi):
             param = self.param_model.params[i]
             if param in unblind_parameters:
@@ -681,21 +746,216 @@ class Fitter:
             seed = param_to_seed.get(param, param)
             logger.debug(f"Blind parameter {param} (seed='{seed}')")
             value = deterministic_random_from_string(seed)
-            self._blinding_values_poi[i] = np.exp(value)
+            self._blinding_values_poi_add[i] = additive_scale[i] * value
+
+        self._warn_if_squared_storage_leaks_through_the_covariance()
+
+    def _warn_if_squared_storage_leaks_through_the_covariance(self):
+        """Say so when the POI parameterisation leaks the value it is hiding.
+
+        With ``allowNegativeParam=False`` the stored coordinate is
+        ``sqrt(poi)``, so at the minimum ``d(poi)/dx = 2*sqrt(poi)`` and the
+        reported uncertainty is ``sigma_poi / (2*sqrt(poi))`` -- a function of
+        the TRUE value. The offset does not appear in it (blinding preserves
+        sigma_x exactly), but anyone holding an expected sigma_poi, which an
+        Asimov study gives for free, inverts it: ``sqrt(poi) = sigma_poi /
+        (2*sigma_x)``, and subtracting the reported coordinate leaves the
+        offset.
+
+        A linearly stored POI (``allowNegativeParam=True``) has unit Jacobian,
+        so its reported sigma is ``sigma_poi`` itself and carries nothing about
+        where the minimum sits. That is the configuration blinding actually
+        works in.
+
+        A warning rather than a refusal: the squaring is the default everywhere
+        in rabbit, blinding is on by default for a data fit, and refusing would
+        make every existing analysis unrunnable rather than merely leaky. The
+        leak also predates this code -- it is a property of reporting sqrt(poi)
+        and its uncertainty, not of any offset -- so the honest thing is to
+        name it and point at the fix.
+        """
+        if self.param_model.allowNegativeParam:
+            return
+        if not self.param_model.npoi:
+            return
+        # Nothing is leaked if nothing was blinded. --unblind and model-declared
+        # exemptions leave the drawn value at exactly zero, and the standard
+        # "now unblind my result" run has every POI in that state, so without
+        # this the default squared Mu setup warns about an offset that does not
+        # exist and pushes the reader to change parametrisation for no reason.
+        if not np.any(self._blinding_values_poi_add[: self.param_model.npoi]):
+            return
+        logger.warning(
+            "Blinding a POI stored as sqrt(poi) (allowNegativeParam=False): the "
+            "reported uncertainty is sigma_poi / (2*sqrt(poi)), which depends on "
+            "the true value, so an expected sigma recovers the blinded value and "
+            "hence the offset. The offset itself is not in the covariance -- "
+            "sigma is preserved exactly -- but the parameterisation is. Pass "
+            "--allowNegativeParam for a linearly stored POI, whose reported "
+            "uncertainty carries no such dependence."
+        )
+
+    def warn_if_blinding_is_weak(self, variances):
+        """Say so when the smearing was too narrow to hide the POI it blinded.
+
+        The yardstick is the MEASURED uncertainty, which is the only thing that
+        decides whether a value is actually hidden: an offset of half a sigma
+        leaves the truth recoverable whatever units it is in. Judged against
+        ``cov``, so it costs nothing -- the driver has already computed it --
+        and it works for any number of POIs, where a prefit Asimov sigma would
+        need one linear solve per POI before the fit had even started.
+
+        This replaces a prefit check against ``prior_sigmas`` that could not
+        work: no baseline model declares that attribute, and a prior width only
+        exists for a CONSTRAINED POI, whereas the physical free parameter this
+        feature exists for has none. It also compared two numbers the same model
+        author had written, so it could only ever report that their own
+        declarations disagreed.
+
+        Reports no numbers, for the same reason the rest of this machinery does
+        not: the offset and the smearing width each give the other away. The
+        verdict is a boolean about sigma, and sigma is not the secret.
+
+        Blinded-ness is read off the offsets rather than remembered from
+        ``init_blinding_values``: a POI left out by --unblind, or exempted by
+        the model, has an offset of exactly zero.
+
+        Takes the per-parameter VARIANCE vector rather than a covariance matrix,
+        so it works wherever the driver has one. With a Hessian that is the full
+        diagonal; under --noHessian it is the POI and NOI entries alone, solved
+        for by edmval_cov_rows_hessfree, with the rest left NaN -- which is all
+        this needs, and non-finite entries are skipped. Only --noEDM computes
+        neither, and there the driver says the check was skipped.
+        """
+        if not self.do_blinding or not self.param_model.npoi:
+            return
+        npoi = self.param_model.npoi
+
+        sigma = np.sqrt(np.asarray(variances)[:npoi])
+        offsets = np.asarray(self._blinding_offsets_poi_add)[:npoi]
+        scales = np.broadcast_to(
+            np.asarray(
+                getattr(self.param_model, "blind_additive_scale", 1.0),
+                dtype=np.float64,
+            ),
+            (npoi,),
+        )
+
+        weak = []
+        for i in range(npoi):
+            if offsets[i] == 0.0:  # not blinded: --unblind, or model-exempt
+                continue
+            if not np.isfinite(sigma[i]) or sigma[i] <= 0.0:
+                continue
+            if BLINDING_DRAW_STD * scales[i] < 5.0 * sigma[i]:
+                param = self.param_model.params[i]
+                weak.append(param.decode() if isinstance(param, bytes) else str(param))
+
+        if weak:
+            logger.warning(
+                "Blinding was too narrow to hide "
+                f"{len(weak)} of {npoi} POIs: the smearing is less than 5 sigma "
+                "of the uncertainty this fit measured, so the true value stays "
+                f"recoverable to within a few sigma of the blinded one. "
+                f"Affected: {', '.join(weak)}. Raise "
+                "param_model.blind_additive_scale for these and refit; the "
+                "result already written is not safely blinded."
+            )
+
+    def _check_blinded_start_is_evaluable(self):
+        """Refuse a blinded start the model cannot be evaluated at.
+
+        Because the frame is not compensated, arming moves the PHYSICAL start
+        to ``default + offset``. For a POI that merely scales yields that is a
+        poor starting point and nothing worse. For a POI that feeds a
+        calculation with a restricted domain it can be fatal: the yields go
+        negative, the Poisson ``log`` returns NaN, and the minimiser has no
+        finite point to descend from -- it does not converge slowly, it cannot
+        start. That is the 2026-09-09 alpha_s failure.
+
+        The wider the smearing the likelier this is, which is the awkward part:
+        ``blind_additive_scale`` is the knob raised to make blinding effective,
+        so the configurations that hide best are the ones most likely to land
+        outside the domain. Rather than discover it as a NaN partway through,
+        check once at arming and say so.
+
+        The consequence is a real limitation, not a warning: a POI whose
+        required smearing takes it out of its own evaluable range cannot be
+        blinded this way at all. The message therefore names the knobs, and --
+        like the weak-smearing warning -- no numbers, since the offset and the
+        start point each give the other away.
+        """
+        try:
+            val = float(self._compute_loss().numpy())
+        except Exception as exc:
+            raise RuntimeError(
+                "The blinded starting point is outside the range this model can "
+                "be evaluated at: computing the likelihood there raised "
+                f"{type(exc).__name__}. Blinding is not frame-compensated -- on "
+                "purpose, so that the offset is never written into a coordinate "
+                "it could be recovered from -- so an armed fit opens at the "
+                "model default plus the offset. Lower "
+                "param_model.blind_additive_scale, exempt this parameter with "
+                "--unblind, or declare blind_exempt on the model if it is not a "
+                "result."
+            ) from exc
+        if not np.isfinite(val):
+            raise RuntimeError(
+                "The blinded starting point gives a non-finite likelihood, so "
+                "the minimiser has nothing to start from. Blinding is not "
+                "frame-compensated -- on purpose, so that the offset is never "
+                "written into a coordinate it could be recovered from -- so an "
+                "armed fit opens at the model default plus the offset, and for "
+                "this model that point is outside its evaluable range (most "
+                "often negative expected yields). Lower "
+                "param_model.blind_additive_scale, exempt this parameter with "
+                "--unblind, or declare blind_exempt on the model if it is not a "
+                "result."
+            )
 
     def set_blinding_offsets(self, blind=True):
+        """Arm or disarm the blinding offsets. Does NOT touch ``self.x``.
+
+        Blinding is a change of variables: ``self.x`` is the internal (blinded)
+        coordinate and ``get_x()`` is the physical value the model and the
+        likelihood see. Compensating ``x`` when the offsets change would hold
+        the physical point fixed, which is superficially attractive -- the fit
+        would then always open at the start value the model declared.
+
+        It is not done, because the compensation MATERIALISES THE SECRET.
+        ``x`` would be set to ``x0default`` mapped through the offsets, and
+        ``x0default`` is public: it is the default the model declares. Anything
+        that then observes ``x`` before the minimiser runs -- a saved prefit
+        parameter vector, a debug dump, a debugger, or any output added later --
+        recovers the offset by one subtraction, and the offset together with the
+        postfit value is the unblinded result. Blinding has to survive someone
+        looking at the fit's own state, so the offset is never written into a
+        coordinate that a known quantity can be subtracted from.
+
+        The cost is that the fit opens at the blinded frame's default rather
+        than the declared one, i.e. at a different starting point than an
+        unblinded run. That is accepted: the minimiser converges to the same
+        minimum, so the physical result is unchanged -- only the path to it
+        differs. See ``tests/test_blinding_start_point.py``, which fits the same
+        data armed and disarmed and requires the physical minimum to agree.
+
+        Callers that need the declared physical start must run disarmed.
+        """
         if not self.do_blinding:
             return
         if blind:
-            self._blinding_offsets_poi.assign(self._blinding_values_poi)
+            self._blinding_offsets_poi_add.assign(self._blinding_values_poi_add)
             self._blinding_offsets_theta.assign(self._blinding_values_theta)
         else:
-            self._blinding_offsets_poi.assign(
-                np.ones(self.param_model.npoi, dtype=np.float64)
+            self._blinding_offsets_poi_add.assign(
+                np.zeros(self.param_model.npoi, dtype=np.float64)
             )
             self._blinding_offsets_theta.assign(
                 np.zeros(self.indata.nsyst, dtype=np.float64)
             )
+            return
+
+        self._check_blinded_start_is_evaluable()
 
     def get_theta(self):
         start = self.param_model.nparams
@@ -727,21 +987,82 @@ class Fitter:
 
     def get_poi(self):
         xpoi = self.x[: self.param_model.npoi]
+        if self.do_blinding:
+            # BEFORE the positivity transform, not after. (x + off)**2 is
+            # non-negative for ANY offset, so an additive offset composes with
+            # the squared storage rather than fighting it -- x**2 + off is the
+            # form that can go negative, which is why additive blinding used to
+            # require allowNegativeParam. It also leaves the reported
+            # uncertainty exactly unblinded: at the minimum d(poi)/dx is
+            # 2*sqrt(poi) in both frames, so sigma_x is identical armed and
+            # disarmed.
+            xpoi = xpoi + self._blinding_offsets_poi_add
         if self.param_model.allowNegativeParam:
             poi = xpoi
         else:
             poi = tf.square(xpoi)
-        poi = tf.where(
+        return tf.where(
             self.frozen_params_mask[: self.param_model.npoi], tf.stop_gradient(poi), poi
         )
-        if self.do_blinding:
-            return poi * self._blinding_offsets_poi
-        else:
-            return poi
 
     def get_x(self):
         return tf.concat(
             [self.get_poi(), self.get_model_nui(), self.get_theta()], axis=0
+        )
+
+    @property
+    def nfreeparms(self):
+        """Number of fit parameters that cost a degree of freedom.
+
+        A parameter with a Gaussian constraint adds one parameter AND one
+        pseudo-measurement, so it costs NET ZERO degrees of freedom. Only
+        genuinely free parameters reduce the ndf of a goodness-of-fit test.
+
+        ``self.cw`` is the single place that records which parameters are
+        constrained, over the whole vector ``[ParamModel params | systs]``:
+        declared ParamModel priors on one side (``prior_sigmas`` entries that
+        are finite and > 0, folded in by :meth:`init_fit_parms`) and
+        ``indata.constraintweights`` on the other. ``cw == 0`` is exactly the
+        set the likelihood treats as unconstrained, so counting it here cannot
+        drift from what ``_compute_lc`` actually penalises.
+
+        Deliberately NOT ``param_model.nparams + indata.nsystnoconstraint``:
+        that charges every model parameter but only the unconstrained card
+        systematics, i.e. it distinguishes parameters by WHERE THEY ARE
+        DECLARED, which is not a statistical property. A model parameter with a
+        sigma = 1 prior and a card nuisance with a sigma = 1 prior are the same
+        object and must be charged the same way.
+
+        FROZEN parameters are excluded as well. ``cw`` records constraints;
+        frozen-ness lives in ``frozen_params_mask``, so an unconstrained frozen
+        parameter has ``cw == 0`` yet is fixed and costs nothing. Counting it
+        would make ``ndfsat`` too small and ``chi2.sf(chi2_val, ndfsat)``
+        correspondingly too pessimistic, by exactly the number of such
+        parameters. (The old formula ignored frozen parameters too, so this is
+        not a regression -- but this is the property the name claims, so it
+        should hold.)
+        """
+        return int(np.count_nonzero(self._free_parms_mask()))
+
+    def _free_parms_mask(self):
+        """Boolean mask over ``[ParamModel params | systs]``: unconstrained AND
+        not frozen, i.e. the parameters that actually cost a degree of freedom.
+        """
+        return (self.cw.numpy() == 0.0) & ~self.frozen_params_mask.numpy()
+
+    @property
+    def nfreeparms_breakdown(self):
+        """``(free ParamModel params, free systs)``, for logging.
+
+        The two entries of :attr:`nfreeparms`, split at the ParamModel /
+        systematics boundary. The second is ``indata.nsystnoconstraint`` minus
+        any frozen unconstrained nuisances; the first is what the old ndf
+        formula got wrong.
+        """
+        free = self._free_parms_mask()
+        nparams = self.param_model.nparams
+        return int(np.count_nonzero(free[:nparams])), int(
+            np.count_nonzero(free[nparams:])
         )
 
     def prefit_variance(self, unconstrained_err=0.0):
@@ -802,6 +1123,13 @@ class Fitter:
     def xdefaultassign(self):
         # start every parameter at its constraint center (prior mean / theta0
         # default, and the model default for unpriored params)
+        #
+        # Assigned raw, in whichever frame is armed: reframing x0default into
+        # the blinded frame would compute the offset into x, and x0default is
+        # public, so the offset would be one subtraction away from anyone who
+        # reads x. See set_blinding_offsets. The physical start therefore
+        # differs between an armed and a disarmed run, which is accepted --
+        # the minimiser lands on the same minimum either way.
         self.x.assign(self.x0default)
 
     def defaultassign(self):
@@ -821,6 +1149,14 @@ class Fitter:
 
         self.arm_regularizers()
 
+    def _regularizers_need_observables(self):
+        """Whether any attached regularizer reads the predicted yields.
+
+        Penalties on the parameters alone (see Regularizer.needs_observables)
+        do not, and then the full yields never have to be built for them.
+        """
+        return any(getattr(reg, "needs_observables", True) for reg in self.regularizers)
+
     def arm_regularizers(self):
         """Tell every regularizer about the current parameter layout.
 
@@ -828,9 +1164,17 @@ class Fitter:
         ``init_fit_parms``.
         """
         xinit = self.get_x()
-        nexp0 = self.expected_yield(full=True)
+        nexp0 = (
+            self.expected_yield(full=True)
+            if self._regularizers_need_observables()
+            else None
+        )
         for reg in self.regularizers:
-            reg.set_expectations(xinit, nexp0, parms=self.parms)
+            reg.set_expectations(
+                xinit,
+                nexp0 if getattr(reg, "needs_observables", True) else None,
+                parms=self.parms,
+            )
         self._regularizers_armed = True
 
     def bayesassign(self):
@@ -1648,55 +1992,91 @@ class Fitter:
         return expvars
 
     def _init_logk_scaled(self):
-        """Build an internal copy of indata.logk for the yield-computation
-        hot path, pre-multiplied per (bin, proc) by the param-model factor
-        evaluated at xparamdefault.
+        """Prepare the param-model scaling of the systematic variations for
+        the yield-computation hot path.
 
         For systematic_type == "log_normal" the multiplicative form
         ``rnorm * exp(θ·logk) * norm`` already carries the param-model
-        scaling through to the variation, so no copy is needed and
+        scaling through to the variation, so nothing is needed and
         self.logk / self.logk_csr alias the indata tensors.
 
         For systematic_type == "normal" the linearized variation
-        ``rnorm * norm + θ·logk`` does not scale with rnorm. We absorb a
-        constant rnorm_init = param_model.compute(xparamdefault) into logk
-        once, so the relative size of an additive variation matches the
-        multiplicative case at the linearization point. The scaling is a
-        constant, so the hot path remains strictly linear in θ.
+        ``rnorm * norm + θ·logk`` does not scale with rnorm, so a constant
+        rnorm_init = param_model.compute(xparamdefault) has to be absorbed
+        into the variation, so that the relative size of an additive
+        variation matches the multiplicative case at the linearization
+        point.
+
+        rnorm_init carries no systematic index, so it factors out of the
+        contraction over systematics:
+
+            sum_s (rnorm_init[b,p] * logk[b,p,s]) * theta[s]
+              == rnorm_init[b,p] * sum_s logk[b,p,s] * theta[s]
+
+        We therefore keep logk aliased and apply the factor to the
+        [nbins, nproc] contraction *result* instead of to the
+        [nbins, nproc, nsyst] input. This is exactly equivalent, and avoids
+        allocating a second full-size copy of logk (and, in sparse mode,
+        rebuilding the CSR matrix) at construction time. The scaling is
+        still a constant, so the hot path remains strictly linear in θ.
         """
+        # scaling factors applied to the contraction result; None when the
+        # multiplicative form already carries the param-model scaling
+        self.rnorm_init = None
+        self.rnorm_init_at_norm = None
+
+        self.logk = self.indata.logk
+        if self.indata.sparse:
+            self.logk_csr = self.indata.logk_csr
+
         if self.indata.systematic_type != "normal" or self.param_model.nparams == 0:
-            self.logk = self.indata.logk
-            if self.indata.sparse:
-                self.logk_csr = self.indata.logk_csr
             return
 
-        rnorm_init = self.param_model.compute(self.param_model.xparamdefault, full=True)
-        rnorm_init = tf.broadcast_to(
-            rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
-        )
+        # compute() consumes PHYSICAL parameter values: everywhere else it is
+        # fed get_poi(), which undoes the storage transform. xparamdefault is
+        # in x-space, so for allowNegativeParam=False -- the default -- it
+        # holds sqrt(mu), and handing it over raw evaluates the model at
+        # sqrt(mu) instead of mu. The factor then comes out at 1/sqrt(mu) of
+        # the value the yield computation uses at the very same point, which
+        # is the linearization point this is supposed to match.
+        #
+        # Only visible when the POI default differs from 1 (in practice
+        # --expectSignal != 1), since sqrt(1) == 1, which is why every test in
+        # the repo bar the ones below runs straight past it.
+        xdef = self.param_model.xparamdefault
+        if not self.param_model.allowNegativeParam:
+            npoi = self.param_model.npoi
+            xdef = tf.concat([tf.square(xdef[:npoi]), xdef[npoi:]], axis=0)
 
-        if self.indata.sparse:
-            # logk dense shape is [norm_nnz, nsyst_or_2nsyst]; each value
-            # at logk.indices[i] = (norm_pos, syst_pos) corresponds to the
-            # (bin, proc) pair stored at norm.indices[norm_pos]. Gather
-            # rnorm_init through this two-level mapping.
-            rnorm_at_norm = tf.gather_nd(rnorm_init, self.indata.norm.indices)
-            scale_per_logk = tf.gather(rnorm_at_norm, self.indata.logk.indices[:, 0])
-            new_values = self.indata.logk.values * scale_per_logk
-            self.logk = tf.SparseTensor(
-                self.indata.logk.indices,
-                new_values,
-                self.indata.logk.dense_shape,
+        # Multi-device only: tf.broadcast_to is not lazy, so this is a real
+        # [nbinsfull, nproc] allocation, made in __init__ before any shard
+        # exists. Unpinned it lands on the default device, _build_shards then
+        # slices it under /CPU:0 -- a device-to-host copy of the whole tensor --
+        # and it stays resident on that one device for the life of the fit.
+        # Smaller than logk by a factor nsyst, but the same failure mode, and it
+        # breaks the invariant FitInputData(host_memory=True) and the host-side
+        # slicing in _build_shards exist to hold. n_devices is set before
+        # super().__init__ precisely so the base constructor can read it; the
+        # getattr covers the plain Fitter, which has no such attribute.
+        # Single-device keeps the default placement and nothing is duplicated.
+        device = "/CPU:0" if int(getattr(self, "n_devices", 1)) > 1 else None
+        with tf.device(device):
+            rnorm_init = self.param_model.compute(xdef, full=True)
+            rnorm_init = tf.broadcast_to(
+                rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
             )
-            self.logk_csr = tf_sparse_csr.CSRSparseMatrix(self.logk)
-        else:
-            # Dense logk: [nbinsfull, nproc, nsyst] symmetric, or
-            # [nbinsfull, nproc, 2, nsyst] asymmetric. Broadcast rnorm_init
-            # over the trailing axes.
-            if self.indata.symmetric_tensor:
-                self.logk = self.indata.logk * rnorm_init[..., None]
+
+            if self.indata.sparse:
+                # The CSR contraction returns one value per non-zero of norm, so
+                # the factor is gathered onto the same [norm_nnz] layout. This is
+                # much smaller than the per-logk-entry scaling it replaces.
+                self.rnorm_init_at_norm = tf.gather_nd(
+                    rnorm_init, self.indata.norm.indices
+                )
             else:
-                self.logk = self.indata.logk * rnorm_init[..., None, None]
+                # Dense: logsnorm is [nbins, nproc], matching rnorm_init directly
+                # (sliced to nbins when masked channels are excluded).
+                self.rnorm_init = rnorm_init
 
     def _compute_yields_noBBB(self, full=True, compute_norm=True):
         # full: compute yields inclduing masked channels
@@ -1753,6 +2133,11 @@ class Fitter:
                 snormnorm_sparse = snormnorm_sparse * rnorm
             else:  # "normal"
                 # values[i] = norm[i] * rnorm[bin, proc] + logsnorm[i]
+                # rnorm_init factors out of the contraction (see
+                # _init_logk_scaled), so it is applied here rather than
+                # being baked into logk.
+                if self.rnorm_init_at_norm is not None:
+                    logsnorm = logsnorm * self.rnorm_init_at_norm
                 snormnorm_sparse = self.indata.norm * rnorm
                 snormnorm_sparse = snormnorm_sparse.with_values(
                     snormnorm_sparse.values + logsnorm
@@ -1806,6 +2191,11 @@ class Fitter:
                 snormnorm = snorm * norm
                 normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
+                # rnorm_init factors out of the contraction (see
+                # _init_logk_scaled), so it is applied here rather than
+                # being baked into logk.
+                if self.rnorm_init is not None:
+                    logsnorm = logsnorm * self.rnorm_init[:nbins]
                 normcentral = norm * rnorm + logsnorm
 
             nexpcentral = tf.reduce_sum(normcentral, axis=-1)
@@ -2096,7 +2486,9 @@ class Fitter:
         nexpfullcentral, _, beta = self._compute_yields_with_beta(
             profile=profile,
             compute_norm=False,
-            full=len(self.regularizers),
+            # only build the full (masked-channel-inclusive) yields if some
+            # regularizer actually reads them
+            full=self._regularizers_need_observables(),
         )
 
         nexp = nexpfullcentral[: self.indata.nbins]
@@ -2115,7 +2507,15 @@ class Fitter:
                 )
             x = self.get_x()
             penalties = [
-                reg.compute_nll_penalty(x, nexpfullcentral) * tf.exp(2 * self.tau)
+                reg.compute_nll_penalty(
+                    x,
+                    (
+                        nexpfullcentral
+                        if getattr(reg, "needs_observables", True)
+                        else None
+                    ),
+                )
+                * tf.exp(2 * self.tau)
                 for reg in self.regularizers
             ]
             lpenalty = tf.add_n(penalties)
@@ -2160,6 +2560,11 @@ class Fitter:
     def _compute_loss(self, profile=True):
         return self._compute_nll(profile=profile)
 
+    # Fitter methods that also run per shard: the shard evaluators are
+    # duck-typed stand-ins (see rabbit.sharding), and binding the class's own
+    # unbound methods onto them shares the yields/NLL mathematics -- both
+    # interpolation forms, both systematic types, the BBB machinery -- with
+    # the single-device path by construction.
     def _make_tf_functions(self):
         # Build tf.function wrappers at instance construction time so that
         # jit_compile and the HVP autodiff mode can be controlled via fit
@@ -2313,6 +2718,97 @@ class Fitter:
         _, _, hess = self.loss_val_grad_hess()
         return hess.__array__()
 
+    def _hessp_batch(self, P):
+        """Hessian-vector products for a batch of directions P: [k, npar].
+
+        vectorized_map is a pfor of width k, not the while_loop that
+        tape.jacobian's non-pfor path builds -- so XLA compiles it without the
+        unrolling that made chunking unusable. Memory scales with k rather than
+        npar, which is the whole point: k = 64 costs ~0.4 GB where vectorising
+        over all 6538 parameters costs 43 GB.
+        """
+
+        def one(p):
+            p = tf.stop_gradient(p)
+            with tf.GradientTape() as t2:
+                with tf.GradientTape() as t1:
+                    val = self._compute_loss()
+                grad = t1.gradient(val, self.x)
+            return t2.gradient(grad, self.x, output_gradients=p)
+
+        return tf.vectorized_map(one, P)
+
+    def hessian_from_hvps(self, block=None, batch=None):
+        """Dense Hessian assembled column by column from Hessian-vector products.
+
+        tape.jacobian vectorises over every parameter at once, holding one
+        [nbins, 9] intermediate each: 43 GB on one device for a 6538-parameter,
+        92144-bin model, and several times that in practice -- unallocatable on
+        a GPU and enough to exhaust a 187 GB host. Yet the *result* is only
+        [npar, npar] (342 MB here): the size is entirely in the intermediates.
+
+        An HVP costs one [npar] vector instead, and in a multi-device fit
+        loss_val_grad_hessp is already sharded -- it is what the minimiser calls
+        every iteration -- so this distributes over the GPUs for free and needs
+        no sharded jacobian of its own. The cost is npar HVPs.
+
+        ``block`` restricts the columns computed, which is what preconditioning
+        wants: it only needs the submatrix over the selected parameters.
+        """
+        n = int(self.x.shape[0])
+        idx = np.arange(n) if block is None else np.asarray(block, dtype=np.int64)
+        k = self.hvp_batch if batch is None else int(batch)
+        out = np.empty((n, idx.size), dtype=np.float64)
+
+        if k > 1:
+            s0 = 0
+            while s0 < idx.size:
+                cols = idx[s0 : s0 + k]
+                basis = np.zeros((cols.size, n), dtype=np.float64)
+                basis[np.arange(cols.size), cols] = 1.0
+                try:
+                    hp = self._hessp_batch_dispatch(
+                        tf.constant(basis, dtype=self.indata.dtype)
+                    )
+                except tf.errors.ResourceExhaustedError:
+                    # The per-batch memory is k * nbins * 9 * 8 in principle,
+                    # but the loss graph holds several bins-shaped tensors at
+                    # once -- measured at ~6.5x that on one model -- so the
+                    # right k is model dependent. Halve and retry rather than
+                    # making the caller guess: this runs once per build, so a
+                    # couple of wasted attempts cost far less than falling back
+                    # to an unpreconditioned fit or losing the covariance.
+                    if k == 1:
+                        raise
+                    k = max(1, k // 2)
+                    # Persist it: the limit is a property of this device and
+                    # model, not of this call, so the postfit Hessian and every
+                    # preconditioner rebuild in the restart loop would otherwise
+                    # re-discover it -- paying the same compile, allocate and
+                    # unwind each time. min() so an explicit oversized batch=
+                    # that shrinks cannot raise a lower standing default.
+                    self.hvp_batch = min(self.hvp_batch, k)
+                    logger.warning(
+                        f"HVP batch too large for the device; retrying with "
+                        f"--hvpBatch {k}"
+                    )
+                    continue
+                out[:, s0 : s0 + cols.size] = np.asarray(hp).T
+                s0 += cols.size
+            return out
+
+        v = np.zeros(n, dtype=np.float64)
+        for c, j in enumerate(idx):
+            v[j] = 1.0
+            _, _, hp = self.loss_val_grad_hessp(tf.constant(v, dtype=self.indata.dtype))
+            out[:, c] = np.asarray(hp)
+            v[j] = 0.0
+        return out
+
+    def _hessp_batch_dispatch(self, P):
+        """Batched HVP; subclasses override to keep the work distributed."""
+        return self._hessp_batch(P)
+
     def _build_preconditioner(self):
         """Preconditioner for the upcoming :meth:`fit`, or an exact no-op.
 
@@ -2350,7 +2846,9 @@ class Fitter:
         except Exception as ex:
             logger.warning(
                 f"Could not compute the reference Hessian for preconditioning ({ex}); "
-                "running unpreconditioned."
+                "running unpreconditioned. On the multi-device path the "
+                "Hessian is assembled from batched HVPs; lower --hvpBatch if "
+                "this is an out-of-memory error."
             )
             return precond.Preconditioner.identity(theta_ref)
 
@@ -2404,7 +2902,8 @@ class Fitter:
             pc = pc_cell[0]
             self.x.assign(pc.to_physical(yval))
             val, grad = self.loss_val_grad()
-            return val.__array__(), pc.grad_to_internal(grad.__array__())
+            grad_y = pc.grad_to_internal(grad.__array__())
+            return val.__array__(), grad_y
 
         def scipy_hessp(yval, pval):
             pc = pc_cell[0]

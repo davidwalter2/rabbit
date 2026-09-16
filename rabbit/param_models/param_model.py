@@ -34,6 +34,42 @@ class ParamModel:
         #                     # to the model (e.g. POIs free, POUs constrained).
         # self.prior_means  = # np.ndarray, shape (nparams,). Optional; defaults
         #                     # to self.xparamdefault when not provided.
+        #
+        # # optional: declare that this model's POIs are NOT results and must
+        # # never be blinded -- auxiliary parameters that absorb something
+        # # rather than quantities anyone is keeping from the analyst.
+        # # SaturatedProjectModel's per-bin scales are the case this exists
+        # # for: they would be blinded only as a side effect of sharing a POI
+        # # block with the analysis model, and a blinded bin scale does not
+        # # open at the 1.0 the saturated test requires of it.
+        # #
+        # # CompositeParamModel turns the declarations of its submodels into
+        # # `blind_exempt_params`, the NAMES of the exempt parameters, because
+        # # the Fitter resolves blinding by name and names survive the POI-block
+        # # permutation that indices would not.
+        # self.blind_exempt = # bool, default False.
+        #
+        # # optional: the SCALE of the blinding draw, in the POI's own units.
+        # # The draw is an absolute shift, so unlike a multiplicative factor it
+        # # is NOT scale free: how well it hides depends on the parameter's
+        # # units. A POI whose uncertainty is O(1) in its fit units is
+        # # offset by well under a sigma and is effectively unblinded.
+        # #
+        # # The model is the only thing that knows its own units, so it
+        # # declares them here: the offset drawn is
+        # #     blind_additive_scale * N(0, 5)
+        # # and the default of 1.0 reproduces the historical draw exactly.
+        # # A POI measured to sigma ~ 1e-3 (alpha_s) is already hidden by
+        # # thousands of sigma at the default; a POI in units where sigma is
+        # # O(1) or larger should set this to a few times its expected
+        # # uncertainty. The Fitter additionally WARNS at startup whenever it
+        # # can see a prefit sigma and the drawn offset is small against it.
+        # #
+        # # A scalar applies to all of the model's POIs. A per-POI array is
+        # # also accepted, and is what CompositeParamModel produces: the scale
+        # # is in each parameter's OWN units, so submodel declarations compose
+        # # as a vector rather than reducing to one value.
+        # self.blind_additive_scale = # float or array (npoi,), default 1.0.
 
     @property
     def nparams(self):
@@ -135,11 +171,20 @@ class CompositeParamModel(ParamModel):
 
         poi_flags = {bool(m.allowNegativeParam) for m in param_models if m.npoi > 0}
         if len(poi_flags) > 1:
+            names = {
+                bool(m.allowNegativeParam): type(m).__name__
+                for m in param_models
+                if m.npoi > 0
+            }
             raise ValueError(
                 "CompositeParamModel: submodels with POIs disagree on "
                 "allowNegativeParam; the fitter applies a single squaring "
                 "transform to the composite POI block, so a mix cannot be "
-                "represented."
+                f"represented (True: {names.get(True)}, False: "
+                f"{names.get(False)}). A submodel that needs positivity "
+                "inside a permissive composite must declare "
+                "allowNegativeParam=True and enforce it in its own compute(), "
+                "as AxisNormModel and SaturatedProjectModel do."
             )
         derived = next(iter(poi_flags)) if poi_flags else None
         if allowNegativeParam is None:
@@ -191,6 +236,51 @@ class CompositeParamModel(ParamModel):
             self.prior_means = np.concatenate(
                 [v[: m.npoi] for v, m in zip(means, param_models)]
                 + [v[m.npoi :] for v, m in zip(means, param_models)]
+            )
+
+        # Parameters no submodel wants blinded. Names rather than indices: the
+        # Fitter resolves blinding by name, and names survive the POI-block
+        # permutation that indices would not.
+        exempt = [
+            m.params[: m.npoi]
+            for m in param_models
+            if m.npoi > 0 and getattr(m, "blind_exempt", False)
+        ]
+        if exempt:
+            self.blind_exempt_params = np.concatenate(exempt)
+
+        # The blinding SCALE is in each parameter's own fit units, so it is
+        # carried as a per-POI VECTOR rather than reduced to one composite
+        # value. Each submodel contributes its own declaration over its own POI
+        # slice, which is the same treatment prior_sigmas gets above, and a
+        # composite of composites works because the vector is itself a legal
+        # declaration.
+        #
+        # Dropping this is NOT a benign default: the Fitter reads the scale off
+        # its effective model, so a submodel declaring scale=7 would blind at
+        # scale=1 the moment it is composited -- silently, and in the
+        # under-blinding direction. The weak-blinding check would catch it after
+        # the fit, since it measures against the postfit sigma, but only after a
+        # run has already been spent -- propagating the declaration is what
+        # keeps the offset right the first time.
+        # Guarded on npoi: with every submodel POI-less the comprehension below
+        # is empty and np.concatenate raises. That composition is supported and
+        # reached from the CLI -- load_models builds a composite straight from
+        # --paramModel, and the whole ABCD family is POI-less -- and it has no
+        # POI block to scale in the first place. The Fitter falls back to 1.0
+        # through getattr when the attribute is absent.
+        if self.npoi:
+            self.blind_additive_scale = np.concatenate(
+                [
+                    np.broadcast_to(
+                        np.asarray(
+                            getattr(m, "blind_additive_scale", 1.0), dtype=np.float64
+                        ),
+                        (m.npoi,),
+                    )
+                    for m in param_models
+                    if m.npoi > 0
+                ]
             )
 
         # impact groups are name-based, so a plain merge survives the
@@ -392,6 +482,29 @@ class SaturatedProjectModel(ParamModel):
         For each channel of the input data that enters the mapping, the flat index of the
         output bin each of its bins contributes to, and -1 for bins that are not used,
         as returned by 'Mapping.output_indices()'.
+    allowNegativeParam : bool
+        WHO enforces positivity of the bin scales, not whether it is enforced.
+        The scales multiply YIELDS, so a negative one sends the expected yield
+        negative and the Poisson log() to NaN; the parameters are therefore
+        always stored as sqrt(scale) and the physical space is always
+        [0, inf).
+
+        ``False`` (the default, and the historical behaviour) asks the Fitter
+        to do the squaring, via its transform of the POI block. ``True`` means
+        "pass my slice through raw, I square it myself in compute()" -- the
+        same contract :class:`AxisNormModel` documents.
+
+        The distinction exists because the Fitter applies ONE transform to the
+        WHOLE POI block, so ``False`` is unavailable as soon as this model is
+        composited (by ``--computeSaturatedProjectionTests``) with an analysis
+        model that needs ``allowNegativeParam=True`` -- a POI that is a
+        physical parameter, e.g. alpha_s, and/or one blinded additively.
+        ``CompositeParamModel`` rejects such a mix. Self-squaring also
+        composes correctly with ADDITIVE POI blinding, which the Fitter's
+        transform does not: blinding is applied to the value handed to
+        compute(), so squaring afterwards keeps the scale positive for any
+        offset, whereas squaring first leaves ``x**2 + offset`` free to go
+        negative.
     """
 
     def __init__(
@@ -445,9 +558,28 @@ class SaturatedProjectModel(ParamModel):
 
         self.allowNegativeParam = allowNegativeParam
 
-        self.is_linear = self.nparams == 0 or self.allowNegativeParam
+        # allowNegativeParam=True => the Fitter does not transform this slice,
+        # so compute() squares it here instead. See the class docstring: the
+        # bin scales are positive in BOTH branches, only the owner of the
+        # transform differs.
+        # The bin scales are the saturated test's own machinery, not a
+        # measurement: there is nothing in them to hide. Say so, because
+        # compositing them with a blinded analysis model would otherwise blind
+        # them too, and a blinded bin scale does not open at 1.0 -- which is
+        # exactly what the warm start in rabbit_fit.py requires of it.
+        self.blind_exempt = True
 
-        self.set_param_default(expectSignal, allowNegativeParam)
+        self._square_internally = bool(allowNegativeParam)
+
+        # x -> x**2 in either branch, so the model is never linear in its
+        # stored parameters. (Identical to the previous expression for the
+        # default allowNegativeParam=False.)
+        self.is_linear = self.nparams == 0
+
+        # Store sqrt(default) regardless of which branch squares, so both open
+        # at the same physical point. allowNegativeParam=False selects the
+        # sqrt in set_param_default; it is passed literally, not forwarded.
+        self.set_param_default(expectSignal, allowNegativeParam=False)
 
     def compute(self, param, full=False):
         start = 0
@@ -458,9 +590,14 @@ class SaturatedProjectModel(ParamModel):
 
             if k in self.indices.keys():
                 nbins = self.nbins_channel[k]
+                iscale = param[start : start + nbins]
+                if self._square_internally:
+                    iscale = tf.square(iscale)
                 iparam = tf.concat(
                     [
-                        param[start : start + nbins],
+                        iscale,
+                        # the trailing entry is the scale of the input bins the
+                        # mapping does not use: a physical 1, never squared
                         tf.ones([1], dtype=self.indata.dtype),
                     ],
                     axis=0,

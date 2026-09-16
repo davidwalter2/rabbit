@@ -274,6 +274,26 @@ def common_parser():
         "across re-solves after rejected steps",
     )
     parser.add_argument(
+        "--nDevices",
+        default=1,
+        type=int,
+        help="Shard the likelihood over this many devices (bins-sharded "
+        "data parallelism, GPUs preferred). The main motivation is memory: "
+        "every large tensor in the fit is bins-proportional and gets split "
+        "across the devices, so models that exceed a single GPU's memory "
+        "become fittable; compute also scales when each shard is large "
+        "enough to saturate its device. Only the dense-tensor Poisson/chi2 "
+        "likelihoods are supported (no sparse mode, no --covarianceFit).",
+    )
+    parser.add_argument(
+        "--devices",
+        default=None,
+        type=int,
+        nargs="+",
+        help="Explicit physical GPU indices to use (overrides the automatic "
+        "least-occupied selection). The number given should match --nDevices.",
+    )
+    parser.add_argument(
         "--precondition",
         action="store_true",
         help="Reparameterise a block of parameters so the reference Hessian is the "
@@ -393,6 +413,24 @@ def common_parser():
         "periodic ones; the interrupt, failure and convergence snapshots do not "
         "depend on it). Costs one small file write per interval. Worth setting "
         "on any fit long enough that losing it would hurt.",
+    )
+    parser.add_argument(
+        "--hvpBatch",
+        default=256,
+        type=int,
+        help="Number of Hessian-vector products evaluated together when the "
+        "dense Hessian is assembled from HVPs. Only the multi-device path "
+        "(--nDevices > 1) assembles it this way today, for both the "
+        "preconditioner reference matrix and the postfit Hessian; the "
+        "single-device path uses tape.jacobian and ignores this. NB the "
+        "assembly is O(nparams) graph evaluations where the jacobian is a "
+        "single pass, so the postfit covariance scales linearly in parameter "
+        "count there. Memory scales with this and "
+        "the number of graph calls scales inversely: on a 4-way shard of a "
+        "92144-bin model 256 costs a few GB and turns 6538 sequential HVPs into "
+        "26 batched ones. The batch is halved automatically if the device "
+        "cannot hold it, so this is an upper bound rather than a value that "
+        "has to be right. Set 1 for the sequential loop.",
     )
     parser.add_argument(
         "--hvpMethod",
