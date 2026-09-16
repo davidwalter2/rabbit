@@ -558,6 +558,107 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 fitter.cov.assign(tf.constant(cov_prefit))
 
 
+def global_impacts_covariance_refusal(args, fits):
+    """Why the global impacts cannot run with these flags, or None if they can.
+
+    They need the parameter covariance and never the Hessian itself, so the
+    covariance either gets computed in fit() or read from an --externalPostfit
+    result -- and which of the two is decidable from the flags alone. That is
+    the point of this function: the equivalent check inside fit() cannot be
+    reached until after minimize(), so raising there throws away a completed
+    fit instead of a second of argument parsing.
+
+    --noHessian allocates no covariance at all (Fitter.__init__ leaves
+    self.cov None to avoid the O(npar^2) allocation), so there is nothing for
+    an external one to be loaded into either -- load_fitresult refuses. Global
+    impacts are impossible in such a job, whatever else is passed.
+
+    --noEDM skips the covariance computation for every fit that runs here (the
+    full-Hessian branch in fit() is gated on `not args.noEDM`), so only a job
+    that runs no fit at all can still take one from --externalPostfit.
+    """
+    asked = [
+        flag
+        for flag, on in (
+            ("--globalImpacts", args.globalImpacts),
+            ("--gaussianGlobalImpacts", args.gaussianGlobalImpacts),
+        )
+        if on
+    ]
+    if not asked:
+        return None
+    asked = " and ".join(asked)
+
+    if args.noHessian:
+        return (
+            f"{asked} cannot run: the global impacts need the parameter "
+            "covariance, which --noHessian does not "
+            "compute -- and it allocates none for an external one to be loaded "
+            "into, so --externalPostfit cannot supply it either. Run this pass "
+            "without --noHessian, or use the two-pass recipe: fit once with "
+            "--noHessian, then rerun without it as --externalPostfit <that "
+            "result> --noFit."
+        )
+
+    runs_a_fit = any(ifit >= 0 and not args.noFit for ifit in fits)
+    if args.noEDM and (args.externalPostfit is None or runs_a_fit):
+        return (
+            f"{asked} cannot run: the global impacts need the parameter "
+            "covariance, which --noEDM skips computing. Drop --noEDM, or take "
+            "the covariance from a previous fit with --externalPostfit "
+            "<result containing one> --noFit."
+        )
+    return None
+
+
+def external_postfit_variances(args, fitter):
+    """Postfit variances read off an --externalPostfit covariance.
+
+    Entries the external result did not cover come back NaN: load_fitresult
+    fills only the intersection of the two parameter sets and leaves the rest
+    of fitter.cov on the prefit diagonal it was initialized with, so reporting
+    them would hand back a prefit width as a postfit uncertainty.
+
+    Partial coverage is refused outright when global impacts were asked for,
+    because it does not only degrade the uncovered rows -- see below.
+    """
+    ext_var = tf.linalg.diag_part(fitter.cov).numpy()
+    ext_mask = getattr(fitter, "external_cov_mask", None)
+    if ext_mask is None or ext_mask.all():
+        return ext_var
+
+    n_covered = int(ext_mask.sum())
+    n_missing = int((~ext_mask).sum())
+    if args.globalImpacts or args.gaussianGlobalImpacts:
+        # load_fitresult fills the intersection BLOCK, so every
+        # covered-to-uncovered covariance entry stays exactly zero. Global
+        # impacts read one column of cov per parameter, so an uncovered
+        # nuisance contributes exactly zero impact to a COVERED POI, and the
+        # variance it should have carried stays in
+        # var_nobs = var_total - var_x0, i.e. is reported as
+        # data-statistical. The total uncertainty is still right and every
+        # component of the decomposition is wrong, which nothing in the
+        # output looks like -- hence a refusal rather than a warning.
+        raise Exception(
+            f"--externalPostfit covers {n_covered} of {ext_mask.size} parameters, "
+            "so the global impacts would be wrong for EVERY parameter, not only "
+            "the uncovered ones: the covariance entries between covered and "
+            f"uncovered parameters are zero, so those {n_missing} contribute "
+            "exactly zero impact and their share of the uncertainty is reported "
+            "as data-statistical instead. Supply an --externalPostfit result "
+            "covering the full parameter set, or drop --globalImpacts / "
+            "--gaussianGlobalImpacts."
+        )
+
+    logger.warning(
+        f"--externalPostfit covered {n_covered} of {ext_mask.size} parameters; "
+        f"the remaining {n_missing} have no postfit uncertainty and are written "
+        "as NaN."
+    )
+    ext_var[~ext_mask] = np.nan
+    return ext_var
+
+
 def fit(args, fitter, ws, dofit=True):
 
     edmval = None
@@ -712,24 +813,11 @@ def fit(args, fitter, ws, dofit=True):
                 "or use --globalImpacts, which needs only the covariance."
             )
         # Only the parameters the external result actually covered have a
-        # postfit variance here: load_fitresult fills the intersection of the
-        # two parameter sets and leaves the rest of fitter.cov on the prefit
-        # diagonal it was initialized with. Reporting those would hand back a
-        # prefit width as a postfit uncertainty, which is exactly the
-        # "plausible-looking value" the NaN default above exists to avoid.
-        ext_var = tf.linalg.diag_part(fitter.cov).numpy()
-        ext_mask = getattr(fitter, "external_cov_mask", None)
-        if ext_mask is not None and not ext_mask.all():
-            n_missing = int((~ext_mask).sum())
-            logger.warning(
-                f"--externalPostfit covered {int(ext_mask.sum())} of "
-                f"{ext_mask.size} parameters; the remaining {n_missing} have no "
-                "postfit uncertainty and are written as NaN. Global impacts for "
-                "them are computed against a covariance block that is still the "
-                "prefit diagonal, so treat those rows as unreliable."
-            )
-            ext_var[~ext_mask] = np.nan
-        parms_variances = tf.constant(ext_var, dtype=fitter.indata.dtype)
+        # postfit variance here; the rest come back NaN, and partial coverage
+        # is refused outright when global impacts were asked for.
+        parms_variances = tf.constant(
+            external_postfit_variances(args, fitter), dtype=fitter.indata.dtype
+        )
         cov_available = True
 
     # Global impacts need the covariance and the parameter values, not the
@@ -737,10 +825,26 @@ def fit(args, fitter, ws, dofit=True):
     # --externalPostfit.
     if args.globalImpacts or args.gaussianGlobalImpacts:
         if not cov_available:
+            # main() refuses the flag combinations that cannot produce a
+            # covariance before any work is done, so reaching here means the
+            # --externalPostfit result turned out not to carry one and it had
+            # to be recomputed, which the flags below skipped.
+            skipped = [
+                flag
+                for flag, on in (
+                    ("--noHessian", args.noHessian),
+                    ("--noEDM", args.noEDM),
+                )
+                if on
+            ]
             raise Exception(
                 "--globalImpacts/--gaussianGlobalImpacts need the parameter "
-                "covariance. Either let it be computed here (drop --noHessian) "
-                "or supply a --externalPostfit result that contains one."
+                "covariance, and none is available: the --externalPostfit "
+                "result does not contain one, so it had to be recomputed here, "
+                f"and {' and '.join(skipped) if skipped else 'nothing computed it'}"
+                f"{' skipped that' if skipped else ''}. Point --externalPostfit "
+                "at a result that carries a covariance, or recompute it here "
+                f"without {' / '.join(skipped) if skipped else '--noHessian / --noEDM'}."
             )
         if args.globalImpacts:
             ws.add_impacts_hists(
@@ -919,6 +1023,11 @@ def main():
         if _incompat:
             raise Exception("--noHessian is incompatible with: " + ", ".join(_incompat))
 
+    # --globalImpacts is the other covariance consumer, but whether it can run
+    # depends on --externalPostfit and --noFit as well as on these flags, which
+    # this flat list cannot express: see global_impacts_covariance_refusal,
+    # raised below once the list of fits is known.
+
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
@@ -927,6 +1036,13 @@ def main():
         [np.array([x]) if x <= 0 else 1 + np.arange(x, dtype=int) for x in args.toys]
     )
     blinded_fits = [f == 0 or (f > 0 and args.toysDataMode == "observed") for f in fits]
+
+    # Before anything expensive: the covariance the global impacts need has to
+    # be able to exist, or the fit runs to completion and is then thrown away
+    # by the check in fit(), which cannot fire until after minimize().
+    _refusal = global_impacts_covariance_refusal(args, fits)
+    if _refusal is not None:
+        raise Exception(_refusal)
 
     # Default snapshot destination, next to the fit output it belongs to. Only
     # when periodic snapshots were asked for: the interrupt/failure/convergence
