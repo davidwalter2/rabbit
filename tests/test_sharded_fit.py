@@ -717,6 +717,10 @@ _SHARDED_SAFE = {
     "set_blinding_offsets",
     "prefit_covariance",
     "edmval_cov",
+    # postfit verdict on the blinding width: reads the variance vector the
+    # driver already has, the POI offsets and the model's declared scales.
+    # All [nparams]-sized, no bin axis anywhere, so sharding cannot change it.
+    "warn_if_blinding_is_weak",
 }
 
 

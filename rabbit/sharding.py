@@ -293,9 +293,10 @@ def shard_edges(nbins, n):
 # and missing one is silent until the first armed sharded fit. That is exactly
 # how _blinding_offsets_poi_add arrived -- added to get_poi() on main, threaded
 # nowhere. test_sharded_fit.py checks this tuple against what a blinded Fitter
-# actually creates.
+# actually creates, which is how the reverse direction was caught too: #174
+# dropped the multiplicative _blinding_offsets_poi, and a list naming an
+# attribute the Fitter no longer has fails just as loudly as a missing one.
 _BLINDING_OFFSET_ATTRS = (
-    "_blinding_offsets_poi",
     "_blinding_offsets_poi_add",
     "_blinding_offsets_theta",
 )
