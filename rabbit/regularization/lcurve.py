@@ -54,9 +54,20 @@ def _compute_curvature(fitter):
             lx = tf.math.log(ln + lc + lbeta)
 
             x = fitter.get_x()
+            # Per regularizer, not on the any() above: that decides whether the
+            # yields get built at all, which one reader is enough to require.
+            # Which penalties then *see* them is each one's own declaration, as
+            # in Fitter._compute_nll and arm_regularizers -- otherwise a mixed
+            # list hands the parameter-only penalties a vector they said they
+            # do not read, which is the bug this is fixing, one list longer.
             penalties = [
                 reg.compute_nll_penalty(
-                    x, nexpfullcentral if needs_observables else None
+                    x,
+                    (
+                        nexpfullcentral
+                        if getattr(reg, "needs_observables", True)
+                        else None
+                    ),
                 )
                 for reg in fitter.regularizers
             ]

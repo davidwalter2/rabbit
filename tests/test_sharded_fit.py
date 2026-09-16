@@ -337,6 +337,28 @@ def test_sharded_across_logical_cpu_devices():
         assert "LOGICAL-DEVICE SHARDING OK" in res.stdout
 
 
+class _YieldReadingPenalty:
+    """Declares that it reads the yields, and checks that it is given them.
+
+    Exists to make the L-curve list *mixed*: with only parameter-only penalties
+    attached, `any(needs_observables)` is False and a global flag behaves
+    identically to a per-regularizer one, so a single-penalty test cannot tell
+    the two apart.
+    """
+
+    needs_observables = True
+
+    def __init__(self, strength=1e-3):
+        self.strength = strength
+
+    def set_expectations(self, initial_params, initial_observables, parms=None):
+        assert initial_observables is not None, "must be handed yields"
+
+    def compute_nll_penalty(self, params, observables=None):
+        assert observables is not None, "must be handed yields"
+        return self.strength * tf.reduce_sum(observables[:1] ** 2)
+
+
 class _ParamOnlyPenalty:
     """Quadratic pull on the first parameter; ignores the yields entirely."""
 
@@ -976,12 +998,17 @@ def test_lcurve_honours_the_needs_observables_contract():
         f = _make_fitter(make_test_tensor(tmpdir), 1)
         f.set_nobs(f.indata.data_obs)
         penalty = _ParamOnlyPenalty()
-        f.regularizers = [penalty]
+        # Mixed on purpose. The contract is per regularizer, so a list holding
+        # only parameter-only penalties cannot detect a global any() -- both
+        # forms then pass None to everything. With a yield-reading penalty
+        # alongside, any() is True and only the per-regularizer form still
+        # hands _ParamOnlyPenalty None.
+        f.regularizers = [_YieldReadingPenalty(), penalty]
         f.arm_regularizers()
         f.tau.assign(0.5)
 
-        # _ParamOnlyPenalty asserts observables is None on every call, so a
-        # violation surfaces here rather than as a wrong curvature
+        # each penalty asserts, on every call, that it got what it declared, so
+        # a violation surfaces here rather than as a wrong curvature
         curvature = _compute_curvature(f)
 
         assert penalty.armed >= 1, "regularizer never armed; test is vacuous"
