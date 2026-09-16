@@ -204,10 +204,21 @@ class ShardIndataView:
         self.start = int(start)
         self.stop = int(stop)
         nb = self.stop - self.start
+        # Slice on the host, then copy only the slice, exactly as _build_shards
+        # does for logk and nobs. Evaluating indata.norm[start:stop] inside the
+        # device scope places the StridedSlice on that device, which requires
+        # its input -- the whole [nbinsfull, nproc] tensor -- to be copied there
+        # first, once per shard. On CPU-only runners that copy is free, which is
+        # why the test suite cannot see this and why it only bites on the
+        # hardware the feature exists for.
+        with tf.device("/CPU:0"):
+            norm = tf.identity(indata.norm[self.start : self.stop])
+            sumw = tf.identity(indata.sumw[self.start : self.stop])
+            sumw2 = tf.identity(indata.sumw2[self.start : self.stop])
         with tf.device(device):
-            self.norm = tf.identity(indata.norm[self.start : self.stop])
-            self.sumw = tf.identity(indata.sumw[self.start : self.stop])
-            self.sumw2 = tf.identity(indata.sumw2[self.start : self.stop])
+            self.norm = tf.identity(norm)
+            self.sumw = tf.identity(sumw)
+            self.sumw2 = tf.identity(sumw2)
         self.nbins = nb
         self.nbinsfull = nb
         self.nbinsmasked = 0
@@ -358,6 +369,16 @@ class MultiDeviceFitter(Fitter):
             and self.bbstat.binByBinStatMode == "full"
             and getattr(self.indata, "betavar", None) is not None
         ):
+            # Caution, not necessity, and worth being honest about which:
+            # bbstat reads betavar only under `and full`, the sharded loss only
+            # ever evaluates full=False, and the full=True paths run host-pinned
+            # on the intact self.indata -- so the term does not in fact enter the
+            # sharded likelihood today, and this refuses a combination that
+            # would work. It is kept because ShardIndataView hands every shard
+            # the whole unsliced bin x bin tensor, which is correct only while
+            # nothing reads it; if that changes the result is a silently wrong
+            # answer rather than an error, and lite mode is the documented
+            # multi-device path anyway. Drop it if the combination is wanted.
             raise NotImplementedError(
                 "--binByBinStatMode full with a per-bin beta covariance "
                 "(indata.betavar) is not supported in multi-device mode "

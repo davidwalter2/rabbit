@@ -2059,20 +2059,36 @@ class Fitter:
         if not self.param_model.allowNegativeParam:
             npoi = self.param_model.npoi
             xdef = tf.concat([tf.square(xdef[:npoi]), xdef[npoi:]], axis=0)
-        rnorm_init = self.param_model.compute(xdef, full=True)
-        rnorm_init = tf.broadcast_to(
-            rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
-        )
 
-        if self.indata.sparse:
-            # The CSR contraction returns one value per non-zero of norm, so
-            # the factor is gathered onto the same [norm_nnz] layout. This is
-            # much smaller than the per-logk-entry scaling it replaces.
-            self.rnorm_init_at_norm = tf.gather_nd(rnorm_init, self.indata.norm.indices)
-        else:
-            # Dense: logsnorm is [nbins, nproc], matching rnorm_init directly
-            # (sliced to nbins when masked channels are excluded).
-            self.rnorm_init = rnorm_init
+        # Multi-device only: tf.broadcast_to is not lazy, so this is a real
+        # [nbinsfull, nproc] allocation, made in __init__ before any shard
+        # exists. Unpinned it lands on the default device, _build_shards then
+        # slices it under /CPU:0 -- a device-to-host copy of the whole tensor --
+        # and it stays resident on that one device for the life of the fit.
+        # Smaller than logk by a factor nsyst, but the same failure mode, and it
+        # breaks the invariant FitInputData(host_memory=True) and the host-side
+        # slicing in _build_shards exist to hold. n_devices is set before
+        # super().__init__ precisely so the base constructor can read it; the
+        # getattr covers the plain Fitter, which has no such attribute.
+        # Single-device keeps the default placement and nothing is duplicated.
+        device = "/CPU:0" if int(getattr(self, "n_devices", 1)) > 1 else None
+        with tf.device(device):
+            rnorm_init = self.param_model.compute(xdef, full=True)
+            rnorm_init = tf.broadcast_to(
+                rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
+            )
+
+            if self.indata.sparse:
+                # The CSR contraction returns one value per non-zero of norm, so
+                # the factor is gathered onto the same [norm_nnz] layout. This is
+                # much smaller than the per-logk-entry scaling it replaces.
+                self.rnorm_init_at_norm = tf.gather_nd(
+                    rnorm_init, self.indata.norm.indices
+                )
+            else:
+                # Dense: logsnorm is [nbins, nproc], matching rnorm_init directly
+                # (sliced to nbins when masked channels are excluded).
+                self.rnorm_init = rnorm_init
 
     def _compute_yields_noBBB(self, full=True, compute_norm=True):
         # full: compute yields inclduing masked channels
@@ -2777,6 +2793,13 @@ class Fitter:
                     if k == 1:
                         raise
                     k = max(1, k // 2)
+                    # Persist it: the limit is a property of this device and
+                    # model, not of this call, so the postfit Hessian and every
+                    # preconditioner rebuild in the restart loop would otherwise
+                    # re-discover it -- paying the same compile, allocate and
+                    # unwind each time. min() so an explicit oversized batch=
+                    # that shrinks cannot raise a lower standing default.
+                    self.hvp_batch = min(self.hvp_batch, k)
                     logger.warning(
                         f"HVP batch too large for the device; retrying with "
                         f"--hvpBatch {k}"

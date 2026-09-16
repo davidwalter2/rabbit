@@ -987,6 +987,13 @@ def main():
             # curvature would run unsharded -- and for --lCurveScan it runs
             # after each per-tau minimize, discarding finished fits mid-scan.
             _md.append("--lCurveScan / --lCurveOptimize")
+        if args.covarianceFit:
+            # Fitter.__init__ builds a dense [nbins, nbins] tf.linalg.diag when
+            # no data_cov_inv is in the workspace -- ~68 GB at 92144 bins -- and
+            # that runs before init_fit_parms reaches _build_shards, so without
+            # this entry the user gets an allocation failure rather than the
+            # refusal naming the flag.
+            _md.append("--covarianceFit")
         if args.diagnostics and not args.noBinByBinStat:
             # loss_val_grad_hess_beta takes a jacobian over the full-length
             # ubeta on one device; see MultiDeviceFitter.
@@ -1054,6 +1061,17 @@ def main():
         args.filename, args.pseudoData, host_memory=args.nDevices > 1
     )
 
+    # Sparseness is a property of the file, so this cannot join the flag checks
+    # above -- but it still beats _build_shards, which does not raise until
+    # init_fit_parms, inside the Fitter constructor. Refusing here costs the
+    # load and nothing else.
+    if args.nDevices > 1 and indata.sparse:
+        raise Exception(
+            "--nDevices > 1 is incompatible with a sparse input tensor: the "
+            "shards slice dense bin-major tensors, which the CSR layout does "
+            "not provide. Drop --nDevices, or write the tensor dense."
+        )
+
     model_specs = args.paramModel or [["Mu"]]
     param_model = ph.load_models(model_specs, indata, **vars(args))
 
@@ -1064,6 +1082,31 @@ def main():
         do_blinding=any(blinded_fits),
         globalImpactsFromJVP=not args.globalImpactsDisableJVP,
     )
+
+    # Not an incompatibility -- these converge to the same answer -- so it is a
+    # warning rather than an entry in the refusal list above, whose value is
+    # that everything in it is a hard no. But the cost is invisible from the
+    # flags and only shows up as a fit that will not finish, so it is said out
+    # loud, with the numbers, before the minimiser starts.
+    if args.nDevices > 1:
+        _hess_per_iter = []
+        if args.minimizerMethod in ("trust-exact", "dogleg", "tf-trust-exact"):
+            _hess_per_iter.append(f"--minimizerMethod {args.minimizerMethod}")
+        if args.asymImpacts and args.asymImpactsHess == "exact":
+            _hess_per_iter.append("--asymImpacts with --asymImpactsHess exact")
+        if _hess_per_iter:
+            _npar = int(ifitter.x.shape[0])
+            _nbatch = -(-_npar // max(1, ifitter.hvp_batch))
+            logger.warning(
+                f"{' and '.join(_hess_per_iter)} needs a dense Hessian on every "
+                f"iteration. Sharded that is assembled from {_npar} "
+                f"Hessian-vector products, {_nbatch} batched graph calls at "
+                f"--hvpBatch {ifitter.hvp_batch}, per iteration -- where "
+                "--minimizerMethod trust-krylov (the default) pays one HVP per "
+                "CG step. The answer is the same; the fit may look like it has "
+                "hung. Consider trust-krylov, a larger --hvpBatch, or "
+                "--asymImpactsHess hvp."
+            )
 
     # mappings for observables and parameters
     if len(args.mapping) == 0 and args.saveHists:

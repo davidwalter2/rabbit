@@ -34,10 +34,16 @@ def _compute_curvature(fitter):
 
         # 2) compute pdLx/pdx, pdLy/pdx and pd^2Lx/pdx^2, pd^2Ly/pdx^2
         with tf.GradientTape(persistent=True) as t_inner:
+            # Same contract as the fit path (Fitter._compute_nll): build the
+            # full yields only if some regularizer actually reads them, and
+            # hand None to the penalties when none does. Without this the scan
+            # objective and the fit objective are different functions, so the
+            # tau it picks optimises something the fit never evaluates.
+            needs_observables = fitter._regularizers_need_observables()
             nexpfullcentral, _, beta = fitter._compute_yields_with_beta(
                 profile=False,
                 compute_norm=False,
-                full=len(fitter.regularizers),
+                full=needs_observables,
             )
 
             nexp = nexpfullcentral[: fitter.indata.nbins]
@@ -49,7 +55,9 @@ def _compute_curvature(fitter):
 
             x = fitter.get_x()
             penalties = [
-                reg.compute_nll_penalty(x, nexpfullcentral)
+                reg.compute_nll_penalty(
+                    x, nexpfullcentral if needs_observables else None
+                )
                 for reg in fitter.regularizers
             ]
             ly = tf.math.log(tf.add_n(penalties))

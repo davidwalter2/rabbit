@@ -487,10 +487,19 @@ def test_bin_by_bin_stat_modes_match_single_device(mode):
     'full' exercises the branch of bbstat.profile_and_apply that reads
     indata.betavar, which the shard view has to expose even in lite mode
     because the read happens before the `and full` short-circuits.
+
+    The Hessian is checked as well as the loss, because that is where the
+    modes differ in kind rather than degree. 'full' profiles beta with a
+    stateful Newton loop -- nbeta.assign_sub inside a tf.while_loop -- and
+    _loss_val_grad_hessp_batch runs k directions of it inside a single
+    tf.vectorized_map against that one shared variable. It is safe because the
+    Newton state depends only on x, which is identical across the k
+    directions, so the solves cannot disagree; comparing only loss_val leaves
+    that unpinned, since the batching happens on the Hessian path alone.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         fname = make_test_tensor(tmpdir)
-        vals = []
+        vals, hessians = [], []
         for ndevices in (1, 2):
             f = _make_fitter(
                 fname, ndevices, noBinByBinStat=False, binByBinStatMode=mode
@@ -499,7 +508,15 @@ def test_bin_by_bin_stat_modes_match_single_device(mode):
             f.set_nobs(f.indata.data_obs)
             v = f.loss_val()
             vals.append(float(v[0] if isinstance(v, (tuple, list)) else v))
+            _, _, hess = f.loss_val_grad_hess()
+            hessians.append(np.asarray(hess))
         np.testing.assert_allclose(vals[1], vals[0], rtol=RTOL)
+        assert hessians[1].shape == hessians[0].shape
+        np.testing.assert_allclose(hessians[1], hessians[0], rtol=1e-9, atol=1e-11)
+        # a batched vectorized_map that let the k directions interfere would
+        # show up here first, since the interference is direction-dependent
+        asym = np.abs(hessians[1] - hessians[1].T).max()
+        assert asym < 1e-9, f"sharded Hessian is not symmetric: max|H - H^T| = {asym:g}"
 
 
 def test_rebuild_frees_the_previous_shard_generation():
@@ -934,3 +951,39 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_lcurve_honours_the_needs_observables_contract():
+    """The L-curve must build and pass yields on the same rule the fit does.
+
+    Regularizer.compute_nll_penalty documents that ``observables`` is None when
+    needs_observables is False, so a penalty that declared it does not read them
+    raises rather than quietly consuming a vector. Fitter._compute_nll and
+    arm_regularizers honour that; rabbit/regularization/lcurve.py was written
+    before the contract and handed every penalty the yields unconditionally.
+
+    That mattered beyond the raise: with the scan passing observables the fit
+    path does not, the scan objective and the fit objective stop being the same
+    function, and the tau it selects optimises something the fit never evaluates.
+
+    Single-device only -- multi-device refuses --lCurveScan / --lCurveOptimize
+    up front -- but it is the same contract, and nothing else in the suite
+    executes lcurve.py at all.
+    """
+    from rabbit.regularization.lcurve import _compute_curvature
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        f = _make_fitter(make_test_tensor(tmpdir), 1)
+        f.set_nobs(f.indata.data_obs)
+        penalty = _ParamOnlyPenalty()
+        f.regularizers = [penalty]
+        f.arm_regularizers()
+        f.tau.assign(0.5)
+
+        # _ParamOnlyPenalty asserts observables is None on every call, so a
+        # violation surfaces here rather than as a wrong curvature
+        curvature = _compute_curvature(f)
+
+        assert penalty.armed >= 1, "regularizer never armed; test is vacuous"
+        curvature = np.asarray(curvature)
+        assert np.all(np.isfinite(curvature)), f"curvature is not finite: {curvature}"
