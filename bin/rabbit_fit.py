@@ -940,6 +940,73 @@ def main():
     if args.eager:
         tf.config.run_functions_eagerly(True)
 
+    # Restrict TF to the requested GPUs *before* the runtime context
+    # initializes: by default TF creates a CUDA context on -- and reserves
+    # the memory of -- every visible GPU, so a single-device fit on a
+    # 4-GPU machine would block all four while using one. On shared
+    # interactive nodes the selection also avoids GPUs another process is
+    # occupying (least-memory-used first); --devices picks explicitly.
+    # Under slurm with --gres this is all moot (CUDA_VISIBLE_DEVICES
+    # already hides other jobs' GPUs). Must run before any op touches the
+    # GPUs; list_physical_devices itself is safe.
+    from rabbit.sharding import pick_physical_gpus
+
+    chosen = pick_physical_gpus(args.nDevices, explicit=args.devices)
+    if chosen is not None:
+        tf.config.set_visible_devices(chosen, "GPU")
+
+    # Multi-device incompatibilities that the sharded Fitter would otherwise
+    # only discover at the point of use -- i.e. after the minimiser and the
+    # postfit Hessian have already run, taking the completed fit down with
+    # them. Checked here so the run ends in seconds with the flags named.
+    if args.nDevices > 1:
+        _md = []
+        if args.doImpacts and not args.noBinByBinStat:
+            # impacts_parms needs a second Hessian at profile=False to split
+            # out the stat-only covariance; the sharded loss supports
+            # profile=True only. Without bin-by-bin stat that branch is
+            # skipped, so --noBinByBinStat is a working combination.
+            _md.append("--doImpacts (unless --noBinByBinStat)")
+        if args.globalImpacts:
+            _md.append("--globalImpacts")
+        if args.gaussianGlobalImpacts:
+            _md.append("--gaussianGlobalImpacts")
+        if args.globalAsymImpacts and args.globalAsymImpactsLinearWarmstart:
+            # The warm start needs dx/dx0, the same all-bins jacobian as
+            # --gaussianGlobalImpacts. --globalAsymImpacts on its own is
+            # repeated minimize() calls and works sharded.
+            _md.append("--globalAsymImpacts with --globalAsymImpactsLinearWarmstart")
+        if any(t > 0 for t in args.toys):
+            _md.append("-t > 0 (toy generation)")
+        if args.fullNll:
+            _md.append("--fullNll")
+        if args.lCurveScan or args.lCurveOptimize:
+            # compute_curvature calls fitter._compute_nll and
+            # _compute_yields_with_beta directly and takes a dense full-bins
+            # jacobian; MultiDeviceFitter overrides none of those, so the
+            # curvature would run unsharded -- and for --lCurveScan it runs
+            # after each per-tau minimize, discarding finished fits mid-scan.
+            _md.append("--lCurveScan / --lCurveOptimize")
+        if args.covarianceFit:
+            # Fitter.__init__ builds a dense [nbins, nbins] tf.linalg.diag when
+            # no data_cov_inv is in the workspace -- ~68 GB at 92144 bins -- and
+            # that runs before init_fit_parms reaches _build_shards, so without
+            # this entry the user gets an allocation failure rather than the
+            # refusal naming the flag.
+            _md.append("--covarianceFit")
+        if args.diagnostics and not args.noBinByBinStat:
+            # loss_val_grad_hess_beta takes a jacobian over the full-length
+            # ubeta on one device; see MultiDeviceFitter.
+            _md.append("--diagnostics (unless --noBinByBinStat)")
+        if _md:
+            raise Exception(
+                "--nDevices > 1 is incompatible with: "
+                + ", ".join(_md)
+                + ". These run over all bins on one device, which is what "
+                "sharding exists to avoid. Drop --nDevices, or rerun the step "
+                "single-device from the fit output."
+            )
+
     # --noHessian skips computing the postfit Hessian, so the dense
     # parameter covariance matrix is never available. Any feature that
     # needs the covariance is incompatible.
@@ -967,6 +1034,12 @@ def main():
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
+    # The GPU selection above has to run before TF may touch a GPU, i.e. before
+    # the logger exists, so it buffers its messages rather than dropping them.
+    from rabbit.sharding import drain_selection_log
+
+    drain_selection_log()
+
     # make list of fits with -1: asimov; 0: fit to data; >=1: toy
     fits = np.concatenate(
         [np.array([x]) if x <= 0 else 1 + np.arange(x, dtype=int) for x in args.toys]
@@ -984,18 +1057,56 @@ def main():
         args.snapshotFile = _os.path.join(args.outpath, f"{stem}_snapshot.hdf5")
         _os.makedirs(args.outpath, exist_ok=True)
 
-    indata = inputdata.FitInputData(args.filename, args.pseudoData)
+    indata = inputdata.FitInputData(
+        args.filename, args.pseudoData, host_memory=args.nDevices > 1
+    )
+
+    # Sparseness is a property of the file, so this cannot join the flag checks
+    # above -- but it still beats _build_shards, which does not raise until
+    # init_fit_parms, inside the Fitter constructor. Refusing here costs the
+    # load and nothing else.
+    if args.nDevices > 1 and indata.sparse:
+        raise Exception(
+            "--nDevices > 1 is incompatible with a sparse input tensor: the "
+            "shards slice dense bin-major tensors, which the CSR layout does "
+            "not provide. Drop --nDevices, or write the tensor dense."
+        )
 
     model_specs = args.paramModel or [["Mu"]]
     param_model = ph.load_models(model_specs, indata, **vars(args))
 
-    ifitter = fitter.Fitter(
+    ifitter = fitter.make_fitter(
         indata,
         param_model,
         args,
         do_blinding=any(blinded_fits),
         globalImpactsFromJVP=not args.globalImpactsDisableJVP,
     )
+
+    # Not an incompatibility -- these converge to the same answer -- so it is a
+    # warning rather than an entry in the refusal list above, whose value is
+    # that everything in it is a hard no. But the cost is invisible from the
+    # flags and only shows up as a fit that will not finish, so it is said out
+    # loud, with the numbers, before the minimiser starts.
+    if args.nDevices > 1:
+        _hess_per_iter = []
+        if args.minimizerMethod in ("trust-exact", "dogleg", "tf-trust-exact"):
+            _hess_per_iter.append(f"--minimizerMethod {args.minimizerMethod}")
+        if args.asymImpacts and args.asymImpactsHess == "exact":
+            _hess_per_iter.append("--asymImpacts with --asymImpactsHess exact")
+        if _hess_per_iter:
+            _npar = int(ifitter.x.shape[0])
+            _nbatch = -(-_npar // max(1, ifitter.hvp_batch))
+            logger.warning(
+                f"{' and '.join(_hess_per_iter)} needs a dense Hessian on every "
+                f"iteration. Sharded that is assembled from {_npar} "
+                f"Hessian-vector products, {_nbatch} batched graph calls at "
+                f"--hvpBatch {ifitter.hvp_batch}, per iteration -- where "
+                "--minimizerMethod trust-krylov (the default) pays one HVP per "
+                "CG step. The answer is the same; the fit may look like it has "
+                "hung. Consider trust-krylov, a larger --hvpBatch, or "
+                "--asymImpactsHess hvp."
+            )
 
     # mappings for observables and parameters
     if len(args.mapping) == 0 and args.saveHists:
