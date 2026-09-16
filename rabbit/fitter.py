@@ -67,6 +67,24 @@ def match_regexp_params(regular_expressions, parameter_names):
     return matched
 
 
+def make_fitter(indata, param_model, options, **kwargs):
+    """Construct the Fitter appropriate for the requested device count.
+
+    The device layout is fixed at initialization, so the choice is a
+    static one: --nDevices > 1 returns the bins-sharded
+    :class:`rabbit.sharding.MultiDeviceFitter` subclass, anything else the
+    plain single-device Fitter. Imported lazily to avoid a module cycle
+    (sharding subclasses Fitter). All keyword arguments are forwarded
+    verbatim, so this wrapper cannot drift from Fitter.__init__'s
+    signature.
+    """
+    if int(getattr(options, "nDevices", 1) or 1) > 1:
+        from rabbit.sharding import MultiDeviceFitter
+
+        return MultiDeviceFitter(indata, param_model, options, **kwargs)
+    return Fitter(indata, param_model, options, **kwargs)
+
+
 # Options from --minimizerMaxiter/--minimizerGtol/--minimizerFtol that each
 # native minimizer actually reads. Anything else passed for these methods is
 # warned about rather than silently dropped (see Fitter.fit).
@@ -85,6 +103,18 @@ BLINDING_DRAW_STD = 5.0
 
 
 class Fitter:
+    # Dynamically-built tf.function wrappers holding un-copyable FuncGraph
+    # state; stripped on deepcopy and rebuilt. Subclasses extend this with
+    # their own dynamic machinery (see rabbit.sharding.MultiDeviceFitter).
+    _DYNAMIC_TF_FUNCS = frozenset(
+        {
+            "loss_val",
+            "loss_val_grad",
+            "loss_val_grad_hessp",
+            "loss_val_grad_hessp_fwdrev",
+            "loss_val_grad_hessp_revrev",
+        }
+    )
     valid_systematic_types = ["log_normal", "normal"]
 
     def __init__(
@@ -113,6 +143,9 @@ class Fitter:
         # outcome can be written to the output. None if the minimizer raised.
         self.minimizer_result = None
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
+        hvp_batch = getattr(options, "hvpBatch", 256)
+        # `or 256` would turn an explicit 0 into the default; test None
+        self.hvp_batch = 256 if hvp_batch is None else int(hvp_batch)
         # Optional parameter preconditioning (see rabbit/preconditioner.py).
         # getattr so callers that build options objects by hand keep working.
         # Parameter snapshots (see rabbit/snapshot.py). Everything the fit has
@@ -251,16 +284,8 @@ class Fitter:
     ):
         self.param_model = param_model
 
-        # Internal (scaled) copy of indata.logk used by the yield-computation
-        # hot path. For systematic_type == "normal" with a non-trivial param
-        # model, the linearized additive variation Δ does not naturally scale
-        # with the param-model factor rnorm(poi), so a ±20% variation defined
-        # at the MC nominal becomes a different relative effect once rnorm
-        # moves away from 1. Pre-multiplying logk by rnorm_init (the param
-        # model evaluated at xparamdefault) restores the relative size of the
-        # variation at the linearization point, without introducing a θ·poi
-        # bilinearity in the hot path. For log_normal systematics the
-        # multiplicative form already has this property so no copy is made.
+        # Param-model scaling of the systematic variations for the
+        # yield-computation hot path; see _init_logk_scaled.
         self._init_logk_scaled()
 
         if self.do_blinding:
@@ -500,14 +525,7 @@ class Fitter:
         }
         # Also strip the dynamically-built loss/grad/HVP tf.function wrappers,
         # which hold un-copyable FuncGraph state and will be rebuilt below.
-        dynamic_tf_funcs = {
-            "loss_val",
-            "loss_val_grad",
-            "loss_val_grad_hessp",
-            "loss_val_grad_hessp_fwdrev",
-            "loss_val_grad_hessp_revrev",
-        }
-        skip = jit_overrides | dynamic_tf_funcs
+        skip = jit_overrides | set(self._DYNAMIC_TF_FUNCS)
         state = {k: v for k, v in self.__dict__.items() if k not in skip}
         cls = type(self)
         obj = cls.__new__(cls)
@@ -1122,6 +1140,14 @@ class Fitter:
 
         self.arm_regularizers()
 
+    def _regularizers_need_observables(self):
+        """Whether any attached regularizer reads the predicted yields.
+
+        Penalties on the parameters alone (see Regularizer.needs_observables)
+        do not, and then the full yields never have to be built for them.
+        """
+        return any(getattr(reg, "needs_observables", True) for reg in self.regularizers)
+
     def arm_regularizers(self):
         """Tell every regularizer about the current parameter layout.
 
@@ -1129,9 +1155,17 @@ class Fitter:
         ``init_fit_parms``.
         """
         xinit = self.get_x()
-        nexp0 = self.expected_yield(full=True)
+        nexp0 = (
+            self.expected_yield(full=True)
+            if self._regularizers_need_observables()
+            else None
+        )
         for reg in self.regularizers:
-            reg.set_expectations(xinit, nexp0, parms=self.parms)
+            reg.set_expectations(
+                xinit,
+                nexp0 if getattr(reg, "needs_observables", True) else None,
+                parms=self.parms,
+            )
         self._regularizers_armed = True
 
     def bayesassign(self):
@@ -1949,55 +1983,91 @@ class Fitter:
         return expvars
 
     def _init_logk_scaled(self):
-        """Build an internal copy of indata.logk for the yield-computation
-        hot path, pre-multiplied per (bin, proc) by the param-model factor
-        evaluated at xparamdefault.
+        """Prepare the param-model scaling of the systematic variations for
+        the yield-computation hot path.
 
         For systematic_type == "log_normal" the multiplicative form
         ``rnorm * exp(θ·logk) * norm`` already carries the param-model
-        scaling through to the variation, so no copy is needed and
+        scaling through to the variation, so nothing is needed and
         self.logk / self.logk_csr alias the indata tensors.
 
         For systematic_type == "normal" the linearized variation
-        ``rnorm * norm + θ·logk`` does not scale with rnorm. We absorb a
-        constant rnorm_init = param_model.compute(xparamdefault) into logk
-        once, so the relative size of an additive variation matches the
-        multiplicative case at the linearization point. The scaling is a
-        constant, so the hot path remains strictly linear in θ.
+        ``rnorm * norm + θ·logk`` does not scale with rnorm, so a constant
+        rnorm_init = param_model.compute(xparamdefault) has to be absorbed
+        into the variation, so that the relative size of an additive
+        variation matches the multiplicative case at the linearization
+        point.
+
+        rnorm_init carries no systematic index, so it factors out of the
+        contraction over systematics:
+
+            sum_s (rnorm_init[b,p] * logk[b,p,s]) * theta[s]
+              == rnorm_init[b,p] * sum_s logk[b,p,s] * theta[s]
+
+        We therefore keep logk aliased and apply the factor to the
+        [nbins, nproc] contraction *result* instead of to the
+        [nbins, nproc, nsyst] input. This is exactly equivalent, and avoids
+        allocating a second full-size copy of logk (and, in sparse mode,
+        rebuilding the CSR matrix) at construction time. The scaling is
+        still a constant, so the hot path remains strictly linear in θ.
         """
+        # scaling factors applied to the contraction result; None when the
+        # multiplicative form already carries the param-model scaling
+        self.rnorm_init = None
+        self.rnorm_init_at_norm = None
+
+        self.logk = self.indata.logk
+        if self.indata.sparse:
+            self.logk_csr = self.indata.logk_csr
+
         if self.indata.systematic_type != "normal" or self.param_model.nparams == 0:
-            self.logk = self.indata.logk
-            if self.indata.sparse:
-                self.logk_csr = self.indata.logk_csr
             return
 
-        rnorm_init = self.param_model.compute(self.param_model.xparamdefault, full=True)
-        rnorm_init = tf.broadcast_to(
-            rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
-        )
+        # compute() consumes PHYSICAL parameter values: everywhere else it is
+        # fed get_poi(), which undoes the storage transform. xparamdefault is
+        # in x-space, so for allowNegativeParam=False -- the default -- it
+        # holds sqrt(mu), and handing it over raw evaluates the model at
+        # sqrt(mu) instead of mu. The factor then comes out at 1/sqrt(mu) of
+        # the value the yield computation uses at the very same point, which
+        # is the linearization point this is supposed to match.
+        #
+        # Only visible when the POI default differs from 1 (in practice
+        # --expectSignal != 1), since sqrt(1) == 1, which is why every test in
+        # the repo bar the ones below runs straight past it.
+        xdef = self.param_model.xparamdefault
+        if not self.param_model.allowNegativeParam:
+            npoi = self.param_model.npoi
+            xdef = tf.concat([tf.square(xdef[:npoi]), xdef[npoi:]], axis=0)
 
-        if self.indata.sparse:
-            # logk dense shape is [norm_nnz, nsyst_or_2nsyst]; each value
-            # at logk.indices[i] = (norm_pos, syst_pos) corresponds to the
-            # (bin, proc) pair stored at norm.indices[norm_pos]. Gather
-            # rnorm_init through this two-level mapping.
-            rnorm_at_norm = tf.gather_nd(rnorm_init, self.indata.norm.indices)
-            scale_per_logk = tf.gather(rnorm_at_norm, self.indata.logk.indices[:, 0])
-            new_values = self.indata.logk.values * scale_per_logk
-            self.logk = tf.SparseTensor(
-                self.indata.logk.indices,
-                new_values,
-                self.indata.logk.dense_shape,
+        # Multi-device only: tf.broadcast_to is not lazy, so this is a real
+        # [nbinsfull, nproc] allocation, made in __init__ before any shard
+        # exists. Unpinned it lands on the default device, _build_shards then
+        # slices it under /CPU:0 -- a device-to-host copy of the whole tensor --
+        # and it stays resident on that one device for the life of the fit.
+        # Smaller than logk by a factor nsyst, but the same failure mode, and it
+        # breaks the invariant FitInputData(host_memory=True) and the host-side
+        # slicing in _build_shards exist to hold. n_devices is set before
+        # super().__init__ precisely so the base constructor can read it; the
+        # getattr covers the plain Fitter, which has no such attribute.
+        # Single-device keeps the default placement and nothing is duplicated.
+        device = "/CPU:0" if int(getattr(self, "n_devices", 1)) > 1 else None
+        with tf.device(device):
+            rnorm_init = self.param_model.compute(xdef, full=True)
+            rnorm_init = tf.broadcast_to(
+                rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
             )
-            self.logk_csr = tf_sparse_csr.CSRSparseMatrix(self.logk)
-        else:
-            # Dense logk: [nbinsfull, nproc, nsyst] symmetric, or
-            # [nbinsfull, nproc, 2, nsyst] asymmetric. Broadcast rnorm_init
-            # over the trailing axes.
-            if self.indata.symmetric_tensor:
-                self.logk = self.indata.logk * rnorm_init[..., None]
+
+            if self.indata.sparse:
+                # The CSR contraction returns one value per non-zero of norm, so
+                # the factor is gathered onto the same [norm_nnz] layout. This is
+                # much smaller than the per-logk-entry scaling it replaces.
+                self.rnorm_init_at_norm = tf.gather_nd(
+                    rnorm_init, self.indata.norm.indices
+                )
             else:
-                self.logk = self.indata.logk * rnorm_init[..., None, None]
+                # Dense: logsnorm is [nbins, nproc], matching rnorm_init directly
+                # (sliced to nbins when masked channels are excluded).
+                self.rnorm_init = rnorm_init
 
     def _compute_yields_noBBB(self, full=True, compute_norm=True):
         # full: compute yields inclduing masked channels
@@ -2054,6 +2124,11 @@ class Fitter:
                 snormnorm_sparse = snormnorm_sparse * rnorm
             else:  # "normal"
                 # values[i] = norm[i] * rnorm[bin, proc] + logsnorm[i]
+                # rnorm_init factors out of the contraction (see
+                # _init_logk_scaled), so it is applied here rather than
+                # being baked into logk.
+                if self.rnorm_init_at_norm is not None:
+                    logsnorm = logsnorm * self.rnorm_init_at_norm
                 snormnorm_sparse = self.indata.norm * rnorm
                 snormnorm_sparse = snormnorm_sparse.with_values(
                     snormnorm_sparse.values + logsnorm
@@ -2107,6 +2182,11 @@ class Fitter:
                 snormnorm = snorm * norm
                 normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
+                # rnorm_init factors out of the contraction (see
+                # _init_logk_scaled), so it is applied here rather than
+                # being baked into logk.
+                if self.rnorm_init is not None:
+                    logsnorm = logsnorm * self.rnorm_init[:nbins]
                 normcentral = norm * rnorm + logsnorm
 
             nexpcentral = tf.reduce_sum(normcentral, axis=-1)
@@ -2397,7 +2477,9 @@ class Fitter:
         nexpfullcentral, _, beta = self._compute_yields_with_beta(
             profile=profile,
             compute_norm=False,
-            full=len(self.regularizers),
+            # only build the full (masked-channel-inclusive) yields if some
+            # regularizer actually reads them
+            full=self._regularizers_need_observables(),
         )
 
         nexp = nexpfullcentral[: self.indata.nbins]
@@ -2416,7 +2498,15 @@ class Fitter:
                 )
             x = self.get_x()
             penalties = [
-                reg.compute_nll_penalty(x, nexpfullcentral) * tf.exp(2 * self.tau)
+                reg.compute_nll_penalty(
+                    x,
+                    (
+                        nexpfullcentral
+                        if getattr(reg, "needs_observables", True)
+                        else None
+                    ),
+                )
+                * tf.exp(2 * self.tau)
                 for reg in self.regularizers
             ]
             lpenalty = tf.add_n(penalties)
@@ -2461,6 +2551,11 @@ class Fitter:
     def _compute_loss(self, profile=True):
         return self._compute_nll(profile=profile)
 
+    # Fitter methods that also run per shard: the shard evaluators are
+    # duck-typed stand-ins (see rabbit.sharding), and binding the class's own
+    # unbound methods onto them shares the yields/NLL mathematics -- both
+    # interpolation forms, both systematic types, the BBB machinery -- with
+    # the single-device path by construction.
     def _make_tf_functions(self):
         # Build tf.function wrappers at instance construction time so that
         # jit_compile and the HVP autodiff mode can be controlled via fit
@@ -2614,6 +2709,97 @@ class Fitter:
         _, _, hess = self.loss_val_grad_hess()
         return hess.__array__()
 
+    def _hessp_batch(self, P):
+        """Hessian-vector products for a batch of directions P: [k, npar].
+
+        vectorized_map is a pfor of width k, not the while_loop that
+        tape.jacobian's non-pfor path builds -- so XLA compiles it without the
+        unrolling that made chunking unusable. Memory scales with k rather than
+        npar, which is the whole point: k = 64 costs ~0.4 GB where vectorising
+        over all 6538 parameters costs 43 GB.
+        """
+
+        def one(p):
+            p = tf.stop_gradient(p)
+            with tf.GradientTape() as t2:
+                with tf.GradientTape() as t1:
+                    val = self._compute_loss()
+                grad = t1.gradient(val, self.x)
+            return t2.gradient(grad, self.x, output_gradients=p)
+
+        return tf.vectorized_map(one, P)
+
+    def hessian_from_hvps(self, block=None, batch=None):
+        """Dense Hessian assembled column by column from Hessian-vector products.
+
+        tape.jacobian vectorises over every parameter at once, holding one
+        [nbins, 9] intermediate each: 43 GB on one device for a 6538-parameter,
+        92144-bin model, and several times that in practice -- unallocatable on
+        a GPU and enough to exhaust a 187 GB host. Yet the *result* is only
+        [npar, npar] (342 MB here): the size is entirely in the intermediates.
+
+        An HVP costs one [npar] vector instead, and in a multi-device fit
+        loss_val_grad_hessp is already sharded -- it is what the minimiser calls
+        every iteration -- so this distributes over the GPUs for free and needs
+        no sharded jacobian of its own. The cost is npar HVPs.
+
+        ``block`` restricts the columns computed, which is what preconditioning
+        wants: it only needs the submatrix over the selected parameters.
+        """
+        n = int(self.x.shape[0])
+        idx = np.arange(n) if block is None else np.asarray(block, dtype=np.int64)
+        k = self.hvp_batch if batch is None else int(batch)
+        out = np.empty((n, idx.size), dtype=np.float64)
+
+        if k > 1:
+            s0 = 0
+            while s0 < idx.size:
+                cols = idx[s0 : s0 + k]
+                basis = np.zeros((cols.size, n), dtype=np.float64)
+                basis[np.arange(cols.size), cols] = 1.0
+                try:
+                    hp = self._hessp_batch_dispatch(
+                        tf.constant(basis, dtype=self.indata.dtype)
+                    )
+                except tf.errors.ResourceExhaustedError:
+                    # The per-batch memory is k * nbins * 9 * 8 in principle,
+                    # but the loss graph holds several bins-shaped tensors at
+                    # once -- measured at ~6.5x that on one model -- so the
+                    # right k is model dependent. Halve and retry rather than
+                    # making the caller guess: this runs once per build, so a
+                    # couple of wasted attempts cost far less than falling back
+                    # to an unpreconditioned fit or losing the covariance.
+                    if k == 1:
+                        raise
+                    k = max(1, k // 2)
+                    # Persist it: the limit is a property of this device and
+                    # model, not of this call, so the postfit Hessian and every
+                    # preconditioner rebuild in the restart loop would otherwise
+                    # re-discover it -- paying the same compile, allocate and
+                    # unwind each time. min() so an explicit oversized batch=
+                    # that shrinks cannot raise a lower standing default.
+                    self.hvp_batch = min(self.hvp_batch, k)
+                    logger.warning(
+                        f"HVP batch too large for the device; retrying with "
+                        f"--hvpBatch {k}"
+                    )
+                    continue
+                out[:, s0 : s0 + cols.size] = np.asarray(hp).T
+                s0 += cols.size
+            return out
+
+        v = np.zeros(n, dtype=np.float64)
+        for c, j in enumerate(idx):
+            v[j] = 1.0
+            _, _, hp = self.loss_val_grad_hessp(tf.constant(v, dtype=self.indata.dtype))
+            out[:, c] = np.asarray(hp)
+            v[j] = 0.0
+        return out
+
+    def _hessp_batch_dispatch(self, P):
+        """Batched HVP; subclasses override to keep the work distributed."""
+        return self._hessp_batch(P)
+
     def _build_preconditioner(self):
         """Preconditioner for the upcoming :meth:`fit`, or an exact no-op.
 
@@ -2651,7 +2837,9 @@ class Fitter:
         except Exception as ex:
             logger.warning(
                 f"Could not compute the reference Hessian for preconditioning ({ex}); "
-                "running unpreconditioned."
+                "running unpreconditioned. On the multi-device path the "
+                "Hessian is assembled from batched HVPs; lower --hvpBatch if "
+                "this is an out-of-memory error."
             )
             return precond.Preconditioner.identity(theta_ref)
 
@@ -2705,7 +2893,8 @@ class Fitter:
             pc = pc_cell[0]
             self.x.assign(pc.to_physical(yval))
             val, grad = self.loss_val_grad()
-            return val.__array__(), pc.grad_to_internal(grad.__array__())
+            grad_y = pc.grad_to_internal(grad.__array__())
+            return val.__array__(), grad_y
 
         def scipy_hessp(yval, pval):
             pc = pc_cell[0]
