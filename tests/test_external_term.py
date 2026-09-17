@@ -271,3 +271,184 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_partial_external_covariance_leaves_uncovered_variances_nan():
+    """A partially-overlapping --externalPostfit must not report prefit widths.
+
+    load_fitresult fills only the intersection of the two parameter sets and
+    leaves the rest of fitter.cov on the prefit diagonal it was initialized
+    with, so diag(cov) is a postfit variance only for the covered parameters.
+    external_cov_mask records which those are; reporting the rest would hand
+    back a prefit width as a postfit uncertainty.
+    """
+    import h5py
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        build_writer().write(outfolder=tmpdir, outfilename="partial_cov")
+        indata_obj = inputdata.FitInputData(os.path.join(tmpdir, "partial_cov.hdf5"))
+        options = make_options()
+        param_model = load_model("Mu", indata_obj)
+        f = fitter.Fitter(indata_obj, param_model, options)
+        f.defaultassign()
+        f.set_nobs(indata_obj.data_obs)
+
+        n = int(f.x.shape[0])
+        assert n > 1, "need more than one parameter for a partial overlap"
+        keep = f.parms.astype(str)[: n - 1]
+
+        ext = os.path.join(tmpdir, "external.hdf5")
+        with h5py.File(ext, "w") as g:
+            g.create_dataset("x", data=np.zeros(len(keep)))
+            g.create_dataset("parms", data=np.array([p.encode() for p in keep]))
+            g.create_dataset("cov", data=np.eye(len(keep)) * 0.25)
+
+        f.load_fitresult(ext, None, profile=False)
+
+        mask = f.external_cov_mask
+        assert mask is not None and mask.sum() == len(keep) and not mask.all()
+
+        diag = np.diag(f.cov.numpy())
+        # the covered block carries the external covariance
+        np.testing.assert_allclose(diag[mask], 0.25)
+        # the uncovered entry is still the prefit variance, NOT a postfit one --
+        # which is why rabbit_fit.py masks it to NaN rather than reporting it
+        assert not np.isclose(diag[~mask][0], 0.25)
+
+
+# ---------------------------------------------------------------------------
+# Guards around --externalPostfit in bin/rabbit_fit.py. Both are plain
+# functions of the arguments (and, for the second, of the loaded covariance),
+# so they are checked here directly rather than by running the driver.
+# ---------------------------------------------------------------------------
+
+
+def _driver():
+    """bin/rabbit_fit.py as an importable module."""
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "_rabbit_fit_for_guards", root / "bin" / "rabbit_fit.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _args(**kwargs):
+    defaults = dict(
+        globalImpacts=False,
+        gaussianGlobalImpacts=False,
+        noHessian=False,
+        noEDM=False,
+        noFit=False,
+        externalPostfit=None,
+    )
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
+# what --toys defaults to: a single fit to data
+DATA_FIT = [0]
+
+
+def test_global_impacts_without_a_possible_covariance_are_refused():
+    """Global impacts need a covariance that these flags can never produce.
+
+    Deciding it from the flags is what lets main() refuse before any work: the
+    equivalent check inside fit() is only reached after minimize(), so raising
+    there costs a completed fit.
+    """
+    refuse = _driver().global_impacts_covariance_refusal
+
+    assert refuse(_args(noHessian=True), DATA_FIT) is None, "nothing was asked for"
+    assert refuse(_args(globalImpacts=True), DATA_FIT) is None, "covariance is computed"
+
+    # --noHessian allocates no covariance at all (Fitter.cov is None), so not
+    # even --externalPostfit can supply one -- load_fitresult refuses it
+    msg = refuse(_args(globalImpacts=True, noHessian=True), DATA_FIT)
+    assert msg and "--noHessian" in msg
+    assert refuse(
+        _args(
+            gaussianGlobalImpacts=True,
+            noHessian=True,
+            externalPostfit="ext.hdf5",
+            noFit=True,
+        ),
+        DATA_FIT,
+    )
+
+    # --noEDM skips computing it for any fit that runs here
+    msg = refuse(_args(globalImpacts=True, noEDM=True), DATA_FIT)
+    assert msg and "--noEDM" in msg
+    # and must not send the reader after a flag they never passed, which is
+    # what naming --noHessian in this message used to do
+    assert "--noHessian" not in msg
+    assert refuse(
+        _args(globalImpacts=True, noEDM=True, externalPostfit="e.hdf5"), DATA_FIT
+    )
+
+    # a job that runs no fit can still read the covariance from the external
+    # result, either because --noFit was passed or because the only "fit" is
+    # the Asimov prefit entry
+    assert (
+        refuse(
+            _args(globalImpacts=True, noEDM=True, externalPostfit="e.hdf5", noFit=True),
+            DATA_FIT,
+        )
+        is None
+    )
+    assert (
+        refuse(_args(globalImpacts=True, noEDM=True, externalPostfit="e.hdf5"), [-1])
+        is None
+    )
+
+
+def test_the_covariance_refusal_runs_before_the_input_is_loaded():
+    """Pins the property the refusal exists for. Moving it below the work it is
+    meant to precede would leave it correct and useless."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "bin" / "rabbit_fit.py").read_text()
+    main_src = src[src.index("def main():") :]
+    assert main_src.index("global_impacts_covariance_refusal(") < main_src.index(
+        "inputdata.FitInputData("
+    ), "the refusal now runs after the input tensor is loaded"
+
+
+def test_partial_external_coverage_refuses_global_impacts():
+    """Partial coverage does not only degrade the uncovered rows.
+
+    load_fitresult fills the intersection BLOCK, so every covered-to-uncovered
+    covariance entry stays zero: an uncovered nuisance contributes exactly zero
+    impact to a COVERED parameter, and the variance it should have carried is
+    reported as data-statistical instead. Nothing in the output looks wrong,
+    which is why this is a refusal and not a warning.
+    """
+    import pytest
+    from wums import logging as wums_logging
+
+    driver = _driver()
+    driver.logger = wums_logging.child_logger("test_external_postfit_variances")
+
+    cov = np.diag([0.25, 0.25, 4.0])
+    partial = SimpleNamespace(cov=cov, external_cov_mask=np.array([True, True, False]))
+
+    for opts in (_args(globalImpacts=True), _args(gaussianGlobalImpacts=True)):
+        with pytest.raises(Exception, match="EVERY parameter"):
+            driver.external_postfit_variances(opts, partial)
+
+    # without them the partial result is still usable: covered variances are
+    # reported, the rest are NaN rather than the prefit width sitting there
+    var = driver.external_postfit_variances(_args(), partial)
+    np.testing.assert_allclose(var[:2], 0.25)
+    assert np.isnan(var[2])
+
+    # full coverage is untouched, impacts or not
+    full = SimpleNamespace(cov=cov, external_cov_mask=np.ones(3, dtype=bool))
+    np.testing.assert_allclose(
+        driver.external_postfit_variances(_args(globalImpacts=True), full),
+        [0.25, 0.25, 4.0],
+    )
