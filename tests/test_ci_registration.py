@@ -37,7 +37,7 @@ PYTEST_FUNC_PREFIX = "test"
 PYTEST_CLASS_PREFIX = "Test"
 
 
-def _job_block(name):
+def _job_block(name, text=None):
     """The lines of the ``name:`` job, delimited by indentation.
 
     Read as text rather than with PyYAML: the CI runner has no yaml module, and
@@ -47,10 +47,16 @@ def _job_block(name):
     The parse is cross-checked against a real YAML parser in
     test_the_text_parse_agrees_with_pyyaml, wherever one is installed.
 
+    Takes the workflow as text so the parser itself can be exercised against
+    fixtures below, on the runner as well as here -- the PyYAML cross-check at
+    the end of this file skips exactly where the parser is load-bearing.
+
     Returns None when there is no such job.
     """
-    with open(WORKFLOW) as f:
-        lines = f.read().splitlines()
+    if text is None:
+        with open(WORKFLOW) as f:
+            text = f.read()
+    lines = text.splitlines()
     out, indent = None, None
     for line in lines:
         if out is None:
@@ -72,24 +78,131 @@ def _test_files():
     return names
 
 
-def _pytest_commands(job):
-    """Shell words of each command in ``job`` that invokes pytest.
+# pytest flags that take back part of the directory the check below just
+# confirmed. Each re-creates #173 by a different door: a file quietly stops
+# running and nothing reports it.
+NARROWING_FLAGS = ("--ignore", "--ignore-glob", "--deselect", "-k", "-m")
 
-    Scans every line of the block rather than only inline ``run:`` values, so a
-    command inside a ``run: |`` block scalar counts too.
+
+def _run_commands(block):
+    """The shell commands in a job block: ``run:`` values and nothing else.
+
+    A step's ``name:`` is prose, and prose is not a command -- scanning every
+    line for the word pytest meant ``name: run pytest over tests just this
+    once`` put a bare ``tests`` token in front of the check while the job ran
+    one file. Both YAML forms are handled: an inline ``run: cmd`` and a block
+    scalar (``run: |``), whose continuation lines are indented under the key.
     """
-    block = _job_block(job)
+    cmds, block_indent = [], None
+    for line in block:
+        stripped = line.strip()
+        if block_indent is not None:
+            if stripped and (len(line) - len(line.lstrip())) <= block_indent:
+                block_indent = None  # the scalar ended; re-read this line
+            else:
+                if stripped:
+                    cmds.append(stripped)
+                continue
+        m = re.match(r"^(\s*)(?:-\s+)?run:\s*(.*)$", line)
+        if not m:
+            continue
+        # a YAML comment needs whitespace before the '#', so this does not
+        # truncate a command that contains one
+        value = re.split(r"\s#", m.group(2), maxsplit=1)[0].strip()
+        if value in ("|", ">", "|-", ">-", "|+", ">+"):
+            block_indent = len(line) - len(line.lstrip())
+        elif value:
+            cmds.append(value)
+    return cmds
+
+
+def _pytest_args(words):
+    """The arguments pytest itself receives, i.e. those after the pytest token.
+
+    ``python -m pytest tests/`` puts a ``-m`` in front of pytest that belongs
+    to python; reading it as pytest's mark selector would flag the repo's own
+    command as narrowing.
+    """
+    for i, word in enumerate(words):
+        if word == "pytest" or word.endswith("/pytest"):
+            return words[i + 1 :]
+    return []
+
+
+def _narrowing_flags(words):
+    args = _pytest_args(words)
+    return [
+        a
+        for a in args
+        for flag in NARROWING_FLAGS
+        if a == flag or a.startswith(flag + "=")
+    ]
+
+
+def _pytest_commands(job, text=None):
+    """Shell words of each command in ``job`` that invokes pytest."""
+    block = _job_block(job, text)
     if block is None:
         return None
     cmds = []
-    for line in block:
-        text = re.sub(r"^-?\s*run:\s*", "", line.split("#", 1)[0].strip())
-        if "pytest" in text:
-            try:
-                cmds.append(shlex.split(text))
-            except ValueError:
-                continue
+    for cmd in _run_commands(block):
+        if "pytest" not in cmd:
+            continue
+        try:
+            cmds.append(shlex.split(cmd))
+        except ValueError:
+            continue
     return cmds
+
+
+def _job_names(text=None):
+    """Top-level job names, read as text (see _job_block)."""
+    if text is None:
+        with open(WORKFLOW) as f:
+            text = f.read()
+    lines = text.splitlines()
+    names, indent = [], None
+    for i, line in enumerate(lines):
+        if re.match(r"^jobs:\s*$", line):
+            indent = None
+            for later in lines[i + 1 :]:
+                if not later.strip() or later.lstrip().startswith("#"):
+                    continue
+                if indent is None:
+                    indent = len(later) - len(later.lstrip())
+                depth = len(later) - len(later.lstrip())
+                if depth < indent:
+                    break
+                m = re.match(rf"^\s{{{indent}}}([A-Za-z0-9_-]+):\s*$", later)
+                if m and depth == indent:
+                    names.append(m.group(1))
+            break
+    return names
+
+
+def _needs(block):
+    """The jobs a block declares in ``needs:``, in any of YAML's three forms."""
+    out = []
+    for i, line in enumerate(block):
+        m = re.match(r"^\s*needs:\s*(.*)$", line)
+        if not m:
+            continue
+        value = re.split(r"\s#", m.group(1), maxsplit=1)[0].strip()
+        if value.startswith("["):
+            out += [
+                v.strip().strip("'\"")
+                for v in value.strip("[]").split(",")
+                if v.strip()
+            ]
+        elif value:
+            out.append(value.strip("'\""))
+        else:  # a block list on the following lines
+            for later in block[i + 1 :]:
+                item = re.match(r"^\s*-\s*(\S+)\s*$", later)
+                if not item:
+                    break
+                out.append(item.group(1).strip("'\""))
+    return out
 
 
 def _collects_under_pytest(name):
@@ -130,48 +243,142 @@ def test_the_unit_test_job_runs_the_whole_suite():
     ), f"the `{JOB}` job is gone; no unit tests run in CI at all (see #173)"
     # Token-wise, not substring: `pytest tests/test_bbstat.py` contains the
     # string "pytest tests/" while covering one file out of twenty.
-    assert any({"tests", "tests/"} & set(words) for words in cmds), (
+    assert any({"tests", "tests/"} & set(_pytest_args(words)) for words in cmds), (
         f"the `{JOB}` job no longer runs pytest over the whole tests/ "
         f"directory, so it does not cover every file; it runs: {cmds!r}"
     )
+    narrowed = [f for words in cmds for f in _narrowing_flags(words)]
+    assert not narrowed, (
+        f"the `{JOB}` job runs pytest over tests/ and then narrows it back "
+        f"down with {narrowed}. That is #173 by a different door: a file stops "
+        "running and nothing reports it, which is what collecting the whole "
+        "directory exists to prevent. Quarantine the case in the test file "
+        "itself -- xfail or skip with a reason -- so the omission stays "
+        "visible where it happens."
+    )
 
 
-def test_the_text_parse_agrees_with_pyyaml():
-    """Wherever PyYAML is installed, hold the hand-rolled parse to it.
+# Workflow shapes the text parser has to get right, exercised directly rather
+# than through main.yml. The PyYAML cross-check at the end of this file is the
+# obvious way to keep a hand-rolled parse honest, but it skips on the CI runner
+# -- which has no yaml module, the very reason the parse is hand-rolled -- so
+# it is inert exactly where the parser is load-bearing. These run everywhere.
+_FIXTURES = {
+    "inline": """
+jobs:
+  all-unit-tests:
+    steps:
+      - name: run the whole test suite
+        run: python -m pytest tests/ -q
+  other:
+    needs: all-unit-tests
+""",
+    "block scalar": """
+jobs:
+  all-unit-tests:
+    steps:
+      - name: run the whole test suite
+        run: |
+          export PYTHONPATH=.
+          python -m pytest tests/ -q
+  other:
+    needs: [all-unit-tests]
+""",
+    # the hole this parser had: prose that mentions pytest and tests is not a
+    # command, but was read as one, and its bare `tests` token satisfied the
+    # coverage check while the job ran a single file
+    "prose name": """
+jobs:
+  all-unit-tests:
+    steps:
+      - name: run pytest over tests just this once
+        run: pytest tests/test_bbstat.py
+""",
+    # covers the directory and then takes most of it back
+    "narrowed": """
+jobs:
+  all-unit-tests:
+    steps:
+      - name: run the whole test suite
+        run: pytest tests/ --ignore=tests/test_native_minimizer.py -k "not restart"
+""",
+}
 
-    The CI runner has no yaml module, so the parser above cannot use one; this
-    keeps it honest anywhere that does, rather than letting a text parse drift
-    from what the workflow actually means.
-    """
-    yaml = pytest.importorskip("yaml", reason="no PyYAML here; parser runs unchecked")
-    with open(WORKFLOW) as f:
-        jobs = yaml.safe_load(f)["jobs"]
 
-    assert (JOB in jobs) == (
-        _pytest_commands(JOB) is not None
-    ), "the text parse disagrees with PyYAML on whether the unit test job exists"
+@pytest.mark.parametrize("label", ["inline", "block scalar"])
+def test_the_parser_reads_a_real_command(label):
+    assert _pytest_commands(JOB, text=_FIXTURES[label]) == [
+        ["python", "-m", "pytest", "tests/", "-q"]
+    ]
 
-    steps = " ".join(s.get("run", "") for s in jobs[JOB].get("steps", []))
-    assert ("pytest" in steps) == bool(
-        _pytest_commands(JOB)
-    ), "the text parse disagrees with PyYAML on whether the job runs pytest"
+
+@pytest.mark.parametrize("label", ["prose name", "narrowed"])
+def test_a_job_that_does_not_cover_the_directory_is_caught(label):
+    """The guard's own failure modes, checked against the parser it uses."""
+    cmds = _pytest_commands(JOB, text=_FIXTURES[label])
+    covers = any({"tests", "tests/"} & set(_pytest_args(w)) for w in cmds)
+    narrowed = [f for w in cmds for f in _narrowing_flags(w)]
+    assert not (covers and not narrowed), (
+        f"the {label!r} workflow would satisfy the coverage check while "
+        f"running less than tests/: {cmds!r}"
+    )
+
+
+def test_python_dash_m_is_not_read_as_a_mark_selector():
+    """`python -m pytest` must not read as `pytest -m`, or the repo's own
+    command counts as narrowing and the check fires on every PR."""
+    assert _narrowing_flags(["python", "-m", "pytest", "tests/", "-q"]) == []
+    assert _narrowing_flags(["pytest", "tests/", "-m", "slow"]) == ["-m"]
 
 
 def test_no_job_depends_on_a_job_that_does_not_exist():
     """The matrix job was removed; seven jobs had named it in `needs`.
 
     GitHub rejects the whole workflow for a dangling dependency, so this would
-    surface as every job failing to start rather than as a test failure.
+    surface as every job failing to start rather than as a test failure. Read
+    as text, like everything else here, so it runs on the runner too.
     """
-    yaml = pytest.importorskip("yaml", reason="no PyYAML here")
+    names = _job_names()
+    assert JOB in names, f"the text parse found no `{JOB}` job: {names}"
+    dangling = [
+        f"{name} -> {n}"
+        for name in names
+        for n in _needs(_job_block(name))
+        if n not in names
+    ]
+    assert not dangling, f"jobs depend on jobs that do not exist: {dangling}"
+
+
+def test_the_text_parse_agrees_with_pyyaml():
+    """Wherever PyYAML is installed, hold the hand-rolled parse to it.
+
+    Supplementary now that the fixtures above pin the parser without it: this
+    catches a drift between the text parse and what the workflow *means*,
+    rather than between the parse and the shapes anticipated for it.
+    """
+    yaml = pytest.importorskip("yaml", reason="no PyYAML here; fixtures cover it")
     with open(WORKFLOW) as f:
         jobs = yaml.safe_load(f)["jobs"]
-    dangling = []
+
+    assert (JOB in jobs) == (
+        _pytest_commands(JOB) is not None
+    ), "the text parse disagrees with PyYAML on whether the unit test job exists"
+    assert sorted(_job_names()) == sorted(jobs), (
+        "the text parse and PyYAML disagree on the job names: "
+        f"{sorted(_job_names())} vs {sorted(jobs)}"
+    )
+
+    steps = " ".join(s.get("run", "") for s in jobs[JOB].get("steps", []))
+    assert ("pytest" in steps) == bool(
+        _pytest_commands(JOB)
+    ), "the text parse disagrees with PyYAML on whether the job runs pytest"
+
     for name, job in jobs.items():
         needs = job.get("needs") or []
         needs = [needs] if isinstance(needs, str) else needs
-        dangling += [f"{name} -> {n}" for n in needs if n not in jobs]
-    assert not dangling, f"jobs depend on jobs that do not exist: {dangling}"
+        assert sorted(_needs(_job_block(name))) == sorted(
+            needs
+        ), f"the text parse and PyYAML disagree on `needs` for {name}"
 
 
 def test_cross_test_imports_are_not_bare():

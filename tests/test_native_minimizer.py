@@ -647,6 +647,13 @@ def test_device_smallest_singular_estimator():
     # are collected rather than raised so the rest of the loop -- and every
     # other assertion in it -- still gates, and only a miss confined to that
     # one regime is excused, at the end.
+    #
+    # The excuse carries a magnitude floor (1e-5) as well as a regime: without
+    # one, ANY undershoot at gap=1e-8 was xfailed, so a regression that only
+    # bites at high condition number -- the regime this estimator exists for --
+    # would have gone unseen, with the lower bound the only gate it has there.
+    # 1e-5 is four orders above the observed -1.7e-8 and four below the 1e-1
+    # scale of a real estimator failure.
     machine_limited = []
     for gap in (1e-8, 1e-4, 1e-1):
         for n in (10, 50):
@@ -658,7 +665,7 @@ def test_device_smallest_singular_estimator():
             s_est, z_est = estimate_smallest_singular_value_device(L)
             s_true = math.sqrt(gap)
             # Rayleigh quotient is an upper bound on sigma_min
-            if s_est < s_true * (1 - 1e-9) and gap <= 1e-8:
+            if s_true * (1 - 1e-5) <= s_est < s_true * (1 - 1e-9) and gap <= 1e-8:
                 machine_limited.append(
                     f"gap={gap:g} n={n}: s_est/s_true - 1 = "
                     f"{s_est / s_true - 1:.2e}"

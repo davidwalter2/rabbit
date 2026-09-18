@@ -28,6 +28,7 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 
 from rabbit import external_likelihood
 from tests.test_external_term import (
@@ -99,8 +100,17 @@ def test_gaussian_scalars_closed_form():
     print("  test_gaussian_scalars_closed_form OK")
 
 
-def test_term_equals_analytic_gaussian(sparse=False):
-    """loss(with term) - loss(without term) == the analytic Gaussian."""
+@pytest.mark.parametrize("sparse", [False, True])
+def test_term_equals_analytic_gaussian(sparse):
+    """loss(with term) - loss(without term) == the analytic Gaussian.
+
+    Parametrized rather than defaulted: pytest drops arguments that have a
+    default from its fixture lookup, so ``(sparse=False)`` collected as ONE
+    test and the sparse external-hessian path -- the case with ``const=`` and
+    ``lognorm=``, which this file exists to pin and test_external_term's
+    SparseHist config does not cover -- ran nowhere once main() stopped being
+    the CI entry point.
+    """
     mu_val, sigma = 0.6, 0.25
     H = np.array([[1.0 / sigma**2]])
     g = -H @ np.array([mu_val])
