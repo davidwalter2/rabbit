@@ -624,7 +624,7 @@ class Fitter:
             )
 
     def set_blinding_offsets(self, blind=True):
-        """Arm or disarm the blinding offsets. See :meth:`Blinding.arm` for
+        """Arm or disarm the blinding offsets. See :meth:`Blinding._arm` for
         what arming does to the frame, and why it never touches ``self.x``.
 
         Callers go through the Fitter rather than through ``self.blinding``
@@ -636,7 +636,7 @@ class Fitter:
         """
         if not self.blinding.enabled:
             return
-        self.blinding.arm(blind)
+        self.blinding._arm(blind)
         if not blind:
             return
 

@@ -79,12 +79,24 @@ def test_the_draw_is_deterministic_in_the_parameter_name():
     )
 
 
-def test_the_draw_separates_real_data_from_a_toy():
-    """The seed folds in whether data_obs is integer, so an Asimov or toy fit
-    does not run in the data fit's frame."""
+def test_the_draw_separates_a_real_data_card_from_an_mc_card():
+    """The seed folds in whether the card's data_obs is integer, so a fit to an
+    Asimov or MC card does not run in a real-data card's frame. It is the
+    card that decides: --pseudoData on a real-data card shares its frame."""
     data = Blinding(FakeIndata(integer_data=True), FakeModel(), enabled=True)
     toy = Blinding(FakeIndata(integer_data=False), FakeModel(), enabled=True)
     assert data.values_poi_add[0] != toy.values_poi_add[0]
+
+
+def test_an_empty_bin_does_not_make_an_mc_card_look_like_data():
+    """An exactly-0.0 bin is integral, and empty bins are common in an MC card.
+    One of them must not put the card in the real-data frame, or a closure fit
+    against known truth reads the data offsets straight off."""
+    data = Blinding(FakeIndata(integer_data=True), FakeModel(), enabled=True)
+    ind = FakeIndata(integer_data=False)
+    ind.data_obs = np.array([0.0, 7.5])
+    mixed = Blinding(ind, FakeModel(), enabled=True)
+    assert data.values_poi_add[0] != mixed.values_poi_add[0]
 
 
 def test_unblind_leaves_exactly_the_named_parameters_in_their_true_frame():
@@ -161,11 +173,11 @@ def test_arming_is_what_puts_the_drawn_offsets_into_the_variables():
     np.testing.assert_array_equal(b.offsets_poi_add.numpy(), np.zeros(1))
     np.testing.assert_array_equal(b.offsets_theta.numpy(), np.zeros(3))
 
-    b.arm(True)
+    b._arm(True)
     np.testing.assert_allclose(b.offsets_poi_add.numpy(), b.values_poi_add)
     np.testing.assert_allclose(b.offsets_theta.numpy(), b.values_theta)
 
-    b.arm(False)
+    b._arm(False)
     np.testing.assert_array_equal(b.offsets_poi_add.numpy(), np.zeros(1))
     np.testing.assert_array_equal(b.offsets_theta.numpy(), np.zeros(3))
 
@@ -178,7 +190,7 @@ def test_apply_shifts_by_the_armed_offset_and_nothing_else():
     np.testing.assert_array_equal(b.apply_poi(xpoi).numpy(), xpoi.numpy())
     np.testing.assert_array_equal(b.apply_theta(theta).numpy(), theta.numpy())
 
-    b.arm(True)
+    b._arm(True)
     np.testing.assert_allclose(
         b.apply_poi(xpoi).numpy(), xpoi.numpy() + b.values_poi_add
     )
@@ -196,7 +208,7 @@ def test_a_disabled_instance_owns_nothing_and_applies_nothing():
 
     xpoi = tf.constant([0.3], dtype=tf.float64)
     assert b.apply_poi(xpoi) is xpoi
-    b.arm(True)  # a no-op, not an AttributeError
+    b._arm(True)  # a no-op, not an AttributeError
     assert b.apply_poi(xpoi) is xpoi
 
 
@@ -205,7 +217,7 @@ def test_the_shard_view_applies_what_the_fitter_applies():
     cannot read a Variable on another device. The two must agree, or a sharded
     fit silently minimises in a different frame from a single-device one."""
     b = make()
-    b.arm(True)
+    b._arm(True)
 
     view = BlindingView(True)
     view.offsets_poi_add = tf.identity(b.offsets_poi_add)
@@ -229,7 +241,7 @@ def test_a_smearing_narrower_than_the_measured_sigma_is_reported(caplog):
     whatever the fit measured. Same draw, same parameter -- only the
     uncertainty it is judged against differs."""
     b = make()
-    b.arm(True)
+    b._arm(True)
 
     sigma_wide = BLINDING_DRAW_STD / 5.0 * 1.1  # smearing < 5 sigma
     with caplog.at_level("WARNING"):
@@ -247,7 +259,7 @@ def test_the_weak_smearing_verdict_prints_no_numbers(caplog):
     """The offset and the width each give the other away, so the warning says
     which POIs and which knob, never how much."""
     b = make(model=FakeModel(blind_additive_scale=1e-9))
-    b.arm(True)
+    b._arm(True)
     with caplog.at_level("WARNING"):
         b.warn_if_weak(np.array([1.0]))
 
@@ -263,7 +275,7 @@ def test_nothing_is_reported_for_a_parameter_that_was_never_blinded(caplog):
     (absent) smearing is too narrow would send the reader after a fix for a
     parameter they deliberately opened."""
     b = make(model=FakeModel(blind_additive_scale=1e-9), unblind=["mu"])
-    b.arm(True)
+    b._arm(True)
     with caplog.at_level("WARNING"):
         b.warn_if_weak(np.array([1.0]))
     assert not any(MSG in r.message for r in caplog.records)
@@ -273,7 +285,7 @@ def test_a_sigma_that_was_not_computed_is_skipped(caplog):
     """Under --noHessian only the POI and NOI variances are solved for and the
     rest are left NaN; a non-finite entry means "no verdict", not "weak"."""
     b = make()
-    b.arm(True)
+    b._arm(True)
     with caplog.at_level("WARNING"):
         b.warn_if_weak(np.array([np.nan]))
     assert not any(MSG in r.message for r in caplog.records)

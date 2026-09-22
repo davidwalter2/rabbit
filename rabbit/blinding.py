@@ -11,7 +11,7 @@ Fitter methods: ``Fitter.x`` is the INTERNAL (blinded) coordinate, and
 and the likelihood see. The offset lives in this object and in the difference
 between those two frames only -- it is never written into ``x``, so nothing
 that reads the fit's own state can subtract a public quantity and recover it
-(see :meth:`Blinding.arm`).
+(see :meth:`Blinding._arm`).
 
 Constructed once per parameter layout by ``Fitter.init_fit_parms``, on the
 :class:`rabbit.bbstat.bbstat.BinByBinStat` pattern: :attr:`Blinding.enabled`
@@ -150,8 +150,11 @@ class Blinding(_OffsetApplication):
         )
         self._init_values(unblind, blinding_group)
 
-    def arm(self, blind=True):
+    def _arm(self, blind=True):
         """Arm or disarm the offsets. Does NOT touch the fit coordinate.
+
+        Private: arm through ``Fitter.set_blinding_offsets``, which follows
+        arming with the check that the blinded start can be evaluated.
 
         Blinding is a change of variables: ``Fitter.x`` is the internal
         (blinded) coordinate and ``Fitter.get_x()`` is the physical value the
@@ -297,8 +300,13 @@ class Blinding(_OffsetApplication):
             ]
             logger.info(f"Unblinding {len(unblind_names)} parameters: {unblind_names}")
 
-        # check if dataset is an integer (i.e. if it is real data or not) and use this to choose the random seed
-        is_dataobs_int = np.sum(
+        # Real data is integer in EVERY bin; an Asimov or MC card is not, but can
+        # still have exactly-0.0 (empty) bins. So require all bins integral: with
+        # "any" such a card would draw the real-data offsets, and a closure fit
+        # against known truth would then read them off as blinded - truth.
+        # This looks at the card's data_obs, not the dataset being fitted: a
+        # --pseudoData fit on a real-data card shares the data fit's frame.
+        is_dataobs_int = np.all(
             np.equal(self.indata.data_obs, np.floor(self.indata.data_obs))
         )
 
