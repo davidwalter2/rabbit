@@ -75,7 +75,7 @@ jobs:
       !github.event.pull_request.draft
     # CERN-network self-hosted runners only (see header comment).
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 30
+    timeout-minutes: 360
     permissions:
       contents: read
       pull-requests: write # review comments on the PR
