@@ -77,6 +77,7 @@ class Fitter:
             "loss_val_grad_hessp",
             "loss_val_grad_hessp_fwdrev",
             "loss_val_grad_hessp_revrev",
+            "_hessp_batch_graph",
         }
     )
     valid_systematic_types = ["log_normal", "normal"]
@@ -2483,7 +2484,8 @@ class Fitter:
         """
         n = int(self.x.shape[0])
         idx = np.arange(n) if block is None else np.asarray(block, dtype=np.int64)
-        k = self.hvp_batch if batch is None else int(batch)
+        # an explicit --hvpBatch 0 means the sequential loop, like 1
+        k = max(1, self.hvp_batch if batch is None else int(batch))
         out = np.empty((n, idx.size), dtype=np.float64)
 
         # the sequential loop below goes through loss_val_grad_hessp, which

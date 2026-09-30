@@ -6,6 +6,7 @@ tape.jacobian, whose memory scales with the parameter count. An explicit
 must give the same matrix, profiled or not, and so the same impacts.
 """
 
+import copy
 import tempfile
 
 import numpy as np
@@ -56,3 +57,27 @@ def test_impacts_match_jacobian(tensor):
         out.append([np.asarray(r) for r in f.impacts_parms(hess)])
     for a, b in zip(*out):
         np.testing.assert_allclose(b, a, rtol=1e-10, atol=1e-14)
+
+
+@pytest.mark.parametrize("batch", [0, 1])
+def test_unbatched_profile_false(tensor, batch):
+    """--hvpBatch 0 or 1 with profile=False, as --doImpacts with BBB asks for.
+
+    The sequential loop only knows the profiled loss, so these go through the
+    batched path one column at a time; an empty batch never advanced.
+    """
+    opts = dict(binByBinStatType="gamma", binByBinStatMode="lite")
+    _, _, h0 = _fitter(tensor, **opts).loss_val_grad_hess(profile=False)
+    _, _, h1 = _fitter(tensor, hvpBatch=batch, **opts).loss_val_grad_hess(profile=False)
+    np.testing.assert_allclose(h1.numpy(), h0.numpy(), rtol=1e-12, atol=1e-12)
+
+
+def test_deepcopy_after_hvp_hessian(tensor):
+    """rabbit_limit.py and the saturated fit deepcopy a fitter after its
+    Hessian, which traces the batched-HVP tf.function; that must be rebuilt,
+    not copied."""
+    f = _fitter(tensor, hvpBatch=2)
+    _, _, h0 = f.loss_val_grad_hess()
+    g = copy.deepcopy(f)
+    _, _, h1 = g.loss_val_grad_hess()
+    np.testing.assert_allclose(h1.numpy(), h0.numpy(), rtol=1e-12, atol=1e-12)
