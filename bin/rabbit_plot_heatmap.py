@@ -6,7 +6,7 @@ import itertools
 import os
 
 import ROOT
-from utilities import common
+from wremnants.utilities import common
 import pdb
 
 import hist

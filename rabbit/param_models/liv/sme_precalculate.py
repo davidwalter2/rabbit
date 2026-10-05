@@ -13,10 +13,8 @@ mass_bins = [15, 30, 40, 45, 50, 55, 60, 65, 70, 76, 106, 110, 115, 120]
 sme_filename = f"SME_{mass_bins[0]}_to_{mass_bins[-1]}_GeV_{len(mass_bins)-1}_bins.pkl"
 sm_filename = f"SM_{mass_bins[0]}_to_{mass_bins[-1]}_GeV_{len(mass_bins)-1}_bins.pkl"
 
-
 n_time_bins = len(pm)
 n_mass_bins = len(mass_bins)-1 
-    
     
     
 add_dir = "precomputed_sigma/"

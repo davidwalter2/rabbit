@@ -648,12 +648,6 @@ def make_plot(
             facecolor_data = "red"  # silver"
             facecolor_alpha_data = 0.5
 
-<<<<<<< HEAD
-        if h_data_stat is not None:
-            var_stat = h_data_stat.values() ** 2
-            h_data_stat = h_data.copy()
-            h_data_stat.variances()[...] = var_stat
-=======
             ax1.fill_between(
                 edges,
                 np.append((nom_data + std_data), ((nom_data + std_data))[-1]),
@@ -667,7 +661,6 @@ def make_plot(
                 linewidth=0.0,
             )
 
->>>>>>> main
             hep.histplot(
                 h_data,
                 histtype="step",
@@ -939,63 +932,6 @@ def make_plot(
             label_unc = default_unc_label if not args.unfoldedXsec else "Prefit unc."
             if args.uncertaintyLabel:
                 label_unc = args.uncertaintyLabel
-<<<<<<< HEAD
-            
-            if diff:
-                
-                ax2.fill_between(
-                    edges,
-                    np.append((nom + std), ((nom + std))[-1]),
-                    np.append((nom - std), ((nom - std))[-1]),
-                    step="post",
-                    facecolor=facecolor,
-                    zorder=0,
-                    hatch=hatchstyle,
-                    edgecolor="k",
-                    linewidth=0.0,
-                    label=label_unc if not args.upperPanelUncertaintyBand else None,
-                )
-                if args.upperPanelUncertaintyBand:
-                    ax1.fill_between(
-                        edges,
-                        np.append((nom + std), ((nom + std))[-1]),
-                        np.append((nom - std), ((nom - std))[-1]),
-                        step="post",
-                        facecolor=facecolor,
-                        zorder=0,
-                        hatch=hatchstyle,
-                        edgecolor="k",
-                        linewidth=0.0,
-                        label=label_unc,
-                    )
-            else:
-
-                ax2.fill_between(
-                    edges,
-                    np.append((nom + std) / nom, ((nom + std) / nom)[-1]),
-                    np.append((nom - std) / nom, ((nom - std) / nom)[-1]),
-                    step="post",
-                    facecolor=facecolor,
-                    zorder=0,
-                    hatch=hatchstyle,
-                    edgecolor="k",
-                    linewidth=0.0,
-                    label=label_unc if not args.upperPanelUncertaintyBand else None,
-                )
-                if args.upperPanelUncertaintyBand:
-                    ax1.fill_between(
-                        edges,
-                        np.append((nom + std), ((nom + std))[-1]),
-                        np.append((nom - std), ((nom - std))[-1]),
-                        step="post",
-                        facecolor=facecolor,
-                        zorder=0,
-                        hatch=hatchstyle,
-                        edgecolor="k",
-                        linewidth=0.0,
-                        label=label_unc,
-                    )
-=======
 
             ax2.fill_between(
                 edges,
@@ -1010,7 +946,6 @@ def make_plot(
                 linewidth=0.0,
                 label=label_unc if not args.upperPanelUncertaintyBand else None,
             )
->>>>>>> main
 
         if (
             args.showVariations in ["lower", "both"]

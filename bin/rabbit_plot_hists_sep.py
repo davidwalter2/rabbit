@@ -15,7 +15,7 @@ from matplotlib import colormaps
 from matplotlib.lines import Line2D
 
 import ROOT
-from utilities import common
+from wremnants.utilities import common
 
 
 import rabbit.io_tools

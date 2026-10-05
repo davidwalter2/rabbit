@@ -15,7 +15,7 @@ from matplotlib import colormaps
 from matplotlib.lines import Line2D
 
 import ROOT
-from utilities import common
+from wremnants.utilities import common
 import pickle
 
 import rabbit.io_tools
@@ -36,7 +36,7 @@ import pdb
 
 import h5py
 
-from utilities.io_tools import input_tools
+from wremnants.utilities.io_tools import input_tools
 
 from wums.boostHistHelpers import (
     divideHists,

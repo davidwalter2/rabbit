@@ -8,7 +8,7 @@ import mplhep as hep
 import numpy as np
 from wums import boostHistHelpers as hh
 from wums import logging, output_tools, plot_tools
-from wremnants.datasets.datagroups import Datagroups
+# from wremnants.datasets.datagroups import Datagroups
 
 from rabbit import debugdata, inputdata, parsing
 

@@ -4,7 +4,7 @@ from rabbit.param_models.liv.sme_constants import *
 from rabbit.param_models.liv.sme_functions import *
 
 import pdb
-from scripts.plotting.uncertainty_tools import *
+from scripts.plotting.liv_variation_helpers import *
 from rabbit.param_models.param_model import ParamModel
 import tensorflow as tf
 
