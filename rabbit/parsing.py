@@ -249,6 +249,7 @@ def common_parser():
         choices=[
             "trust-krylov",
             "trust-exact",
+            "trust-constr",
             "tf-trust-exact",
             "tf-trust-ncg",
             "tf-trust-krylov",
@@ -271,7 +272,10 @@ def common_parser():
         "trust-krylov algorithm): Lanczos on device with the subproblem "
         "solved to optimality within the Krylov subspace via host-side "
         "tridiagonal solves, reusing the radius-independent Krylov data "
-        "across re-solves after rejected steps",
+        "across re-solves after rejected steps. 'trust-constr' additionally "
+        "honours the --constraints as HARD constraints (every -r term stays "
+        "in the loss); pass --minimizerGtol (its only reachable convergence "
+        "test) and --earlyStopping >= 20 or a --minimizerMaxiter cap",
     )
     parser.add_argument(
         "--nDevices",
@@ -503,6 +507,53 @@ def common_parser():
         "(2.22e-9 for L-BFGS-B). Ignored by methods that don't honor 'ftol'.",
     )
     parser.add_argument(
+        "--minimizerXtol",
+        type=float,
+        default=None,
+        help="trust-constr only: trust-radius tolerance, options={'xtol': X}. "
+        "Unset it inherits rabbit's tol=0.0, and then a collapsed trust radius "
+        "can never end a barrier subproblem, so the barrier parameter stops "
+        "decreasing and the fit stalls ~barrier_parameter above the constrained "
+        "minimum, a distance ~barrier/multiplier inside an active face. "
+        "1e-10 is a reasonable value.",
+    )
+    parser.add_argument(
+        "--minimizerBarrierTol",
+        type=float,
+        default=None,
+        help="trust-constr only: options={'barrier_tol': X}. The fit then also "
+        "stops (status 2) once the trust radius is below --minimizerXtol AND the "
+        "barrier parameter (~ the NLL gap to the constrained minimum per active "
+        "constraint) is below X. Unset (tol=0.0) that exit can never fire.",
+    )
+    parser.add_argument(
+        "--minimizerInitialBarrier",
+        type=float,
+        default=None,
+        help="trust-constr only: options={'initial_barrier_parameter': X}, the "
+        "interior-point barrier parameter mu of the first barrier subproblem. "
+        "Unset uses scipy's default, 0.1. On an active face the barrier optimum "
+        "sits ~mu/|multiplier| inside it, and mu is only reduced (x0.2) once a "
+        "subproblem converges, so a large mu0 can hold a long fit at mu0. "
+        "1e-3 is a reasonable value for a start near the constrained minimum.",
+    )
+    parser.add_argument(
+        "--minimizerInitialBarrierTol",
+        type=float,
+        default=None,
+        help="trust-constr only: options={'initial_barrier_tolerance': X}, the "
+        "optimality tolerance of the first barrier subproblem. Unset uses "
+        "scipy's default, 0.1.",
+    )
+    parser.add_argument(
+        "--minimizerInitialTrRadius",
+        type=float,
+        default=None,
+        help="trust-constr only: options={'initial_tr_radius': X}, the initial "
+        "trust radius (in rabbit's internal coordinates). Unset uses scipy's "
+        "default, 1.0.",
+    )
+    parser.add_argument(
         "--forceLinear",
         default=False,
         action="store_true",
@@ -701,6 +752,27 @@ def common_parser():
         As argument, specify the regulaization defined in rabbit/regularization/, followed by a mapping using the same syntax as discussed above. 
         e.g. '-r SVD Select ch0_masked' to apply SVD regularization on the channel 'ch0_masked' or '-r SVD Project ch0 pt' for the 1D projection to pt.
         Custom regularization can be specified with the full path e.g. '-r custom_regularization.MyCustomRegularization Project ch0 pt'.
+        """,
+    )
+    parser.add_argument(
+        "--constraintActiveTol",
+        type=float,
+        default=1e-5,
+        help="With --constraints: a row within this distance of a bound (in the row's own units) at the post-fit point, "
+        "with a multiplier of the binding sign, counts as an active face. Active faces are held in the post-fit "
+        "covariance ('cov'; 'cov_released' holds them free) and in the EDM.",
+    )
+    parser.add_argument(
+        "--constraints",
+        nargs="+",
+        action="append",
+        default=[],
+        help="""
+        Hard constraints lower <= c(x) <= upper on any fit parameters (POIs, model parameters, nuisances), honoured
+        exactly by --minimizerMethod trust-constr (an error with any other minimizer). Specify a class from
+        rabbit/constraints/ followed by its arguments, e.g. "--constraints Bounds 'lambda2_nu>=0' '-1<=bkg_norm<=1'"
+        (quote the tokens), or a custom subclass of rabbit.constraints.constraints.Constraints by its full path, e.g.
+        '--constraints my_module.MyConstraints key=value'. Can be given multiple times.
         """,
     )
 

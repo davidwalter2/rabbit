@@ -15,6 +15,8 @@ from rabbit.bbstat.bbstat import BinByBinStat
 from rabbit.blinding import Blinding
 from rabbit.callbacks import RESTART_MIN_IMPROVEMENT, FitterCallback, merge_callbacks
 from rabbit.common import match_regexp_params
+from rabbit.constraints import postfit as constraints_postfit
+from rabbit.constraints import scipy_adapter
 from rabbit.impacts import (
     asym_impacts,
     global_asym_impacts,
@@ -55,6 +57,10 @@ def make_fitter(indata, param_model, options, **kwargs):
         return MultiDeviceFitter(indata, param_model, options, **kwargs)
     return Fitter(indata, param_model, options, **kwargs)
 
+
+# scipy methods that honour hard constraints (--constraints,
+# rabbit.constraints.Constraints).
+CONSTRAINED_METHODS = ("trust-constr",)
 
 # Options from --minimizerMaxiter/--minimizerGtol/--minimizerFtol that each
 # native minimizer actually reads. Anything else passed for these methods is
@@ -103,6 +109,18 @@ class Fitter:
         self.minimizer_maxiter = getattr(options, "minimizerMaxiter", None)
         self.minimizer_gtol = getattr(options, "minimizerGtol", None)
         self.minimizer_ftol = getattr(options, "minimizerFtol", None)
+        self.minimizer_xtol = getattr(options, "minimizerXtol", None)
+        self.minimizer_barrier_tol = getattr(options, "minimizerBarrierTol", None)
+        # trust-constr interior-point start: None -> scipy's default
+        self.minimizer_tc_init = {
+            "initial_barrier_parameter": getattr(
+                options, "minimizerInitialBarrier", None
+            ),
+            "initial_barrier_tolerance": getattr(
+                options, "minimizerInitialBarrierTol", None
+            ),
+            "initial_tr_radius": getattr(options, "minimizerInitialTrRadius", None),
+        }
         # scipy's OptimizeResult from the last fit(), so the convergence
         # outcome can be written to the output. None if the minimizer raised.
         self.minimizer_result = None
@@ -227,6 +245,17 @@ class Fitter:
             covarianceFit=self.covarianceFit,
             data_cov_inv=self.data_cov_inv,
         )
+
+        # Hard constraints (rabbit.constraints.Constraints, --constraints) for
+        # the constrained minimizers. Separate from the regularizers: those are
+        # terms of -ln(L) and stay in the loss under every minimizer. Set here,
+        # NOT in init_fit_parms: like the param model they must survive a
+        # re-init (the saturated test re-runs init_fit_parms with a composite
+        # model, and its sub-fit must be constrained like the nominal one);
+        # arm_regularizers re-resolves their positions for the new layout.
+        self.constraints = []
+        # what build_scipy_constraints kept (rows, bounds, labels); None = not built
+        self._constraint_info = None
 
         # --- fit params
         self.init_fit_parms(
@@ -865,6 +894,243 @@ class Fitter:
                 parms=self.parms,
             )
         self._regularizers_armed = True
+        # The hard constraints resolve their positions by name too, so every
+        # site that re-arms after a layout change (defaultassign, the saturated
+        # test's re-init) covers them as well.
+        for con in self.constraints:
+            con.set_layout(self.parms)
+
+    # ------------------------------------------------------------------
+    # Functions of the PHYSICAL parameters, evaluated at a point given in the
+    # fitter's own coordinate (the frame of self.x): fn(get_x()), so blinding
+    # offsets, the POI positivity transform and the frozen-parameter
+    # stop_gradient apply exactly as in the likelihood. Used by the hard
+    # constraints (rabbit.constraints); the optimizer plumbing and the
+    # post-fit algebra live there. self.x is restored afterwards: scipy calls
+    # these at trial points it may reject.
+    # ------------------------------------------------------------------
+
+    def _with_x(self, xval, fn):
+        """Evaluate ``fn()`` with self.x temporarily set to ``xval``."""
+        xsave = self.x.numpy()
+        try:
+            self.x.assign(np.asarray(xval, dtype=xsave.dtype))
+            return fn()
+        finally:
+            self.x.assign(xsave)
+
+    def _zero_frozen_columns(self, a, axis=-1):
+        if len(self.frozen_indices):
+            idx = [slice(None)] * a.ndim
+            idx[axis] = np.asarray(self.frozen_indices, dtype=int)
+            a[tuple(idx)] = 0.0
+        return a
+
+    def eval_physical(self, fn, xval, jacobian=False):
+        """``fn(get_x())`` at ``xval`` (``fn`` returns a 1-D tensor).
+
+        With ``jacobian=True`` also its Jacobian [m, n] with respect to the
+        fitter coordinate. Frozen columns are zero: besides the stop_gradient
+        in get_x they are zeroed explicitly, because a constrained minimizer
+        has a second handle on a variable -- its constraint Jacobian column --
+        and with no objective gradient opposing it would move a "frozen"
+        parameter freely (observed 2026-08-13: lambda_inf 1.0 -> 17.6).
+        """
+
+        def values():
+            return tf.reshape(tf.cast(fn(self.get_x()), self.x.dtype), [-1])
+
+        if not jacobian:
+            return self._with_x(xval, lambda: values().numpy())
+
+        def val_jac():
+            with tf.GradientTape(persistent=True) as tape:
+                vals = values()
+            jac = tape.jacobian(
+                vals,
+                self.x,
+                unconnected_gradients=tf.UnconnectedGradients.ZERO,
+                experimental_use_pfor=False,
+            )
+            return vals.numpy(), jac.numpy()
+
+        vals, jac = self._with_x(xval, val_jac)
+        return vals, self._zero_frozen_columns(jac)
+
+    def hvp_physical(self, fn, xval, v):
+        """The Hessian of ``v . fn(get_x())`` at ``xval``, as a LinearOperator.
+
+        Hessian-vector products by forward-over-back autodiff, frozen rows and
+        columns zero. For the constraints this is the term trust-constr needs
+        in the Hessian of the Lagrangian; without it scipy falls back to a
+        BFGS estimate that starts as a scaled identity over ALL parameters
+        (~37*I at the first update in the 2026-10-13 tests) while the true term
+        lives on the few parameters the constraints read, so every step is
+        over-damped and the barrier stalls.
+        """
+        xval = np.array(xval, dtype=np.float64, copy=True)
+        w = tf.constant(np.asarray(v, dtype=np.float64), dtype=self.x.dtype)
+        frozen = np.asarray(self.frozen_indices, dtype=int)
+        n = int(self.x.shape[0])
+
+        def matvec(direction):
+            d = np.array(np.ravel(direction), dtype=np.float64, copy=True)
+            if len(frozen):
+                d[frozen] = 0.0
+
+            def hv():
+                dt = tf.constant(d, dtype=self.x.dtype)
+                with tf.GradientTape() as outer:
+                    with tf.GradientTape() as inner:
+                        vals = tf.reshape(tf.cast(fn(self.get_x()), self.x.dtype), [-1])
+                        weighted = tf.tensordot(vals, w, axes=1)
+                    grad = inner.gradient(
+                        weighted,
+                        self.x,
+                        unconnected_gradients=tf.UnconnectedGradients.ZERO,
+                    )
+                return outer.gradient(
+                    grad,
+                    self.x,
+                    output_gradients=dt,
+                    unconnected_gradients=tf.UnconnectedGradients.ZERO,
+                ).numpy()
+
+            out = self._with_x(xval, hv)
+            if len(frozen):
+                out[frozen] = 0.0
+            return out
+
+        return scipy.sparse.linalg.LinearOperator(
+            (n, n), matvec=matvec, rmatvec=matvec, dtype=np.float64
+        )
+
+    def hess_physical(self, fn, xval, v, cols=None):
+        """Dense Hessian of ``v . fn(get_x())`` at ``xval``, on ``cols``.
+
+        [n, n], zero outside ``cols`` x ``cols`` (default: every floating
+        parameter) and on frozen rows/columns. One backward pass per column.
+        """
+        n = int(self.x.shape[0])
+        if cols is None:
+            cols = np.asarray(self.floating_indices, dtype=int)
+        cols = np.setdiff1d(np.asarray(cols, dtype=int), self.frozen_indices)
+        out = np.zeros((n, n))
+        if not len(cols):
+            return out
+        w = tf.constant(np.asarray(v, dtype=np.float64), dtype=self.x.dtype)
+        idx = tf.constant(cols.astype(np.int32))
+
+        def rows():
+            with tf.GradientTape(persistent=True) as outer:
+                with tf.GradientTape() as inner:
+                    vals = tf.reshape(tf.cast(fn(self.get_x()), self.x.dtype), [-1])
+                    weighted = tf.tensordot(vals, w, axes=1)
+                grad = inner.gradient(
+                    weighted, self.x, unconnected_gradients=tf.UnconnectedGradients.ZERO
+                )
+                gsub = tf.gather(grad, idx)
+            return outer.jacobian(
+                gsub,
+                self.x,
+                unconnected_gradients=tf.UnconnectedGradients.ZERO,
+                experimental_use_pfor=False,
+            ).numpy()
+
+        out[cols] = self._zero_frozen_columns(self._with_x(xval, rows))
+        return 0.5 * (out + out.T)
+
+    def _constraints_fn(self, x):
+        """All --constraints rows of the physical vector ``x``, concatenated."""
+        return tf.concat(
+            [
+                tf.reshape(tf.cast(c.values(x), self.x.dtype), [-1])
+                for c in self.constraints
+            ],
+            axis=0,
+        )
+
+    def _constraint_bounds(self):
+        """(lower, upper, labels) of all --constraints rows."""
+        lower = np.concatenate(
+            [
+                np.reshape(np.asarray(c.lower, np.float64), [-1])
+                for c in self.constraints
+            ]
+        )
+        upper = np.concatenate(
+            [
+                np.reshape(np.asarray(c.upper, np.float64), [-1])
+                for c in self.constraints
+            ]
+        )
+        labels = [str(lab) for c in self.constraints for lab in c.labels]
+        return lower, upper, labels
+
+    def _constraint_columns(self):
+        """Union of the declared parameter_indices; None if any is undeclared."""
+        cols = []
+        for c in self.constraints:
+            idx = c.parameter_indices()
+            if idx is None:
+                return None
+            cols.extend(int(i) for i in idx)
+        return np.unique(np.asarray(cols, dtype=int))
+
+    def build_scipy_constraints(self, xstart, to_physical=None):
+        """The --constraints rows as scipy NonlinearConstraints, see
+        :func:`rabbit.constraints.scipy_adapter.build_nonlinear_constraints`."""
+        if not len(self.constraints):
+            self._constraint_info = None
+            return []
+        lower, upper, labels = self._constraint_bounds()
+        cons, info = scipy_adapter.build_nonlinear_constraints(
+            lambda x: self.eval_physical(self._constraints_fn, x, jacobian=True),
+            lambda x, v: self.hvp_physical(self._constraints_fn, x, v),
+            xstart,
+            lower,
+            upper,
+            labels,
+            to_physical=to_physical,
+        )
+        self._constraint_info = info
+        return cons
+
+    def constrained_postfit(self, grad, hess, active_tol=1e-5):
+        """Face-held post-fit at the current self.x, see
+        :func:`rabbit.constraints.postfit.face_held_covariance`."""
+        x = self.x.numpy()
+        cval, J = self.eval_physical(self._constraints_fn, x, jacobian=True)
+        lower, upper, labels = self._constraint_bounds()
+        cols = self._constraint_columns()
+        if cols is None:
+            logger.info(
+                "[constraints] a Constraints object declares no parameter_indices; "
+                "the post-fit constraint Hessian is taken over every floating "
+                "parameter"
+            )
+        base = (
+            self.cov.numpy()
+            if getattr(self, "cov", None) is not None
+            else np.diag(self.var_prefit.numpy())
+        )
+        return constraints_postfit.face_held_covariance(
+            grad,
+            hess,
+            cval,
+            J,
+            lower,
+            upper,
+            labels,
+            lambda v: self.hess_physical(self._constraints_fn, x, v, cols),
+            floating=(
+                np.asarray(self.floating_indices, dtype=int)
+                if len(self.frozen_params) > 0
+                else None
+            ),
+            cov_base=base,
+            active_tol=active_tol,
+        )
 
     def bayesassign(self):
         # Sample the parameter values from their priors: width sqrt(1/cw)
@@ -2675,7 +2941,36 @@ class Fitter:
         # transform was built.
         xval = pc_cell[0].from_physical(self.x.numpy())
 
-        if self.minimizer_method in [
+        if len(self.constraints) and self.minimizer_method not in CONSTRAINED_METHODS:
+            raise ValueError(
+                f"--constraints needs a constrained minimizer "
+                f"({', '.join(CONSTRAINED_METHODS)}); --minimizerMethod "
+                f"{self.minimizer_method} would silently ignore them."
+            )
+        if self.minimizer_method in CONSTRAINED_METHODS:
+            # Constrained trust region: the same hessp structure as
+            # trust-krylov (so 3700 parameters stay tractable), plus the
+            # --constraints rows as a NonlinearConstraint. The constraint
+            # callables map scipy's iterate back by a pure shift, so the
+            # preconditioner (a general linear transform) must be off.
+            if pc_cell[0].enabled:
+                raise ValueError(
+                    f"--minimizerMethod {self.minimizer_method} does not support "
+                    "--precondition (the constraint Jacobian is not transformed "
+                    "to internal coordinates)."
+                )
+            info_minimize = dict(hessp=scipy_hessp)
+            cons = self.build_scipy_constraints(
+                pc_cell[0].to_physical(xval),
+                to_physical=lambda yv: pc_cell[0].to_physical(yv),
+            )
+            if cons:
+                info_minimize["constraints"] = cons
+            v0, _ = self.loss_val_grad()
+            logger.info(
+                f"[minimize] {self.minimizer_method} start loss = " f"{float(v0):.10f}"
+            )
+        elif self.minimizer_method in [
             "trust-krylov",
             "trust-ncg",
         ]:
@@ -2701,6 +2996,31 @@ class Fitter:
             sci_opts["gtol"] = float(self.minimizer_gtol)
         if self.minimizer_ftol is not None:
             sci_opts["ftol"] = float(self.minimizer_ftol)
+        if self.minimizer_method in CONSTRAINED_METHODS:
+            if self.minimizer_xtol is not None:
+                sci_opts["xtol"] = float(self.minimizer_xtol)
+            if self.minimizer_barrier_tol is not None:
+                sci_opts["barrier_tol"] = float(self.minimizer_barrier_tol)
+            for k, v in self.minimizer_tc_init.items():
+                if v is not None:
+                    sci_opts[k] = float(v)
+            if "xtol" not in sci_opts:
+                logger.warning(
+                    "[minimize] trust-constr without --minimizerXtol: a "
+                    "collapsed trust radius cannot end a barrier subproblem, "
+                    "so the barrier may stall and leave the fit ~barrier "
+                    "parameter above the constrained minimum."
+                )
+        elif (
+            self.minimizer_xtol is not None
+            or self.minimizer_barrier_tol is not None
+            or any(v is not None for v in self.minimizer_tc_init.values())
+        ):
+            logger.warning(
+                "--minimizerXtol/--minimizerBarrierTol/--minimizerInitialBarrier/"
+                "--minimizerInitialBarrierTol/--minimizerInitialTrRadius are "
+                "trust-constr only; ignored"
+            )
         logger.info(f"[minimize] method={self.minimizer_method} options={sci_opts}")
 
         # The native minimizers take gtol and maxiter and nothing else, so any
@@ -2802,7 +3122,10 @@ class Fitter:
                     # minimizer could have called the loss or hessp functions with "random" values, so restore the
                     # state from the end of the last iteration before the exception
                     xval = cb.xval
-                    self.minimizer_result = None
+                    # An early stop throws scipy's result away; for a
+                    # constrained fit keep the KKT measures of the last
+                    # accepted iterate (the one xval holds) instead.
+                    self.minimizer_result = getattr(cb, "last_state", None)
                     if not cb.stopped_early:
                         # a real failure, not a stall: surface it rather than
                         # letting a broken callback look like a converged fit
@@ -2882,16 +3205,57 @@ class Fitter:
         res = self.minimizer_result
         if res is None:
             return None
-        return {
+        out = {
             "success": bool(getattr(res, "success", False)),
             "status": int(getattr(res, "status", -1)),
             "nit": int(getattr(res, "nit", -1)),
             "nfev": int(getattr(res, "nfev", -1)),
             "message": str(getattr(res, "message", "")),
         }
+        # Constrained runs: at an active constraint grad f is balanced by the
+        # constraint forces, so EDM says nothing. scipy's own test is
+        #     optimality < gtol and constr_violation < gtol  ->  status 1
+        # with optimality = ||grad f - J^T v||_inf (KKT residual) and
+        # constr_violation = max(0, lb - c). `v` holds the Lagrange
+        # multipliers (strongly vs weakly active constraints).
+        for k in ("optimality", "constr_violation", "barrier_parameter", "tr_radius"):
+            v = getattr(res, k, None)
+            if v is not None:
+                out[k] = float(v)
+        mult = getattr(res, "v", None)
+        if mult is not None:
+            try:
+                out["multipliers"] = [
+                    float(m) for m in np.concatenate([np.atleast_1d(m) for m in mult])
+                ]
+            except Exception:
+                pass
+        info = self._constraint_info
+        if len(self.constraints) and info is not None and "labels" in info:
+            vals = self.eval_physical(self._constraints_fn, self.x.numpy())
+            out["constraint_values"] = [float(c) for c in vals[info["live"]]]
+            out["constraint_lower_bounds"] = [float(c) for c in info["lower"]]
+            out["constraint_upper_bounds"] = [float(c) for c in info["upper"]]
+            out["constraint_labels"] = list(info["labels"])
+        return out
 
     def minimize(self):
-        if self.is_linear:
+        if self.is_linear and len(self.constraints):
+            if self.force_linear:
+                raise ValueError(
+                    "--forceLinear and --constraints: --forceLinear takes a single "
+                    "Gaussian step even when the loss is not quadratic (for an "
+                    "outer re-linearisation), which no constrained fit can "
+                    "reproduce. Drop one of the two."
+                )
+            # A quadratic loss with constraints is a constrained problem the
+            # closed-form solve below cannot honour: minimise it iteratively
+            # instead (fit() requires a constrained minimizer).
+            logger.info(
+                "The likelihood is purely quadratic, but --constraints are set: "
+                "minimising iteratively instead of the closed-form solve"
+            )
+        if self.is_linear and not len(self.constraints):
             if self.compute_cov:
                 logger.info(
                     "Likelihood is purely quadratic, solving by Cholesky decomposition instead of iterative fit"
