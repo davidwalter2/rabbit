@@ -3321,7 +3321,22 @@ class Fitter:
 
         return callback
 
-    def nll_scan(self, param, scan_range, scan_points, use_prefit=False):
+    # Per-point diagnostics collected by nll_scan under save_detail, in the
+    # column order of detail["diagnostics"]. rabbit_fit.py passes this tuple to
+    # Workspace.add_nll_scan_detail_hists as the diagnostic axis labels.
+    SCAN_DETAIL_FIELDS = (
+        "edmval",
+        "grad_max_abs",
+        "success",
+        "status",
+        "nit",
+        "nfev",
+        "wall_s",
+    )
+
+    def nll_scan(
+        self, param, scan_range, scan_points, use_prefit=False, save_detail=False
+    ):
         # make a likelihood scan for a single parameter
         # assuming the likelihood is minimized
 
@@ -3341,11 +3356,58 @@ class Fitter:
         dnlls = np.full(nscans, np.nan)
         scan_vals = np.zeros(nscans)
 
+        nparms = int(self.x.shape[0])
+        if save_detail:
+            detail = {
+                "x": np.full((nscans, nparms), np.nan),
+                "diagnostics": np.full((nscans, len(self.SCAN_DETAIL_FIELDS)), np.nan),
+                "messages": [""] * nscans,
+            }
+        else:
+            detail = None
+
+        def _record(islot, wall_s):
+            """Per-point parameter vector and convergence diagnostics.
+
+            Costs one gradient evaluation plus one CG solve against the
+            Hessian -- small next to the point's own profile minimisation
+            (tens of trust-region iterations), but not free, which is why it
+            is opt-in.
+            """
+            detail["x"][islot] = self.x.numpy()
+            _, grad = self.loss_val_grad()
+            # frozen parameters enter the loss through tf.stop_gradient, so
+            # their gradient entries and Hessian rows/columns are exactly zero:
+            # both numbers below only see the parameters that were minimised
+            try:
+                edmval = self.edmval_cov_rows_hessfree(grad, [])[0]
+            except ValueError as e:
+                # one bad point should not lose the scan
+                logger.warning(f"{e}; reporting NaN edmval for this scan point")
+                edmval = float("nan")
+            status = self.minimizer_status() or {}
+            values = {
+                "edmval": edmval,
+                "grad_max_abs": float(np.max(np.abs(grad.numpy()), initial=0.0)),
+                "success": float(status.get("success", np.nan)),
+                "status": float(status.get("status", np.nan)),
+                "nit": float(status.get("nit", np.nan)),
+                "nfev": float(status.get("nfev", np.nan)),
+                "wall_s": wall_s,
+            }
+            for k, field in enumerate(self.SCAN_DETAIL_FIELDS):
+                detail["diagnostics"][islot, k] = values[field]
+            detail["messages"][islot] = str(status.get("message", ""))
+
         # save delta nll w.r.t. global minimum
         nll_best = self.reduced_nll().numpy()
         # set central point
         dnlls[nscans // 2] = 0
         scan_vals[nscans // 2] = xval[idx].numpy()
+        if save_detail:
+            # no fit runs here: the caller's minimum IS the central point, so
+            # its minimizer_status belongs to whatever fit produced it
+            _record(nscans // 2, float("nan"))
         # scan positive side and negative side independently to profit from previous step
         for sign in [-1, 1]:
             param_scan_values = xval[idx].numpy() + sign * param_offsets
@@ -3356,11 +3418,17 @@ class Fitter:
                 logger.debug(f"Now at i={i} x={ixval}")
                 self.x.assign(tf.tensor_scatter_nd_update(self.x, [[idx]], [ixval]))
 
+                _t0 = time.perf_counter()
                 self.fit()
+                _wall = time.perf_counter() - _t0
 
-                dnlls[nscans // 2 + sign * i] = self.reduced_nll().numpy() - nll_best
+                islot = nscans // 2 + sign * i
+                dnlls[islot] = self.reduced_nll().numpy() - nll_best
 
-                scan_vals[nscans // 2 + sign * i] = ixval
+                scan_vals[islot] = ixval
+
+                if save_detail:
+                    _record(islot, _wall)
 
             # reset x to original state
             self.x.assign(xval)
@@ -3368,7 +3436,7 @@ class Fitter:
         # let the parameter be free again
         self.defreeze_params(param)
 
-        return scan_vals, dnlls
+        return scan_vals, dnlls, detail
 
     def nll_scan2D(self, param_tuple, scan_range, scan_points, use_prefit=False):
 
