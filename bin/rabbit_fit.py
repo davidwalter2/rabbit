@@ -1115,18 +1115,13 @@ def fit(args, fitter, ws, dofit=True):
 
         for param in parms:
             logger.info(f"-delta log(L) scan for {param}")
-            scan_result = fitter.nll_scan(
+            x_scan, dnll_values, scan_detail = fitter.nll_scan(
                 param,
                 args.scanRange,
                 args.scanPoints,
                 args.scanRangeUsePrefit,
                 save_detail=args.scanSaveDetail,
             )
-            if args.scanSaveDetail:
-                x_scan, dnll_values, scan_detail = scan_result
-            else:
-                x_scan, dnll_values = scan_result
-                scan_detail = None
             ws.add_nll_scan_hist(
                 param,
                 x_scan,

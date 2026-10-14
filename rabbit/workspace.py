@@ -424,8 +424,8 @@ class Workspace:
             constrained fit.
 
         ``<base_name>_diag_<param>``    [scan, diagnostic]
-            ``edmval`` (floating-subspace, see
-            :meth:`Fitter.edmval_hessfree_floating`), ``grad_max_abs``,
+            ``edmval`` (Hessian-free, see
+            :meth:`Fitter.edmval_cov_rows_hessfree`), ``grad_max_abs``,
             ``success``, ``status``, ``nit``, ``nfev``, ``wall_s``. Stored as
             floats because a hist holds one dtype; ``success`` is 0.0/1.0 and the
             counts are exact in float64 at these magnitudes.

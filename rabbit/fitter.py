@@ -1271,56 +1271,6 @@ class Fitter:
         else:
             return edmval_cov(grad, hess)
 
-    def edmval_hessfree_floating(self, grad, rtol=1e-10, maxiter=None):
-        """EDM restricted to the parameters that were floating in the last fit.
-
-        Solves ``H_ff v = g_f`` by conjugate gradient on the floating subspace
-        and returns ``0.5 * g_f^T v``. No dense Hessian is formed.
-
-        Why the restriction matters, and why :meth:`edmval_cov_rows_hessfree`
-        is the wrong call for a profile scan point: at a scan point the scanned
-        parameter is frozen, so it is stationary by construction and not by
-        minimisation. Its gradient entry is zeroed, but the full-space Hessian
-        still couples it to everything else, so a full-space solve answers "how
-        far from a free minimum is this point" -- which is the scan's depth, not
-        its convergence. The floating-subspace EDM answers the question actually
-        being asked: did the profile minimisation over the *other* parameters
-        converge.
-
-        Returns NaN rather than raising if CG fails to converge: a scan has one
-        of these per point and a single bad point should not lose the scan.
-        """
-        import scipy.sparse.linalg as _spla
-
-        idx = np.asarray(self.floating_indices, dtype=np.int64)
-        if len(idx) == 0:
-            return 0.0
-
-        grad_np = grad.numpy() if hasattr(grad, "numpy") else np.asarray(grad)
-        grad_f = grad_np[idx]
-
-        n = int(self.x.shape[0])
-        nf = len(idx)
-
-        def _hvp_f(v_f):
-            # embed the floating-subspace vector, apply the full H, project back
-            v = np.zeros(n, dtype=np.float64)
-            v[idx] = np.asarray(v_f, dtype=np.float64).ravel()
-            _, _, hessp = self.loss_val_grad_hessp(
-                tf.constant(v, dtype=self.indata.dtype)
-            )
-            return hessp.numpy()[idx]
-
-        op = _spla.LinearOperator((nf, nf), matvec=_hvp_f, dtype=np.float64)
-        v, info = _spla.cg(op, grad_f, rtol=rtol, atol=0.0, maxiter=maxiter)
-        if info != 0:
-            logger.warning(
-                f"CG solver for the scan-point edmval did not converge (info={info}); "
-                "reporting NaN for this point"
-            )
-            return float("nan")
-        return 0.5 * float(np.dot(grad_f, v))
-
     def edmval_cov_rows_hessfree(self, grad, row_indices, rtol=1e-10, maxiter=None):
         """Hessian-free edmval + selected rows of the covariance matrix.
 
@@ -3371,9 +3321,9 @@ class Fitter:
 
         return callback
 
-    # Per-point diagnostics collected by nll_scan under save_detail. Kept as a
-    # module-level list so the fitter, the workspace writer and the reader all
-    # agree on the order without passing it around.
+    # Per-point diagnostics collected by nll_scan under save_detail, in the
+    # column order of detail["diagnostics"]. rabbit_fit.py passes this tuple to
+    # Workspace.add_nll_scan_detail_hists as the diagnostic axis labels.
     SCAN_DETAIL_FIELDS = (
         "edmval",
         "grad_max_abs",
@@ -3420,24 +3370,25 @@ class Fitter:
             """Per-point parameter vector and convergence diagnostics.
 
             Costs one gradient evaluation plus one CG solve against the
-            floating-subspace Hessian -- small next to the point's own profile
-            minimisation (tens of trust-region iterations), but not free, which
-            is why it is opt-in.
+            Hessian -- small next to the point's own profile minimisation
+            (tens of trust-region iterations), but not free, which is why it
+            is opt-in.
             """
             detail["x"][islot] = self.x.numpy()
             _, grad = self.loss_val_grad()
-            grad_np = grad.numpy()
-            # the frozen entries are zeroed, so this is the sup-norm over the
-            # parameters that were actually minimised
-            grad_max_abs = (
-                float(np.max(np.abs(grad_np[self.floating_indices])))
-                if len(self.floating_indices)
-                else 0.0
-            )
+            # frozen parameters enter the loss through tf.stop_gradient, so
+            # their gradient entries and Hessian rows/columns are exactly zero:
+            # both numbers below only see the parameters that were minimised
+            try:
+                edmval = self.edmval_cov_rows_hessfree(grad, [])[0]
+            except ValueError as e:
+                # one bad point should not lose the scan
+                logger.warning(f"{e}; reporting NaN edmval for this scan point")
+                edmval = float("nan")
             status = self.minimizer_status() or {}
             values = {
-                "edmval": self.edmval_hessfree_floating(grad),
-                "grad_max_abs": grad_max_abs,
+                "edmval": edmval,
+                "grad_max_abs": float(np.max(np.abs(grad.numpy()), initial=0.0)),
                 "success": float(status.get("success", np.nan)),
                 "status": float(status.get("status", np.nan)),
                 "nit": float(status.get("nit", np.nan)),
@@ -3485,9 +3436,7 @@ class Fitter:
         # let the parameter be free again
         self.defreeze_params(param)
 
-        if save_detail:
-            return scan_vals, dnlls, detail
-        return scan_vals, dnlls
+        return scan_vals, dnlls, detail
 
     def nll_scan2D(self, param_tuple, scan_range, scan_points, use_prefit=False):
 

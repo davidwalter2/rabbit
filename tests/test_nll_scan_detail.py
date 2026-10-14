@@ -9,7 +9,8 @@ gradient entries. Recovering one point's parameters afterwards costs a whole
 extra constrained fit.
 
 These tests pin down that the opt-in path records the two things that fixes:
-the full parameter vector per point, and a real floating-subspace edmval.
+the full parameter vector per point, and a real edmval over the parameters the
+scan point actually minimised.
 """
 
 import tempfile
@@ -41,13 +42,12 @@ def _fit(outdir):
     return f
 
 
-def test_detail_off_returns_the_same_two_values_as_before():
-    """Backward compatibility: the default path is untouched."""
+def test_detail_off_records_nothing_extra():
+    """The default path computes no detail and returns None in its place."""
     with tempfile.TemporaryDirectory() as outdir:
         f = _fit(outdir)
-        out = f.nll_scan("sig", SCAN_RANGE, SCAN_POINTS)
-        assert len(out) == 2
-        scan_vals, dnlls = out
+        scan_vals, dnlls, detail = f.nll_scan("sig", SCAN_RANGE, SCAN_POINTS)
+        assert detail is None
         assert scan_vals.shape == dnlls.shape == (SCAN_POINTS,)
 
 
@@ -88,14 +88,7 @@ def test_detail_on_records_every_point_and_reproduces_the_curve():
 
 
 def test_edmval_is_small_at_converged_scan_points():
-    """A converged profile point has EDM ~0 over the parameters it minimised.
-
-    The scanned parameter is frozen and therefore stationary by construction,
-    not by minimisation, which is why the edmval is computed on the floating
-    subspace only -- a full-space solve would report the scan's depth instead
-    of its convergence, and would grow with the scan range rather than staying
-    flat across it.
-    """
+    """A converged profile point has EDM ~0 over the parameters it minimised."""
     with tempfile.TemporaryDirectory() as outdir:
         f = _fit(outdir)
         _, _, detail = f.nll_scan("sig", SCAN_RANGE, SCAN_POINTS, save_detail=True)
@@ -110,20 +103,34 @@ def test_edmval_is_small_at_converged_scan_points():
         assert np.all(gmax[off_central] < 1e-4), gmax
 
 
-def test_frozen_parameter_is_excluded_from_the_gradient_norm():
-    """grad_max_abs is the sup-norm over the MINIMISED parameters.
+def test_edmval_only_sees_the_floating_parameters():
+    """The full-space CG edmval at a scan point is the floating-subspace EDM.
 
-    The scanned parameter's own gradient entry is nonzero in general -- that is
-    what makes the scan a constrained minimum rather than a free one -- so
-    including it would make every scan point look unconverged.
+    The scanned parameter is frozen, and frozen parameters enter the loss
+    through ``tf.stop_gradient``: their gradient entry and Hessian row/column
+    are exactly zero, so the CG solve never leaves the floating subspace. Check
+    that premise away from the minimum, where the EDM is not trivially ~0, by
+    comparing against the dense EDM of the floating block.
     """
     with tempfile.TemporaryDirectory() as outdir:
         f = _fit(outdir)
-        _, _, detail = f.nll_scan("sig", SCAN_RANGE, SCAN_POINTS, save_detail=True)
+        idx = int(np.where(f.parms.astype(str) == "sig")[0][0])
+        f.freeze_params("sig")
+        x = f.x.numpy().copy()
+        x[idx] += 0.5 * np.sqrt(f.cov[idx, idx].numpy())
+        f.x.assign(x)
+        f.minimize()
+        # push the floating parameters off the profile minimum
+        x = f.x.numpy().copy()
+        x[f.floating_indices] += 0.1
+        f.x.assign(x)
 
-        fields = list(f.SCAN_DETAIL_FIELDS)
-        gmax = detail["diagnostics"][:, fields.index("grad_max_abs")]
-        assert np.all(gmax < 1e-4)
-        # and the scan really did move the parameter, i.e. the points are not
-        # all sitting on top of the minimum
-        assert np.ptp(detail["x"][:, 0]) > 0
+        _, grad, hess = f.loss_val_grad_hess()
+        assert grad.numpy()[idx] == 0.0
+        assert np.all(hess.numpy()[idx] == 0.0)
+
+        edm_dense, _ = f.edmval_cov(grad, hess)
+        edm_cg = f.edmval_cov_rows_hessfree(grad, [])[0]
+        assert edm_dense > 1e-6
+        assert np.isclose(edm_cg, edm_dense, rtol=1e-8)
+        f.defreeze_params("sig")
