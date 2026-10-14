@@ -725,6 +725,13 @@ _SHARDED_SAFE = {
     "set_blinding_offsets",
     "prefit_covariance",
     "edmval_cov",
+    # reads the stored scipy OptimizeResult of the last minimize() (status,
+    # KKT measures, multipliers): [nparams]-sized at most, no bin axis
+    "minimizer_status",
+    # parameter-level: the constraint functions, the postfit gradient and
+    # Hessian handed in by the driver, and dense [nparams]^2 algebra; besides,
+    # --constraints is refused with --nDevices > 1
+    "constrained_postfit",
     # postfit verdict on the blinding width, reached as fitter.blinding.*:
     # reads the variance vector the driver already has, the POI offsets and
     # the model's declared scales. All [nparams]-sized, no bin axis anywhere,

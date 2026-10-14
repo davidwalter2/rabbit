@@ -26,6 +26,8 @@ import numpy as np
 from scipy.stats import chi2
 
 from rabbit import fitter, inputdata, parsing, snapshot, workspace
+from rabbit.constraints import helpers as ch
+from rabbit.constraints import postfit as cpostfit
 from rabbit.mappings import helpers as mh
 from rabbit.mappings import mapping as mp
 from rabbit.param_models import helpers as ph
@@ -777,6 +779,8 @@ def external_postfit_variances(args, fitter):
 def fit(args, fitter, ws, dofit=True):
 
     edmval = None
+    # set when the post-fit sits on an active --constraints face; see there
+    skip_hessian_impacts = False
 
     if args.externalPostfit is not None:
         fitter.load_fitresult(
@@ -819,6 +823,14 @@ def fit(args, fitter, ws, dofit=True):
             logger.debug(
                 f"[timing] minimizer: {len(cb.loss_history)} iterations recorded"
             )
+
+        # the main fit's convergence outcome (for trust-constr: the KKT
+        # optimality, constraint violation, multipliers and constraint values,
+        # the only meaningful convergence measures at an active constraint)
+        status = fitter.minimizer_status()
+        if status is not None:
+            logger.info(f"minimizer status: {status}")
+            ws.add_minimizer_status(status)
 
     # default for add_parms_hist below: NaN variances so the parms hist is
     # always written with Weight storage, and entries whose uncertainty was
@@ -866,9 +878,29 @@ def fit(args, fitter, ws, dofit=True):
                 f"{time.perf_counter() - _t_hess:.1f} s"
             )
             _t_edm = time.perf_counter()
-            edmval, cov = fitter.edmval_cov(grad, hess)
+            if len(fitter.constraints):
+                # Hard constraints: at an active face the plain EDM and H^-1
+                # are the UNCONSTRAINED ones. Store the face-held covariance as
+                # "cov" (it is what the parameter uncertainties, the global
+                # impacts and the histogram errors then use) and the released
+                # one alongside; see rabbit.constraints.postfit.
+                cpf = fitter.constrained_postfit(
+                    grad, hess, active_tol=args.constraintActiveTol
+                )
+                skip_hessian_impacts = cpostfit.report_constrained_postfit(
+                    cpf,
+                    ws,
+                    args.constraintActiveTol,
+                    global_impacts=args.globalImpacts,
+                    hessian_impacts=args.doImpacts or args.gaussianGlobalImpacts,
+                )
+                edmval = cpf["edm_tangent"]
+                cov = tf.constant(cpf["cov_held"], dtype=fitter.indata.dtype)
+                del cpf
+            else:
+                edmval, cov = fitter.edmval_cov(grad, hess)
+                logger.info(f"edmval: {edmval}")
             logger.debug(f"[timing] edmval_cov(): {time.perf_counter() - _t_edm:.1f} s")
-            logger.info(f"edmval: {edmval}")
 
             ws.add_cov_hist(cov)
 
@@ -884,7 +916,7 @@ def fit(args, fitter, ws, dofit=True):
                 edmvalbeta = edmval_cov(gradbeta, hessbeta)
                 logger.info(f"edmvalbeta: {edmvalbeta}")
 
-            if args.doImpacts:
+            if args.doImpacts and not skip_hessian_impacts:
                 _t_imp = time.perf_counter()
                 ws.add_impacts_hists(*fitter.impacts_parms(hess))
                 logger.debug(
@@ -896,6 +928,13 @@ def fit(args, fitter, ws, dofit=True):
             parms_variances = tf.linalg.diag_part(fitter.cov)
             cov_available = True
         elif not args.noEDM:
+            if len(fitter.constraints):
+                logger.warning(
+                    "--noHessian with --constraints: the Hessian-free EDM and "
+                    "variances below ignore any active constraint face (they "
+                    "are the released ones). Drop --noHessian to get the "
+                    "face-held covariance and the EDM on the faces."
+                )
             # --noHessian: avoid the full dense Hessian. Still compute edmval
             # and the POI+NOI uncertainties via a Hessian-free conjugate
             # gradient solve of H @ v = grad and H @ c_i = e_i, using only
@@ -993,7 +1032,7 @@ def fit(args, fitter, ws, dofit=True):
                 f"[timing] global_impacts_parms(): "
                 f"{time.perf_counter() - _t_gimp:.1f} s"
             )
-        if args.gaussianGlobalImpacts:
+        if args.gaussianGlobalImpacts and not skip_hessian_impacts:
             ws.add_impacts_hists(
                 *fitter.gaussian_global_impacts_parms(),
                 base_name="gaussian_global_impacts",
@@ -1361,6 +1400,14 @@ def main():
         regularizer = rh.load_regularizer(margs[0], mapping, dtype=indata.dtype)
         regularizers.append(regularizer)
     ifitter.regularizers = regularizers
+    ifitter.constraints = [
+        ch.load_constraints(cargs[0], indata, *cargs[1:]) for cargs in args.constraints
+    ]
+    if ifitter.constraints and getattr(args, "nDevices", 1) not in (None, 1):
+        raise ValueError(
+            "--constraints is not supported (not tested) with --nDevices > 1; "
+            "run the constrained fit single-device."
+        )
 
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)

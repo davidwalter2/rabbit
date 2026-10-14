@@ -15,6 +15,7 @@ those restarts so the whole thing still reports as one continuous fit.
 """
 
 import time
+from types import SimpleNamespace
 
 import numpy as np
 from wums import logging
@@ -132,6 +133,38 @@ class FitterCallback:
 
         self.xval = intermediate_result.x
         self.iiter += 1
+
+        # trust-constr's state carries the KKT measures (optimality,
+        # constr_violation, multipliers v). scipy discards its result when the
+        # callback raises (early stopping), so keep a copy for the iterate
+        # whose x is kept. Copied, not referenced: scipy mutates the state.
+        if getattr(intermediate_result, "optimality", None) is not None:
+            self.last_state = SimpleNamespace(
+                success=False,
+                status=-2,
+                message="stopped by FitterCallback; KKT measures of the last "
+                "accepted iterate",
+                nit=int(getattr(intermediate_result, "nit", -1)),
+                nfev=int(getattr(intermediate_result, "nfev", -1)),
+                optimality=float(intermediate_result.optimality),
+                constr_violation=float(
+                    getattr(intermediate_result, "constr_violation", np.nan)
+                ),
+                barrier_parameter=float(
+                    getattr(intermediate_result, "barrier_parameter", np.nan)
+                ),
+                tr_radius=float(getattr(intermediate_result, "tr_radius", np.nan)),
+                v=[
+                    np.array(m, copy=True)
+                    for m in getattr(intermediate_result, "v", [])
+                ],
+            )
+            logger.debug(
+                f"  trust-constr: optimality {self.last_state.optimality:.3e} "
+                f"constr_violation {self.last_state.constr_violation:.3e} "
+                f"barrier {self.last_state.barrier_parameter:.3e} "
+                f"tr_radius {self.last_state.tr_radius:.3e}"
+            )
 
         # After the update, so the snapshot and the loss recorded with it are
         # the same iterate. Placed after the early-stopping check too: that
