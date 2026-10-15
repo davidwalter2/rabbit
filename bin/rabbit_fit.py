@@ -1463,6 +1463,13 @@ def main():
             "--constraints is not supported (not tested) with --nDevices > 1; "
             "run the constrained fit single-device."
         )
+    if ifitter.constraints and args.mcStatDebias != "none":
+        # the de-biased (sandwich) covariance would replace the face-held
+        # covariance of the constrained postfit
+        raise ValueError(
+            "--constraints is not supported with --mcStatDebias: the de-biased "
+            "covariance does not account for active constraint faces."
+        )
 
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)
