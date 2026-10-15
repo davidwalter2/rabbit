@@ -1,0 +1,847 @@
+"""Limited-MC-statistics de-biasing: continuous-M, two-half and k-fold.
+
+Each test builds a small toy tensor (module-level ``make_*_toy`` helpers, written
+into pytest's tmp_path), fits it the way ``rabbit_fit.py`` would, and asserts the
+de-biased point / curvature / sandwich either against an independent closed-form
+numpy reference or against the documented qualitative behaviour:
+
+* continuous-M (``add_mc_stat_moment``): with a LINEAR POI the point and
+  covariance equal the closed form (H - M)^-1, inflating sigma; with rabbit's
+  default x^2 POI the correction is cancelled (docs/mcstat/RESULTS.md §9a).
+* two-half (k=2 folds): point, curvature and sandwich equal the numpy jackknife.
+* k-fold: the --covMode fisher curvature equals the complete pairwise
+  U-statistic A_k = k/(k-1) [F_full - sum_i F_i]; over an ensemble it is unbiased
+  and its scatter shrinks as k grows.
+* composition with bin-by-bin stat (BB-lite) converges positive-definite.
+* sparse-mode fold storage gives exactly the dense result.
+* a small fixed-seed template-fluctuating coverage ensemble
+  (tests/mcstat_coverage.py) shows the de-bias direction.
+
+The toy builders are parameterised by the number of folds ``k``, ``sparse`` and
+``systematic_type`` so further configurations can reuse them.
+"""
+
+import functools
+import importlib.util
+import os
+from pathlib import Path
+
+import hist
+import numpy as np
+import pytest
+
+from rabbit import fitter, inputdata
+from rabbit.param_models import helpers as ph
+from rabbit.tensorwriter import TensorWriter
+
+REPO = Path(__file__).resolve().parents[1]
+
+# The near-degenerate 2-process toy of the MC-stat studies: a flat process and a
+# "step" process equal to it in the 2nd half and +3% in the 1st half, with
+# finite (1:1) MC templates.
+DEGEN_NBINS = 200
+DEGEN_FLAT, DEGEN_STEP_HI, DEGEN_STEP_LO = 4962.0, 5112.0, 4962.0
+DEGEN_SEED = 20240614
+
+# POI directions: the degenerate difference and the well-constrained sum.
+DDIF = np.array([1.0, -1.0]) / np.sqrt(2.0)
+
+# Linear POIs, Gaussian (chisq) likelihood, no bin-by-bin stat: the setting in
+# which the closed-form numpy references apply.
+LINEAR_CHISQ = ("--chisqFit", "--noBinByBinStat", "--allowNegativeParam")
+
+
+# ---------------------------------------------------------------------------
+# fit driver
+# ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=None)
+def _driver():
+    """bin/rabbit_fit.py as an importable module (for its make_parser())."""
+    spec = importlib.util.spec_from_file_location(
+        "_rabbit_fit_for_mcstat_tests", REPO / "bin" / "rabbit_fit.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def fit_toy(filename, outdir, *args):
+    """Build and minimize a Fitter as `rabbit_fit.py filename -t 0 *args` would.
+
+    Returns the minimized Fitter; callers take the loss/grad/hess and the
+    de-biased covariances from it.
+    """
+    options = (
+        _driver()
+        .make_parser()
+        .parse_args([str(filename), "-o", str(outdir), "-t", "0", *args])
+    )
+    indata = inputdata.FitInputData(str(filename), None)
+    param_model = ph.load_models([["Mu"]], indata, **vars(options))
+    f = fitter.Fitter(indata, param_model, options, do_blinding=False)
+    f.defaultassign()
+    f.set_nobs(indata.data_obs)
+    f.minimize()
+    return f
+
+
+def sigma(cov, direction=DDIF):
+    return float(np.sqrt(direction @ np.asarray(cov) @ direction))
+
+
+# ---------------------------------------------------------------------------
+# toy builders
+# ---------------------------------------------------------------------------
+
+
+def _hist1d(ax, values, variances=None):
+    h = hist.Hist(ax, storage=hist.storage.Weight())
+    h.view()["value"] = values
+    h.view()["variance"] = values if variances is None else variances
+    return h
+
+
+def _fold_hist(ax, folds):
+    """[k, nbins] fold counts -> hist with an `mcfold` axis (unit weights)."""
+    k = folds.shape[0]
+    axf = hist.axis.IntCategory(list(range(k)), name="mcfold")
+    h = hist.Hist(ax, axf, storage=hist.storage.Weight())
+    for i in range(k):
+        h.view()["value"][:, i] = folds[i]
+        h.view()["variance"][:, i] = folds[i]
+    return h
+
+
+def split_into_folds(rng, counts, k):
+    """Assign each bin's integer counts to k folds, multinomial(1/k): [k, nbins]."""
+    return rng.multinomial(counts, [1.0 / k] * k).T
+
+
+def _write(tw, path, name):
+    tw.write(outfolder=str(path), outfilename=name)
+    return os.path.join(str(path), name)
+
+
+def degenerate_toy_arrays(k=None, seed=DEGEN_SEED):
+    """True yields, Asimov data and one finite-MC realization of the degenerate
+    toy; with `k`, also each process's split into k folds.
+
+    Returns a dict with ``n_true`` [2, nb], ``data`` [nb], ``sumw`` [2, nb]
+    (unit-weight counts, so sumw2 == sumw) and ``folds`` [2, k, nb] (or None).
+    """
+    nb = DEGEN_NBINS
+    rng = np.random.default_rng(seed)
+    n_flat = np.full(nb, DEGEN_FLAT)
+    n_step = np.concatenate(
+        [np.full(nb // 2, DEGEN_STEP_HI), np.full(nb // 2, DEGEN_STEP_LO)]
+    )
+    sumw = np.stack([rng.poisson(n_flat), rng.poisson(n_step)])
+    folds = None
+    if k is not None:
+        folds = np.stack([split_into_folds(rng, c, k) for c in sumw])
+    return dict(
+        n_true=np.stack([n_flat, n_step]),
+        data=n_flat + n_step,
+        sumw=sumw.astype(float),
+        folds=folds,
+    )
+
+
+def make_mcstat_moment_toy(path, with_M=True, bbb_variance=False, seed=DEGEN_SEED):
+    """Degenerate toy with plain finite-MC templates and, if `with_M`, the frozen
+    noise-floor matrix M over the two POIs (continuous-M de-biasing).
+
+    M_jj = sum_b sumw2[b, j] / var_b with var_b = data_b (chisq), or with the
+    BB-lite-inflated var_b = data_b + sum_proc sumw2[b] if `bbb_variance`.
+    Returns (filename, arrays) with ``arrays["M"]`` set (None without M).
+    """
+    arr = degenerate_toy_arrays(seed=seed)
+    ax = hist.axis.Regular(DEGEN_NBINS, 0.0, 1.0, name="x")
+    data, sumw = arr["data"], arr["sumw"]
+    tw = TensorWriter(sparse=False)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, data), "ch0")
+    tw.add_process(_hist1d(ax, sumw[0]), "flat", "ch0", signal=True)
+    tw.add_process(_hist1d(ax, sumw[1]), "step", "ch0", signal=True)
+    arr["M"] = None
+    if with_M:
+        var = data + sumw.sum(0) if bbb_variance else data
+        arr["M"] = np.diag(np.sum(sumw / var, axis=1))
+        tw.add_mc_stat_moment(
+            arr["M"],
+            ["flat", "step"],
+            variance="bblite_inflated" if bbb_variance else "bare",
+        )
+    name = f"toy_{'M' if with_M else 'noM'}{'_bb' if bbb_variance else ''}.hdf5"
+    return _write(tw, path, name), arr
+
+
+def make_twohalf_toy(
+    path, k=2, sparse=False, systematic_type="log_normal", seed=DEGEN_SEED
+):
+    """Degenerate toy whose two processes (flat, step) carry k MC-stat folds
+    (add_process(fold_axis=...)); the full template is the sum of the folds.
+    k=2 is the two-half jackknife, k>2 the k-fold U-statistic.
+    Returns (filename, arrays) as degenerate_toy_arrays(k)."""
+    arr = degenerate_toy_arrays(k=k, seed=seed)
+    ax = hist.axis.Regular(DEGEN_NBINS, 0.0, 1.0, name="x")
+    tw = TensorWriter(sparse=sparse, systematic_type=systematic_type)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, arr["data"]), "ch0")
+    for name, folds in zip(("flat", "step"), arr["folds"]):
+        tw.add_process(
+            _fold_hist(ax, folds), name, "ch0", signal=True, fold_axis="mcfold"
+        )
+    fname = f"toy_folds_k{k}_{'sp' if sparse else 'de'}_{systematic_type}.hdf5"
+    return _write(tw, path, fname), arr
+
+
+def make_folded_syst_toy(
+    path,
+    k=2,
+    sparse=False,
+    split=True,
+    systematic_type="log_normal",
+    nbins=50,
+    nominal_range=(800.0, 1200.0),
+    seed=7,
+):
+    """One folded signal process 'sig' (k folds) with a 'tilt' systematic whose
+    up-variation reweights each fold's OWN events, so its logk carries fold-
+    specific MC noise.
+
+    split=True adds the systematic with fold_axis (split logk per fold);
+    split=False adds the summed up template without folds (shared logk).
+    Asimov data = the smooth nominal. Returns the filename.
+    """
+    rng = np.random.default_rng(seed)
+    nom = np.linspace(*nominal_range, nbins)
+    folds = split_into_folds(rng, rng.poisson(nom), k)
+    w = 1.0 + 0.15 * (np.linspace(0.0, 1.0, nbins) - 0.5)
+    upfolds = np.stack([rng.poisson(np.maximum(folds[i] * w, 0.0)) for i in range(k)])
+    ax = hist.axis.Regular(nbins, 0.0, 1.0, name="x")
+    tw = TensorWriter(sparse=sparse, systematic_type=systematic_type)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, nom), "ch0")
+    tw.add_process(_fold_hist(ax, folds), "sig", "ch0", signal=True, fold_axis="mcfold")
+    if split:
+        tw.add_systematic(
+            _fold_hist(ax, upfolds), "tilt", "sig", "ch0", fold_axis="mcfold"
+        )
+    else:
+        tw.add_systematic(_hist1d(ax, upfolds.sum(0)), "tilt", "sig", "ch0")
+    name = (
+        f"toy_{'split' if split else 'shared'}logk_k{k}_nb{nbins}_s{seed}_"
+        f"{'sp' if sparse else 'de'}_{systematic_type}.hdf5"
+    )
+    return _write(tw, path, name)
+
+
+def make_folded_process_toy(
+    path, k=4, sparse=False, systematic_type="log_normal", nbins=40, seed=13
+):
+    """One folded signal process 'sig' (k folds) with an ordinary (unfolded,
+    shared-logk) linear shape systematic 'shp'. Asimov data = the nominal.
+    Returns the filename."""
+    rng = np.random.default_rng(seed)
+    nom = np.linspace(900.0, 1100.0, nbins)
+    folds = split_into_folds(rng, rng.poisson(nom), k)
+    x = np.linspace(0.0, 1.0, nbins)
+    ax = hist.axis.Regular(nbins, 0.0, 1.0, name="x")
+    tw = TensorWriter(sparse=sparse, systematic_type=systematic_type)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, nom), "ch0")
+    tw.add_process(_fold_hist(ax, folds), "sig", "ch0", signal=True, fold_axis="mcfold")
+    tw.add_systematic(_hist1d(ax, nom * (1 + 0.1 * (x - 0.5))), "shp", "sig", "ch0")
+    name = f"toy_foldproc_k{k}_{'sp' if sparse else 'de'}_{systematic_type}.hdf5"
+    return _write(tw, path, name)
+
+
+# ---------------------------------------------------------------------------
+# numpy references
+# ---------------------------------------------------------------------------
+
+
+def _fisher(T, V):
+    """sum_b T[b,i] T[b,j] / V[b] for templates T [nbins, nparams]."""
+    return np.einsum("bi,b,bj->ij", T, 1.0 / V, T)
+
+
+def kfold_ustatistic(fold_templates, V):
+    """Complete pairwise U-statistic curvature A_k = k/(k-1) [F_full - sum F_i]
+    for per-fold templates [k][nbins, nparams] (full = sum of folds)."""
+    k = len(fold_templates)
+    full = sum(fold_templates)
+    return (k / (k - 1.0)) * (
+        _fisher(full, V) - sum(_fisher(T, V) for T in fold_templates)
+    )
+
+
+# ---------------------------------------------------------------------------
+# continuous-M (add_mc_stat_moment)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def moment_toys(tmp_path_factory):
+    path = tmp_path_factory.mktemp("mcstat_moment")
+    fn_noM, _ = make_mcstat_moment_toy(path, with_M=False)
+    fn_M, arr = make_mcstat_moment_toy(path, with_M=True)
+    return dict(noM=fn_noM, M=fn_M, arrays=arr, out=path)
+
+
+def _continuous_m_fit(filename, outdir, linear, debias):
+    """Fit with --mcStatDebias `debias` and return (rnorm, curvature cov,
+    sandwich cov or None) in rnorm space."""
+    args = ("--chisqFit", "--noBinByBinStat", "--mcStatDebias", debias)
+    if linear:
+        args += ("--allowNegativeParam",)
+    f = fit_toy(filename, outdir, *args)
+    _, grad, hess = f.loss_val_grad_hess()
+    _, cov = f.edmval_cov(grad, hess)
+    sand = None
+    if f.mcstat_M is not None:
+        sand = np.asarray(f.cov_mcstat_sandwich(hess))  # A^-1 + A^-1 M A^-1
+    x = f.x.numpy()
+    jac = np.diag(np.ones_like(x) if linear else 2.0 * x)  # d rnorm / d x
+    rnorm = x if linear else x**2
+    return (
+        rnorm,
+        jac @ np.asarray(cov) @ jac,
+        None if sand is None else jac @ sand @ jac,
+    )
+
+
+def test_continuous_m_linear_poi_debiases(moment_toys):
+    """Linear POI: the -1/2 theta^T M theta penalty gives the closed-form
+    de-biased point (H - M)^-1 b, curvature (H - M)^-1 and sandwich
+    A^-1 H A^-1, inflating sigma(dif) by > 20% (the scripts' DE-BIASED verdict)."""
+    out = moment_toys["out"]
+    r_no, C_no, S_no = _continuous_m_fit(moment_toys["noM"], out, True, "none")
+    r_M, C_M, S_M = _continuous_m_fit(moment_toys["M"], out, True, "continuousM")
+    assert S_no is None and S_M is not None
+
+    arr = moment_toys["arrays"]
+    T, V, d = arr["sumw"].T, arr["data"], arr["data"]
+    H = _fisher(T, V)
+    b = np.einsum("bi,b,b->i", T, 1.0 / V, d)
+    A = H - arr["M"]
+    Ainv = np.linalg.inv(A)
+    np.testing.assert_allclose(r_no, np.linalg.solve(H, b), atol=1e-3)
+    np.testing.assert_allclose(r_M, np.linalg.solve(A, b), atol=1e-3)
+    assert sigma(C_no) == pytest.approx(sigma(np.linalg.inv(H)), abs=1e-3)
+    assert sigma(C_M) == pytest.approx(sigma(Ainv), abs=1e-3)
+    assert sigma(S_M) == pytest.approx(sigma(Ainv @ H @ Ainv), abs=1e-3)
+
+    s_no, s_M, s_sand = sigma(C_no), sigma(C_M), sigma(S_M)
+    assert s_M > 1.2 * s_no, f"M should inflate sigma(dif): {s_no} -> {s_M}"
+    assert s_sand >= s_M, f"sandwich {s_sand} below curvature {s_M}"
+
+
+def test_continuous_m_squared_poi_is_cancelled(moment_toys):
+    """Default x^2 POI transform: the M correction is cancelled by Fisher growth
+    at the shifted minimum (docs/mcstat/RESULTS.md §9a), so the curvature sigma(dif) does NOT
+    inflate (the scripts' 'no de-bias (cancelled)' verdict). The sandwich still
+    adds the A^-1 M A^-1 margin on top of the curvature."""
+    out = moment_toys["out"]
+    r_no, C_no, _ = _continuous_m_fit(moment_toys["noM"], out, False, "none")
+    r_M, C_M, S_M = _continuous_m_fit(moment_toys["M"], out, False, "continuousM")
+    s_no, s_M = sigma(C_no), sigma(C_M)
+    assert s_M < 1.2 * s_no, f"x^2 POI should cancel the M de-bias: {s_no} -> {s_M}"
+    np.testing.assert_allclose(r_M, r_no, atol=1e-3)
+    assert sigma(S_M) >= s_M
+
+
+# ---------------------------------------------------------------------------
+# two-half (k=2 folds)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def twohalf_toy(tmp_path_factory):
+    path = tmp_path_factory.mktemp("mcstat_twohalf")
+    fn, arr = make_twohalf_toy(path, k=2)
+    return dict(fn=fn, arrays=arr, out=path)
+
+
+def twohalf_numpy_reference(arr):
+    """Closed-form standard and jackknife (two-half) fit of the linear 2-POI toy:
+    A = 2 H_full - (H_A + H_B)/2 with half templates scaled x2, sandwich
+    A^-1 H_full A^-1. Returns (r_std, C_std, r_cf, C_curv, C_sand)."""
+    data = arr["data"]
+    V = data
+    Tf = arr["sumw"].T
+    TA = 2.0 * arr["folds"][:, 0, :].T
+    TB = 2.0 * arr["folds"][:, 1, :].T
+
+    def b(T):
+        return np.einsum("bi,b,b->i", T, 1.0 / V, data)
+
+    Hf = _fisher(Tf, V)
+    A_cf = 2.0 * Hf - 0.5 * _fisher(TA, V) - 0.5 * _fisher(TB, V)
+    b_cf = 2.0 * b(Tf) - 0.5 * b(TA) - 0.5 * b(TB)
+    Ccurv = np.linalg.inv(A_cf)
+    return (
+        np.linalg.solve(Hf, b(Tf)),
+        np.linalg.inv(Hf),
+        np.linalg.solve(A_cf, b_cf),
+        Ccurv,
+        Ccurv @ Hf @ Ccurv,
+    )
+
+
+def _twohalf_fit(filename, outdir, debias):
+    f = fit_toy(filename, outdir, *LINEAR_CHISQ, "--mcStatDebias", debias)
+    _, grad, hess = f.loss_val_grad_hess()
+    _, cov = f.edmval_cov(grad, hess)
+    sand = None
+    if debias in ("twoHalf", "kfold"):
+        sand = np.asarray(f.cov_twohalf_sandwich(hess))
+    return f.x.numpy(), np.asarray(cov), sand
+
+
+def test_twohalf_matches_numpy_reference(twohalf_toy):
+    """rabbit's two-half point, curvature and sandwich equal the independent numpy
+    jackknife (atol 1e-3); the standard fit equals the plain least squares."""
+    r_std, C_std, r_cf, C_curv, C_sand = twohalf_numpy_reference(twohalf_toy["arrays"])
+    x_std, Cr_std, _ = _twohalf_fit(twohalf_toy["fn"], twohalf_toy["out"], "none")
+    x_cf, Cr_curv, Cr_sand = _twohalf_fit(
+        twohalf_toy["fn"], twohalf_toy["out"], "twoHalf"
+    )
+
+    np.testing.assert_allclose(x_std, r_std, atol=1e-3)
+    assert sigma(Cr_std) == pytest.approx(sigma(C_std), abs=1e-3)
+
+    np.testing.assert_allclose(x_cf, r_cf, atol=1e-3)
+    assert sigma(Cr_curv) == pytest.approx(sigma(C_curv), abs=1e-3)
+    assert sigma(Cr_sand) == pytest.approx(sigma(C_sand), abs=1e-3)
+    # the de-bias is active: the point moved away from the attenuated fit
+    assert not np.allclose(x_cf, x_std, atol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# k-fold U-statistic curvature
+# ---------------------------------------------------------------------------
+
+
+def test_kfold_fisher_curvature_matches_ustatistic(tmp_path_factory):
+    """--mcStatDebias kfold --covMode fisher curvature on the k=4 fold toy equals
+    the numpy complete pairwise U-statistic A_k (rtol 1e-4)."""
+    k = 4
+    path = tmp_path_factory.mktemp("mcstat_kfold")
+    fn, arr = make_twohalf_toy(path, k=k)
+    f = fit_toy(
+        fn, path, *LINEAR_CHISQ, "--mcStatDebias", "kfold", "--covMode", "fisher"
+    )
+    _, _, hess = f.loss_val_grad_hess()
+    curv = np.asarray(f.fisher_curvature(hess))
+
+    ref = kfold_ustatistic(
+        [arr["folds"][:, i, :].T.astype(float) for i in range(k)], arr["data"]
+    )
+    assert f.n_folds == k
+    np.testing.assert_allclose(curv, ref, rtol=1e-4)
+
+
+def _ustatistic_sigma_ensemble(k, ntoy, seed):
+    """sigma(dif) from the U-statistic curvature over `ntoy` fresh MC
+    realizations of the degenerate toy split into k folds (pure numpy)."""
+    rng = np.random.default_rng(seed)
+    base = degenerate_toy_arrays()
+    sig = []
+    for _ in range(ntoy):
+        sumw = [rng.poisson(n) for n in base["n_true"]]
+        folds = [split_into_folds(rng, c, k) for c in sumw]  # [2][k, nb]
+        Ti = [np.stack([folds[0][i], folds[1][i]], 1).astype(float) for i in range(k)]
+        v = DDIF @ np.linalg.inv(kfold_ustatistic(Ti, base["data"])) @ DDIF
+        if v > 0:
+            sig.append(np.sqrt(v))
+    return np.median(sig), np.std(sig)
+
+
+def test_kfold_ustatistic_unbiased_and_variance_reducing():
+    """Over an ensemble (300 toys per k, fixed seeds) the U-statistic sigma(dif)
+    has median within 0.02 of sigma_inf for k=4, 8, 16, and its RMS does not
+    increase with k (k-fold averaging approaches the continuous-M floor)."""
+    base = degenerate_toy_arrays()
+    sinf = sigma(np.linalg.inv(_fisher(base["n_true"].T, base["data"])))
+    prev = None
+    for k in (4, 8, 16):
+        med, rms = _ustatistic_sigma_ensemble(k, ntoy=300, seed=100 + k)
+        assert abs(med - sinf) < 0.02, f"k={k}: median {med} vs sigma_inf {sinf}"
+        if prev is not None:
+            assert rms < prev + 1e-9, f"k={k}: RMS {rms} grew from {prev}"
+        prev = rms
+
+
+# ---------------------------------------------------------------------------
+# composition with bin-by-bin stat (BB-lite)
+# ---------------------------------------------------------------------------
+
+
+def test_continuous_m_with_bblite_converges_pd(tmp_path):
+    """continuous-M + BB-lite with M built on the BB-lite-inflated variance
+    (data + sum sumw2): the fit converges (|grad| < 1e-3) to a positive-definite
+    Hessian."""
+    fn, _ = make_mcstat_moment_toy(tmp_path, with_M=True, bbb_variance=True)
+    f = fit_toy(
+        fn,
+        tmp_path,
+        "--chisqFit",
+        "--allowNegativeParam",
+        "--mcStatDebias",
+        "continuousM",
+    )
+    _, grad, hess = f.loss_val_grad_hess()
+    eig = np.linalg.eigvalsh(hess.numpy())
+    gmax = float(np.max(np.abs(grad.numpy())))
+    assert np.all(eig > 0), f"Hessian not PD: eigenvalues {eig}"
+    assert gmax < 1e-3, f"not converged: max|grad| = {gmax}"
+    S = np.asarray(f.cov_mcstat_sandwich(hess))
+    assert np.all(np.isfinite(S)) and np.all(np.diag(S) > 0)
+
+
+def test_twohalf_with_bblite_inflates_tilt(tmp_path):
+    """two-half + BB-lite on the k=2 split-logk toy: the de-biased fit converges
+    PD and its sandwich uncertainty on the folded 'tilt' systematic exceeds the
+    un-de-biased one."""
+    fn = make_folded_syst_toy(tmp_path, k=2, split=True)
+    common = ("--chisqFit", "--allowNegativeParam", "--mcStatDebias")
+
+    f0 = fit_toy(fn, tmp_path, *common, "none")
+    _, g0, h0 = f0.loss_val_grad_hess()
+    _, cov0 = f0.edmval_cov(g0, h0)
+    sig0 = np.sqrt(np.diag(np.asarray(cov0)))
+
+    f1 = fit_toy(fn, tmp_path, *common, "twoHalf")
+    _, g1, h1 = f1.loss_val_grad_hess()
+    eig = np.linalg.eigvalsh(h1.numpy())
+    gmax = float(np.max(np.abs(g1.numpy())))
+    S1 = np.asarray(f1.cov_twohalf_sandwich(h1, "observed"))
+
+    itilt = list(f1.parms.astype(str)).index("tilt")
+    assert np.all(eig > 0), f"Hessian not PD: eigenvalues {eig}"
+    assert gmax < 1e-3, f"not converged: max|grad| = {gmax}"
+    assert np.sqrt(S1[itilt, itilt]) > sig0[itilt], (
+        f"two-half should inflate the tilt uncertainty: {sig0[itilt]} -> "
+        f"{np.sqrt(S1[itilt, itilt])}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# sparse-mode fold storage == dense
+# ---------------------------------------------------------------------------
+
+SPARSE_TOYS = {
+    # folded process, shared (unfolded) systematic: sparse per-fold yield path
+    "folded_process": lambda path, sparse: make_folded_process_toy(
+        path, k=4, sparse=sparse, nbins=40, seed=13
+    ),
+    # folded process AND folded (split-logk) systematic: sparse exp(delta.theta)
+    "split_logk": lambda path, sparse: make_folded_syst_toy(
+        path,
+        k=4,
+        sparse=sparse,
+        split=True,
+        nbins=40,
+        nominal_range=(900.0, 1100.0),
+        seed=21,
+    ),
+}
+
+
+def _kfold_fisher_fit(filename, outdir):
+    f = fit_toy(
+        filename,
+        outdir,
+        *LINEAR_CHISQ,
+        "--mcStatDebias",
+        "kfold",
+        "--covMode",
+        "fisher",
+    )
+    _, _, hess = f.loss_val_grad_hess()
+    bread = f.fisher_curvature(hess)
+    sand = np.asarray(f.cov_twohalf_sandwich(bread, "fisher"))
+    return f.indata.sparse, f.x.numpy(), np.asarray(bread), sand
+
+
+@pytest.mark.parametrize("toy", sorted(SPARSE_TOYS))
+def test_sparse_fold_debias_equals_dense(toy, tmp_path):
+    """k=4 kfold/fisher on the same toy written sparse and dense: identical
+    de-biased point, fisher curvature and sandwich (rtol 1e-6)."""
+    build = SPARSE_TOYS[toy]
+    is_sp, x_sp, b_sp, S_sp = _kfold_fisher_fit(build(tmp_path, True), tmp_path)
+    is_de, x_de, b_de, S_de = _kfold_fisher_fit(build(tmp_path, False), tmp_path)
+    assert is_sp and not is_de
+    np.testing.assert_allclose(x_sp, x_de, rtol=1e-6)
+    np.testing.assert_allclose(b_sp, b_de, rtol=1e-6)
+    np.testing.assert_allclose(S_sp, S_de, rtol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# template-fluctuating coverage ensemble (tests/mcstat_coverage.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def coverage_harness():
+    from tests import mcstat_coverage
+
+    # the assertions below are calibrated on the harness's default toy
+    if (mcstat_coverage.NB, mcstat_coverage.HI) != (200, 5112.0) or list(
+        mcstat_coverage.RTRUE
+    ) != [1.3, 0.7]:
+        pytest.skip("NB/HI/R0/R1 overridden in the environment")
+    return mcstat_coverage
+
+
+def _check_coverage_result(r, ntoy):
+    assert r["n"] + r["nbad"] == ntoy
+    assert r["nbad"] <= ntoy // 10, f"{r['nbad']} of {ntoy} toy fits failed"
+    for key in ("cov_dif", "cov_sum"):
+        assert np.isfinite(r[key]) and 0.0 <= r[key] <= 1.0, (key, r[key])
+    for key in ("bias_dif", "mean_res", "rms_res", "med_sig"):
+        assert np.isfinite(r[key]), (key, r[key])
+    assert r["med_sig"] > 0 and r["rms_res"] > 0
+
+
+# 20 toys per method instead of the standalone tool's 50 to keep CI fast (~1 s per
+# toy fit). With the fixed seed the result is deterministic; the statistical margin
+# of the bias check is the smallest (the de-biased median residual has a scatter of
+# ~0.1 at this size against the 0.4*|naive bias| ~ 0.11 threshold), so run
+# tests/mcstat_coverage.py with a larger ensemble when changing the method.
+COVERAGE_NTOY = 20
+COVERAGE_SEED = 11
+
+
+def test_coverage_continuous_m_corrects_naive(coverage_harness, tmp_path):
+    """Template+data-fluctuating ensemble on the near-degenerate toy with a
+    nonzero degenerate-direction truth (rnorm_true = [1.3, 0.7]):
+
+    1. the naive fit is attenuated (median dif residual < -0.10);
+    2. continuous-M removes the central-value bias (|bias| < 0.4 |naive bias|);
+    3. its sandwich sigma(dif) is > 1.3x the naive one;
+    4. it improves the dif coverage by > 0.10.
+
+    Asserts the de-bias DIRECTION, not exact 0.683 coverage: the raw sandwich
+    still underestimates the de-biased point's scatter (docs/mcstat/RESULTS.md §9n).
+    """
+    mc = coverage_harness
+    kw = dict(ntoy=COVERAGE_NTOY, seed=COVERAGE_SEED, outdir=str(tmp_path))
+    none = mc.run_coverage(debias="none", **kw)
+    cm = mc.run_coverage(debias="continuousM", debiasCov="sandwich", **kw)
+    _check_coverage_result(none, COVERAGE_NTOY)
+    _check_coverage_result(cm, COVERAGE_NTOY)
+
+    assert none["bias_dif"] < -0.10, f"naive should be attenuated: {none}"
+    assert abs(cm["bias_dif"]) < 0.4 * abs(
+        none["bias_dif"]
+    ), f"de-bias should remove the bias: {none['bias_dif']} -> {cm['bias_dif']}"
+    assert (
+        cm["med_sig"] > 1.3 * none["med_sig"]
+    ), f"de-bias should inflate sigma: {none['med_sig']} -> {cm['med_sig']}"
+    assert (
+        cm["cov_dif"] > none["cov_dif"] + 0.10
+    ), f"de-bias should improve coverage: {none['cov_dif']} -> {cm['cov_dif']}"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        dict(debias="twoHalf"),
+        dict(debias="kfold", covMode="fisher", k=4),
+        dict(debias="continuousM", bbb=True),
+    ],
+    ids=["twoHalf", "kfold4-fisher", "continuousM-bblite"],
+)
+def test_coverage_harness_smoke(coverage_harness, tmp_path, config):
+    """The harness runs the fold / BB-lite configurations end to end and returns
+    finite coverage numbers in [0, 1] (tiny ensemble: smoke test only)."""
+    ntoy = 3
+    r = coverage_harness.run_coverage(
+        ntoy=ntoy, seed=COVERAGE_SEED, outdir=str(tmp_path), **config
+    )
+    _check_coverage_result(r, ntoy)
+
+
+# ---------------------------------------------------------------------------
+# any k (odd k), additive systematics, sparse storage, M conventions
+# ---------------------------------------------------------------------------
+
+SMALL_NBINS = 60
+
+
+def make_small_fold_toy(path, k, sparse=False, systematic_type="log_normal", syst=0):
+    """Well-conditioned 2-process toy with k MC-stat folds and optionally one
+    SHARED (unfolded) shape systematic on `flat`. Returns (filename, arrays)."""
+    rng = np.random.default_rng(3)
+    nb = SMALL_NBINS
+    n_flat = np.full(nb, 400.0)
+    n_step = np.linspace(100.0, 700.0, nb)
+    folds = np.stack(
+        [
+            split_into_folds(rng, rng.poisson(n), k).astype(float)
+            for n in (n_flat, n_step)
+        ]
+    )  # [2, k, nb]
+    data = n_flat + n_step
+    ax = hist.axis.Regular(nb, 0.0, 1.0, name="x")
+    tw = TensorWriter(sparse=sparse, systematic_type=systematic_type)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, data), "ch0")
+    for name, f in zip(("flat", "step"), folds):
+        tw.add_process(_fold_hist(ax, f), name, "ch0", signal=True, fold_axis="mcfold")
+    svar = None
+    if syst:
+        # additive variation (absolute, = logk for systematic_type "normal")
+        svar = 0.05 * folds[0].sum(0) * np.linspace(-1.0, 1.0, nb)
+        tw.add_systematic(
+            _hist1d(ax, folds[0].sum(0) + svar), "s0", "flat", "ch0", mirror=True
+        )
+    fname = f"small_k{k}_{int(sparse)}_{systematic_type}_{syst}.hdf5"
+    return _write(tw, path, fname), dict(folds=folds, data=data, svar=svar)
+
+
+@pytest.mark.parametrize("sparse", [False, True], ids=["dense", "sparse"])
+@pytest.mark.parametrize("k", [2, 3, 5])
+def test_any_k_matches_numpy(k, sparse, tmp_path):
+    """Any k >= 2, odd included. The halves are G_A = first a = k//2 folds and
+    G_B = the other b = k - a, rescaled to full normalization, and the jackknife
+    L_cf = k^2/(2ab) L_full - a/(2b) L_A - b/(2a) L_B. Its Hessian is exactly the
+    symmetrized cross term J_A^T D J_B and its point solves
+    cross . x = 1/2 (J_A + J_B)^T D y; in fisher mode the curvature is the k-fold
+    U-statistic."""
+    fn, arr = make_small_fold_toy(tmp_path, k, sparse=sparse)
+    Ti = [np.stack([arr["folds"][0][i], arr["folds"][1][i]], 1) for i in range(k)]
+    y = arr["data"]
+    D = 1.0 / y
+    a, b = k // 2, k - k // 2
+    TA, TB, Tf = (k / a) * sum(Ti[:a]), (k / b) * sum(Ti[a:]), sum(Ti)
+    cross = 0.5 * (TA.T @ (D[:, None] * TB) + TB.T @ (D[:, None] * TA))
+    x_ref = np.linalg.solve(cross, 0.5 * (TA + TB).T @ (D * y))
+    Hfull = _fisher(Tf, y)
+
+    f = fit_toy(fn, tmp_path, *LINEAR_CHISQ, "--mcStatDebias", "kfold")
+    _, _, h = f.loss_val_grad_hess()
+    np.testing.assert_allclose(f.x.numpy(), x_ref, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(h), cross, rtol=1e-8)
+    Ci = np.linalg.inv(cross)
+    np.testing.assert_allclose(
+        np.asarray(f.cov_twohalf_sandwich(h)), Ci @ Hfull @ Ci, rtol=1e-6
+    )
+
+    f = fit_toy(
+        fn, tmp_path, *LINEAR_CHISQ, "--mcStatDebias", "kfold", "--covMode", "fisher"
+    )
+    _, _, h = f.loss_val_grad_hess()
+    U = kfold_ustatistic(Ti, y)
+    A = np.asarray(f.fisher_curvature(h))
+    np.testing.assert_allclose(A, U, rtol=1e-8)
+    Ui = np.linalg.inv(U)
+    np.testing.assert_allclose(
+        np.asarray(f.cov_twohalf_sandwich(A, covMode="fisher")),
+        Ui @ Hfull @ Ui,
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("expect", [1.0, 2.0])
+def test_kfold_fisher_shared_additive_systematic(expect, tmp_path):
+    """A SHARED additive ('normal') systematic is split evenly over the raw folds
+    (1/k each, so the folds sum to the full variation); the U-statistic must then
+    treat it as MC-stat-exempt. The full variation per fold used to over-count the
+    systematic's curvature by k (off-diagonal) and k^2 (diagonal). With
+    --expectSignal != 1 the variation also carries the rnorm_init factor."""
+    k = 4
+    fn, arr = make_small_fold_toy(tmp_path, k, systematic_type="normal", syst=1)
+    y = arr["data"]
+    f = fit_toy(
+        fn,
+        tmp_path,
+        *LINEAR_CHISQ,
+        "--mcStatDebias",
+        "kfold",
+        "--covMode",
+        "fisher",
+        "--expectSignal",
+        "flat",
+        str(expect),
+        "--expectSignal",
+        "step",
+        str(expect),
+    )
+    _, _, h = f.loss_val_grad_hess()
+    Ti = [
+        np.stack([arr["folds"][0][i], arr["folds"][1][i], expect * arr["svar"] / k], 1)
+        for i in range(k)
+    ]
+    U = kfold_ustatistic(Ti, y)
+    U[2, 2] += 1.0  # unit Gaussian constraint of s0
+    np.testing.assert_allclose(np.asarray(f.fisher_curvature(h)), U, rtol=1e-8)
+
+
+def test_sparse_fold_storage_follows_norm_sparsity(tmp_path):
+    """In sparse mode the fold templates are stored as [k, nnz] values on the
+    sparsity pattern of the nominal norm, not densified to [k, nbins, nproc]."""
+    import h5py
+
+    k = 4
+    rng = np.random.default_rng(1)
+    nb, nproc = 120, 6
+    ax = hist.axis.Regular(nb, 0.0, 1.0, name="x")
+    tw = TensorWriter(sparse=True)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, np.full(nb, 100.0)), "ch0")
+    for p in range(nproc):
+        counts = np.zeros(nb, dtype=int)
+        lo = p * nb // nproc
+        counts[lo : lo + nb // nproc] = rng.poisson(50.0, nb // nproc)
+        tw.add_process(
+            _fold_hist(ax, split_into_folds(rng, counts, k).astype(float)),
+            f"p{p}",
+            "ch0",
+            signal=True,
+            fold_axis="mcfold",
+        )
+    fn = _write(tw, tmp_path, "sparse_folds.hdf5")
+    with h5py.File(fn) as h5:
+        nnz = h5["hnorm_sparse"]["values"].shape[0]
+        folds = h5["hnorm_folds"]
+        assert folds.attrs["original_shape"].tolist() == [k, nnz]
+        assert nnz <= nb  # one process per bin
+    indata = inputdata.FitInputData(fn, None)
+    np.testing.assert_allclose(
+        np.asarray(indata.norm_folds).sum(0), np.asarray(indata.norm.values)
+    )
+
+
+def _moment_fit(fn, tmp_path, *args):
+    return fit_toy(fn, tmp_path, "--chisqFit", "--allowNegativeParam", *args)
+
+
+def test_continuous_m_variance_convention_enforced(tmp_path):
+    """M's denominator depends on whether the fit uses bin-by-bin stat, so the
+    convention is recorded with the term and a mismatch is refused."""
+    fn_bare, _ = make_mcstat_moment_toy(tmp_path, bbb_variance=False)
+    fn_bb, _ = make_mcstat_moment_toy(tmp_path, bbb_variance=True)
+    _moment_fit(fn_bare, tmp_path, "--noBinByBinStat", "--mcStatDebias", "continuousM")
+    _moment_fit(fn_bb, tmp_path, "--mcStatDebias", "continuousM")
+    with pytest.raises(RuntimeError, match="'bare' per-bin variance"):
+        _moment_fit(fn_bare, tmp_path, "--mcStatDebias", "continuousM")
+    with pytest.raises(RuntimeError, match="'bblite_inflated' per-bin variance"):
+        _moment_fit(
+            fn_bb, tmp_path, "--noBinByBinStat", "--mcStatDebias", "continuousM"
+        )
+    with pytest.raises(ValueError, match="variance must be one of"):
+        TensorWriter().add_mc_stat_moment(np.eye(1), ["a"], variance="inflated")
+
+
+def test_continuous_m_ignored_without_option(moment_toys, tmp_path):
+    """A file carrying M fits the plain NLL unless --mcStatDebias continuousM."""
+    f0 = _moment_fit(moment_toys["noM"], tmp_path, "--noBinByBinStat")
+    f1 = _moment_fit(moment_toys["M"], tmp_path, "--noBinByBinStat")
+    assert f1.mcstat_M is None and not f1.mcstat_debias_active
+    np.testing.assert_allclose(f1.x.numpy(), f0.x.numpy(), rtol=1e-10)

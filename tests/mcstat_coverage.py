@@ -9,19 +9,25 @@ Two near-degenerate processes (corr tunable via STEP), finite MC (oversample:1),
 linear POIs (rnorm_true = 1). Coverage is measured for the degenerate direction
 (rnorm0 - rnorm1, truth 0) and the well-constrained sum.
 
+This is a long ensemble study (~1 s per toy fit), so it is a standalone tool rather
+than a test; tests/test_mcstat_debias.py runs a small fixed-seed ensemble of it as a
+CI smoke test of the de-bias direction (bias removed, sigma inflated, coverage up).
+
 Usage:
     OUT=/tmp/cov python3 tests/mcstat_coverage.py            # prints a table
-    from mcstat_coverage import run_coverage                  # programmatic
+    from tests.mcstat_coverage import run_coverage           # programmatic
 """
 
 import importlib.util as _ilu
 import os
 import sys
+import tempfile
 
 import hist
 import numpy as np
 
-RABBIT_BASE = os.environ.get("RABBIT_BASE", ".")
+# the driver is located relative to this file, so the harness imports from any cwd
+RABBIT_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(RABBIT_BASE, "bin"))
 _spec = _ilu.spec_from_file_location(
     "rabbit_fit_main", os.path.join(RABBIT_BASE, "bin", "rabbit_fit.py")
@@ -32,8 +38,8 @@ from rabbit import fitter, inputdata
 from rabbit.param_models import helpers as ph
 from rabbit.tensorwriter import TensorWriter
 
-OUT = os.environ.get("OUT", "/tmp/claude")
-# The near-degenerate 2-process toy from the slides (RESULTS §1): a flat process
+OUT = os.environ.get("OUT", tempfile.gettempdir())
+# The near-degenerate 2-process toy from the slides (docs/mcstat/RESULTS.md §1): a flat process
 # and a "step" process identical to it in the 2nd half and +3% in the 1st half.
 # This sits in the regime where the de-biased CURVATURE ~ sigma_inf (M/lambda_min
 # ~0.6, so H-M is comfortably positive and the de-biased point is well-behaved) --
@@ -87,15 +93,17 @@ def _build(fn, T0, T1, folds0, folds1, data, debias, bbb, poisson):
         # M_pp = sum_b sumw2_p / var_b ; var = data (chisq) or data+sumw2 (BB-lite)
         var = data + (T0 + T1) if bbb else data
         M = np.diag([np.sum(T0 / var), np.sum(T1 / var)])
-        tw.add_mc_stat_moment(M, ["p0", "p1"])
+        tw.add_mc_stat_moment(
+            M, ["p0", "p1"], variance="bblite_inflated" if bbb else "bare"
+        )
     tw.write(outfolder=os.path.dirname(fn), outfilename=os.path.basename(fn))
 
 
-def _fit(fn, debias, covMode, debiasCov, bbb, poisson):
+def _fit(fn, debias, covMode, debiasCov, bbb, poisson, outdir=None):
     argv = [
         fn,
         "-o",
-        f"{OUT}/vo",
+        f"{outdir or OUT}/vo",
         "-t",
         "0",
         "--allowNegativeParam",
@@ -140,9 +148,13 @@ def run_coverage(
     ntoy=200,
     k=2,
     seed=1,
+    outdir=None,
 ):
+    """Coverage of the degenerate (DDIF) and sum (DSUM) POI directions over `ntoy`
+    template+data fluctuations. Tensors are written to `outdir` (default OUT)."""
     rng = np.random.default_rng(seed)
-    fn = f"{OUT}/cov_{debias}_{covMode}_{debiasCov}_{int(bbb)}_{int(poisson)}.hdf5"
+    out = outdir or OUT
+    fn = f"{out}/cov_{debias}_{covMode}_{debiasCov}_{int(bbb)}_{int(poisson)}.hdf5"
     cov_dif = cov_sum = 0
     res_dif = []
     sig_dif = []
@@ -154,7 +166,7 @@ def run_coverage(
         data = rng.poisson(MU).astype(float)
         try:
             _build(fn, T0, T1, folds0, folds1, data, debias, bbb, poisson)
-            x, C, gmax = _fit(fn, debias, covMode, debiasCov, bbb, poisson)
+            x, C, gmax = _fit(fn, debias, covMode, debiasCov, bbb, poisson, out)
             v_dif = DDIF @ C @ DDIF
             v_sum = DSUM @ C @ DSUM
             # require convergence and POSITIVE variance in the measured directions
