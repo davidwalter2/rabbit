@@ -1270,3 +1270,88 @@ Changes made in response to the design review of the PR, after rebasing on main:
 - The validation scripts became pytest tests with hard assertions
   (`tests/test_mcstat_debias.py`), so CI runs them.
 
+
+### §9r. Robust minimization, goodness of fit, `--noHessian`, adjusted scans (rabbit)
+Follow-up to §9q, prompted by end-to-end runs of `rabbit_fit.py`.
+
+- **Blinded Poisson fits with linear POIs failed.** Data fits are blinded by
+  default; the POI offsets (std 5) open the fit far from the minimum. Two causes,
+  separated on a 60-bin, 2-process toy (k=2; far starts drawn like the blinding
+  offsets, feasible ones only; bare scipy trust-krylov):
+
+  | MC stat (events/fold/bin) | ordinary | ordinary, NaN→+∞ | de-biased | de-biased, NaN→+∞ |
+  |---|---|---|---|---|
+  | ~200   | 14/40 | 0/40 | 21/40 | 8/40 |
+  | ~2000  | 18/41 | 0/41 | 18/41 | 6/41 |
+  | ~20000 | 15/41 | 0/41 | 15/41 | 0/41 |
+
+  1. *scipy and non-finite losses* (affects ordinary fits too): a trial step into
+     negative yields gives a NaN loss; every comparison on the resulting NaN
+     `ρ` is False, so the trust radius never shrinks, the same step is proposed
+     until `--earlyStopping`, and a restart re-proposes it (the restart loop's
+     loss was bit-identical before and after). The scipy loss now maps a
+     non-finite value to `+∞` (the native minimizers already treat a non-finite
+     `ρ` as `−∞`).
+  2. *The Poisson jackknife is unbounded below*: `L_cf` contains `+½ y ln n_B`,
+     which goes to `−∞` as a half prediction `n_B → 0⁺` while the full one stays
+     positive. At the stalled point of a failing fit: a bin with `n = 65.5`,
+     `n_A = 131`, `n_B ≈ 0`, gradient ~7.8e6 pointing into that boundary, most
+     negative Hessian eigenvalue −2.6e11. The dangerous sliver narrows like
+     `1/√N_MC` but never closes. Along the straight line from that point to the
+     de-biased minimum `L_cf` decreases monotonically and is positive definite
+     after the first tenth: the right minimum is the one in the basin of the
+     ordinary MLE.
+
+  Fix: `Fitter.minimize()` first minimizes the ordinary likelihood (the
+  `--mcStatDebias none` objective) and starts the de-biased fit from its minimum.
+  Through `minimize()` on the same toy, with both fixes: 0/40, 0/41, 0/41
+  failures for the ordinary fit and for the de-biased fit; without the warm start
+  the de-biased fit still fails 8/40 and 6/41 at the two lower MC statistics.
+- **`--noHessian`**: the bread (de-biased; Gauss–Newton under `--covMode fisher`)
+  and the sandwich block `c_iᵀHc_j`, `c_i = A⁻¹e_i`, from Hessian-vector
+  products; identical to the dense covariance to 1e-11 or better in every mode
+  (observed, fisher, continuous-M, fisher without de-biasing).
+- **Adjusted scans** (`W_adj = W·dᵀΣ⁻¹d / dᵀC⁻¹d`): on a linear chisq toy the
+  adjusted 1D statistic is `(d/σ_sand)²` at every point, the adjusted 2D statistic
+  equals `dᵀΣ⁻¹d` to 2e-13, and the adjusted `--contourScan` interval is
+  `±σ_sand` (0.020607; curvature σ 0.020390).
+- **Goodness of fit at the de-biased minimum** (`Fitter.mcstat_gof`). The
+  statistic is the ordinary one, `2·(reduced NLL)` of the de-biased objective
+  *with* bin-by-bin stat at its minimum; only its reference changes (design doc
+  §5a). With bin-by-bin stat its mean is far from the bin count: per bin
+  `E[q_b] = s(1+ρ) − ρ` (`= 1 − ρ` for `s = 1/(1+ρ)`), because β absorbs the common
+  MC fluctuation but not the halves' disagreement (`E[Δ_AΔ_B] = −σ²_MC`). A
+  variant on the unprofiled predictions (mean ≈ nbins) was tried and dropped as
+  inconsistent with the fit, which uses bin-by-bin stat.
+
+  numpy emulation of the chisq fit with BB-lite (β profiled per bin on the full
+  term and shared by the halves, 1500 toys): ρ≈1: mean `q` −1.69±0.40 (pred
+  −2.23), var 235 (pred 237); ρ≈0.25: 42.85±0.28 (pred 43.00), var 119 (pred 124);
+  without BB-lite, ρ≈1, 6000 toys: mean 55.7 (pred 58), var 592 (pred 601).
+
+  rabbit toys (60 bins, 2 linear POIs, data AND templates fluctuated per toy,
+  folds re-drawn; MC/data statistics ratio 1 unless noted):
+
+  | config | toys | mean q (pred) | var q (pred) | p<0.05 | p<0.32 | mean p |
+  |---|---|---|---|---|---|---|
+  | chisq, no BB, k=2            | 180 | 58.8±2.0 (58.0)     | 697 (592)   | 0.067 | 0.356 | 0.50 |
+  | Poisson, no BB, k=2          | 180 | 58.5±2.0 (58.0)     | 696 (592)   | 0.061 | 0.367 | 0.50 |
+  | Poisson, no BB, k=2, MC ×4   | 120 | 59.8±1.3 (58.0)     | 203 (190)   | 0.067 | 0.375 | 0.47 |
+  | chisq, BB-lite, k=2          | 180 | −0.9±1.2 (−2.2)     | 279 (237)   | 0.067 | 0.378 | 0.48 |
+  | Poisson, BB-lite, k=2        | 150 | −1.5±1.4 (−2.1)     | 277 (236)   | 0.060 | 0.353 | 0.50 |
+  | Poisson, BB-lite, k=3        | 120 | −3.5±1.5 (−2.1)     | 281 (252)   | 0.033 | 0.292 | 0.52 |
+  | Poisson, BB-lite, k=2, MC ×4 | 120 | 44.8±1.0 (43.0)     | 132 (124)   | 0.083 | 0.383 | 0.46 |
+  | Poisson, BB-lite, k=2, MC ÷4 |  60 | −181.5±5.6 (−187.5) | 1855 (2137) | 0.033 | 0.383 | 0.45 |
+
+  Means agree within 1–2σ. The variances come out 5–18% above the prediction in
+  every row, but that is one fluctuation, not a bias: all configurations reuse
+  seeds 1–6 and draw the data first, so they share the same data fluctuations.
+  A numpy replica of the toy generator reproduces rabbit's `q` toy by toy (to
+  2e-13 without BB-lite; within 0.5 with it, from small differences in the
+  BB-lite formulation) and gives, with many toys, var 578±8 (pred ~592, no BB,
+  10000 toys) and 230±5 (pred 237, BB-lite, 4000 toys), against 697±74 and
+  279±29 from the 180 rabbit toys. The p<0.05 rates, 3–8%, are consistent with
+  5% at this sample size. The reference is a large-count approximation
+  (second-order expansion of the data term, moment-matched shape); an exact
+  alternative is a parametric bootstrap with Poisson data and resampled fold
+  templates (not implemented).

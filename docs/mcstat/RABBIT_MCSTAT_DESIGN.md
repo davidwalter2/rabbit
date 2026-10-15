@@ -340,6 +340,94 @@ All differentiable, all through the existing `loss_val_grad`/`loss_val_grad_hess
 paths — no change to the minimizer interface. The de-biasing is purely additive
 terms in the scalar NLL + a post-fit sandwich.
 
+## 5a. Minimization, goodness of fit, `--noHessian`, scans
+
+**Warm start.** The de-biased objectives are only *locally* convex. The Poisson
+jackknife contains `+w_A y ln n_A` (and the same for B), which goes to `−∞` as a
+half prediction `n_A → 0⁺` while the full one stays positive; the continuous-M
+penalty `−½θᵀMθ` outgrows a Poisson likelihood far from the minimum. From a far
+start, such as the blinding offsets (std 5), the minimizer can slide toward that
+boundary. `Fitter.minimize()` therefore first minimizes the ordinary likelihood
+(the `--mcStatDebias none` objective: the data term on the full templates, no M;
+every other term shared) and starts the de-biased fit from its minimum, which
+lies within O(σ) of the de-biased one, inside its convex basin. Skipped for a
+quadratic objective (closed-form solve). Separately, the scipy loss maps a
+non-finite value to `+∞`: scipy's trust-region update compares
+`ρ = actual/predicted reduction` with thresholds, and every comparison on a NaN
+`ρ` is False, so the radius never shrank and the same rejected step was proposed
+until `--earlyStopping` (and again after each restart). Far-start scan on a
+60-bin toy (RESULTS.md §9r): with both, no failures out of ~40 feasible starts
+at any MC statistics; without the warm start, 8/40 and 6/41 at 200 and 2000
+events per fold per bin.
+
+**Goodness of fit at the de-biased minimum.** The statistic is the same as for
+an ordinary fit: `q = 2·(L_cf(θ̂) − L_sat)` = 2·(reduced NLL), the de-biased
+objective *including* bin-by-bin stat at its own minimum (the jackknife weights
+sum to one, so `L_cf` vanishes at the saturated point like the ordinary
+likelihood). Only its reference distribution differs (`Fitter.mcstat_gof`).
+Per bin, with `e = y − n` the full residual (variance `V(1+ρ)`, data and MC),
+`Δ_{A,B} = n_{A,B} − n` the halves' MC deviations (independent of `e`,
+`E[Δ_AΔ_B] = −σ²_MC`, `Var(Δ_A+Δ_B) = σ²_MC (a−b)²/(ab)`), and `s` the fraction of
+`e` that bin-by-bin stat leaves in the data term (its constraint term restores
+the coefficient of `e²` to `s`), to leading order
+
+    q_b·V = s·e² − s·e·(Δ_A + Δ_B) + Δ_A·Δ_B
+
+- without bin-by-bin stat (`s = 1`) this is the cross-fit χ²
+  `Σ_b D_b (y−n_A)(y−n_B)` (exact for chisq, any k): the MC fluctuations cancel in
+  its mean, `E[q_b] = 1`;
+- with it (`s ≈ 1/(1+ρ)`), `E[q_b] = s(1+ρ) − ρ = 1 − ρ`: β absorbs the common MC
+  fluctuation, but not the halves' disagreement. A mismodelling shift `d` in the
+  bin still raises `E[q_b]` by `d²/(V+σ²)`, exactly as in the ordinary
+  bin-by-bin-stat saturated test.
+
+So `q` is a weighted χ² `Σ_b λ_b z_b²` (`λ_b = s_b(1+ρ_b)`, minus the fitted
+parameters: mean `Σλ_b + n_constrained − tr(A⁻¹H)`, `tr(A⁻¹H)` the effective
+number of fitted parameters from the sandwich bread and meat), moment-matched to
+`c·χ²_ν`, plus an approximately Gaussian `G` with mean `−Σρ_b` and variance
+`Σ[2ρ_b² + s_b²(1+ρ_b)ρ_b(a−b)²/(ab)]`; the p-value is `P(c·χ²_ν + G ≥ q)`. `s_b`
+is taken from the fit itself, `s_b = 1 − ∂n̂_b/∂y_b` of the profiled prediction,
+so it holds for any bin-by-bin stat type and mode; `ρ_b` is the MC variance of
+the prediction over the data variance. The fit result stores
+`mcstat_gof_pvalue`/`_mean`/`_var`, and `rabbit_plot_hists.py` uses the p-value.
+
+*Approximations.* This reference is a large-count (leading-order) result: the
+per-bin decomposition is the second-order expansion of the data term around `y`
+(exact for chisq, leading order for Poisson), and the shape is moment-matched
+(weighted χ² plus a Gaussian `G`). The ordinary saturated test also relies on
+large counts (Wilks), but as a genuine likelihood ratio its χ² limit is generic;
+the de-biased objective is not a likelihood. An approximation-free alternative,
+left as a follow-up, is a parametric bootstrap of the whole sampling process:
+Poisson pseudo-data from the fitted prediction, MC fold templates resampled from
+their own (Poisson or effective-count) distribution around the observed ones,
+refit, recompute `q`.
+Under `--noHessian` the parameter count stands in for `tr(A⁻¹H)`. Not available
+for continuous-M, whose objective contains `−½θᵀMθ`, which depends on the origin
+of θ and is no goodness-of-fit measure. Calibration on rabbit toys: RESULTS.md
+§9r.
+
+**`--noHessian`.** The covariance rows of the POIs and NOIs come from conjugate
+gradient on the bread HVP (`c_i = A⁻¹e_i`; the Gauss–Newton HVP under
+`--covMode fisher`, via the same surrogate as §2c). The sandwich block is
+`Σ_ij = c_iᵀ H c_j`: one meat HVP per row for the fold methods, none for
+continuous-M (`Σ_ij = C_ij + c_iᵀ M c_j`). Identical to the dense path
+(`Fitter.cov_block_hessfree`). `--mcStatDebiasCov dataPropagated` is refused.
+
+**Adjusted scans.** Profiling the de-biased objective gives intervals calibrated
+to its curvature `A`, not to the sandwich. The scans report the adjusted
+composite-likelihood statistic (Pace, Salvan & Sartori 2011): along the
+direction `d = ψ − ψ̂`
+
+    W_adj(ψ) = W(ψ) · (dᵀ Σ_ψ⁻¹ d) / (dᵀ C_ψ⁻¹ d)
+
+with `C_ψ`, `Σ_ψ` the curvature and sandwich blocks of the scanned parameters;
+for one parameter the factor is the constant `C_ψ/Σ_ψ`. It agrees with the
+sandwich Wald statistic to quadratic order while keeping the shape of the profile
+along each ray (exactly `dᵀΣ⁻¹d` for a quadratic objective). `--scan` and
+`--scan2D` write the adjusted values, and the raw profiles as
+`nll_scan_unadjusted_*`; `--contourScan` uses the threshold `cl²/factor`.
+`--asymImpacts` (contour-based) is refused under de-biasing.
+
 ## 5. Validation hooks (port the toy)
 - `tests/test_mcstat_debias.py`: the 2-process / 200-bin near-degenerate toy (and
   smaller ones) as rabbit input tensors; rabbit vs closed-form numpy references for
