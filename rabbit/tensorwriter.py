@@ -71,6 +71,9 @@ class TensorWriter:
         # used by the SPARSE split-logk path (multiply the shared systematic factor
         # by exp(delta . theta)). [channel][process][syst] -> [k, nbinschan].
         self.dict_logk_folds_delta = {}
+        # continuous-M moment terms (add_mc_stat_moment): term name -> the
+        # per-bin variance convention of M's denominator
+        self.mcstat_moment_variance = {}
         self.dict_logkavg = {}  # [channel][proc][syst]
         self.dict_logkhalfdiff = {}  # [channel][proc][syst]
         self.dict_logkavg_indices = {}
@@ -301,17 +304,18 @@ class TensorWriter:
         The user fills `h` with an extra categorical/integer axis (named
         `fold_axis`) assigning each *generated* event to one of `k` folds (all
         oversampled copies of a generated event in the SAME fold; assignment
-        independent of the fitted observables — RABBIT_MCSTAT_DESIGN.md §2a).
-        The writer:
+        independent of the fitted observables --
+        docs/mcstat/RABBIT_MCSTAT_DESIGN.md §2a). Neither condition can be
+        checked here. The writer:
           * derives the FULL template by projecting the fold axis out
             (`h_full = sum_f h[fold=f]`) and registers it via the ordinary
             add_process path (so sumw / sumw2 / systematics are unchanged), and
-          * stores the per-fold dense templates `[k, nbinschan]` for the
-            cross-fit (two-half / k-fold) de-biasing in the fitter.
-        `k` is inferred from the size of `fold_axis`. In sparse mode the FULL
-        template is still stored sparse (CSR); the per-fold fold templates are
-        densified ([k, nbinschan]) — the O(k*nparams*nbins) de-bias cost — and the
-        fitter uses a dense per-fold yield path.
+          * keeps the per-fold templates `[k, nbinschan]` for the cross-fit
+            (two-half / k-fold) de-biasing in the fitter.
+        `k` (any k >= 2) is inferred from the size of `fold_axis`. Storage in the
+        output is k times the nominal templates: dense `[k, nbinsfull, nproc]`
+        in dense mode; in sparse mode `[k, nnz]` values on the sparsity pattern
+        of the (sparse) nominal norm, so the folds keep its sparsity.
         """
         self._check_hist_and_channel(h, channel)
         # resolve the fold axis (by name or index) and its size k
@@ -351,27 +355,117 @@ class TensorWriter:
         self.dict_norm_folds[channel][name] = norm_folds.astype(self.dtype)
         self.fold_k[channel][name] = k
 
-    def add_mc_stat_moment(self, M, param_names, name="mcstat_M"):
+    def _common_fold_k(self):
+        """Number of MC-stat folds, or None if no process was added with a
+        fold_axis. All folded processes must share it."""
+        kset = {k for c in self.channels for k in self.fold_k[c].values()}
+        if not kset:
+            return None
+        if len(kset) != 1:
+            raise NotImplementedError(
+                f"All folded processes must share a common number of folds k; "
+                f"got {sorted(kset)}."
+            )
+        return kset.pop()
+
+    def _sparse_fold_values(self, kfold, indices, values, procs, systs):
+        """Sparse-mode fold templates on the canonical sparse norm pattern.
+
+        Returns ``norm_folds`` [k, nnz] (the fold values at each stored (bin,
+        proc) entry of the sparse norm, in the same order) and, if systematics
+        were added with a fold_axis, the split-logk deltas ``logk_folds_delta``
+        [k, nnz, nfolded] with the global indices of the folded systematics.
+        Storage is k times the sparse norm (plus k*nfolded times it for the
+        deltas), i.e. the folds inherit the sparsity of the nominal templates.
+
+        A fold entry is kept only where the full template is non-zero. Fold
+        values at a (bin, proc) whose full template is exactly zero (folds that
+        cancel, e.g. with negative weights) have no full-sample counterpart and
+        are dropped with a warning; they sum to zero, so the folds still sum to
+        the full template.
+        """
+        rows = indices[:, 0]
+        cols = indices[:, 1]
+        chans = list(self.channels.keys())
+        nprocs = len(procs)
+        starts = np.cumsum([0] + [self.nbinschan[c] for c in chans])
+        # group the entries by (channel, process)
+        key = (np.searchsorted(starts, rows, side="right") - 1) * nprocs + cols
+        order = np.argsort(key, kind="stable")
+        bounds = np.searchsorted(key[order], np.arange(len(chans) * nprocs + 1))
+
+        folded_systs = sorted(
+            {
+                s
+                for c in chans
+                for p in self.dict_logk_folds_delta[c]
+                for s in self.dict_logk_folds_delta[c][p]
+            },
+            key=systs.index,
+        )
+        norm_folds = np.empty([kfold, len(values)], self.dtype)
+        logk_folds_delta = None
+        folded_syst_idx = None
+        if folded_systs:
+            logk_folds_delta = np.zeros(
+                [kfold, len(values), len(folded_systs)], self.dtype
+            )
+            folded_syst_idx = np.array(
+                [systs.index(s) for s in folded_systs], dtype=np.int64
+            )
+
+        ndropped = 0
+        for ichan, chan in enumerate(chans):
+            for iproc, proc in enumerate(procs):
+                igroup = ichan * nprocs + iproc
+                sel = order[bounds[igroup] : bounds[igroup + 1]]
+                local = rows[sel] - starts[ichan]
+                folds = self.dict_norm_folds[chan].get(proc)
+                if folds is None:
+                    norm_folds[:, sel] = values[sel][None, :] / kfold
+                    continue
+                norm_folds[:, sel] = folds[:, local]
+                on_support = np.zeros(folds.shape[1], dtype=bool)
+                on_support[local] = True
+                ndropped += np.count_nonzero(np.any(folds != 0.0, axis=0) & ~on_support)
+                deltas = self.dict_logk_folds_delta[chan].get(proc, {})
+                for j, s in enumerate(folded_systs):
+                    if s in deltas:
+                        logk_folds_delta[:, sel, j] = deltas[s][:, local]
+        if ndropped:
+            logger.warning(
+                f"{ndropped} (bin, process) entries have non-zero MC-stat fold "
+                "templates but an exactly zero full template; their fold values "
+                "are dropped from the sparse fold storage."
+            )
+        return norm_folds, logk_folds_delta, folded_syst_idx
+
+    MCSTAT_MOMENT_VARIANCES = ("bblite_inflated", "bare")
+
+    def add_mc_stat_moment(self, M, param_names, *, variance, name="mcstat_M"):
         """Frozen MC-stat noise-floor matrix for the continuous-M de-biasing.
 
         ``M`` is the ``nparams x nparams`` noise floor
-        ``M_ij = sum_b (sum_{e in b} w_e^2 s_i(e) s_j(e)) / mu_b`` accumulated in
-        the event loop at the expansion point (see RABBIT_MCSTAT_DESIGN.md §1).
-        It is added to the NLL as the de-attenuation penalty
-        ``-1/2 theta^T M theta`` (i.e. an external quadratic term with Hessian
+        ``M_ij = sum_b (sum_{e in b} w_e^2 s_i(e) s_j(e)) / V_b`` accumulated in
+        the event loop at the expansion point
+        (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §1). With ``--mcStatDebias
+        continuousM`` it is added to the NLL as the de-attenuation penalty
+        ``-1/2 theta^T M theta`` (an external quadratic term with Hessian
         ``-M``), which de-biases the central value and gives curvature
-        ``H_data - M``. ``param_names`` label the rows/cols of ``M`` and are
-        resolved against the fit parameter list at fit time.
+        ``H_data - M``; with any other ``--mcStatDebias`` the fitter ignores it.
+        ``param_names`` label the rows/cols of ``M`` and are resolved against
+        the fit parameter list at fit time.
 
-        IMPORTANT — denominator / BB-lite: ``mu_b`` is the per-bin variance used
-        to weight the score outer products, i.e. the SAME variance the fit's
-        per-bin term uses. With bin-by-bin stat (BB-lite) ON, that effective
-        variance is the INFLATED ``mu_b + sum_proc sumw2_b`` (data stat + MC
-        stat), so ``M`` must use that denominator. Using the bare data variance
-        while BB-lite is on makes ``M`` roughly a factor ~2 too large, so
-        ``H_data - M`` goes non-positive-definite and the fit diverges
-        (RABBIT_MCSTAT_DESIGN.md §1b). With BB-lite OFF use ``mu_b`` = the data
-        (chisq) or expected (Poisson) variance.
+        Denominator: ``V_b`` must be the same per-bin variance the fit's per-bin
+        term uses, which depends on whether the fit runs with bin-by-bin stat.
+        With it ON that is the inflated ``mu_b + sum_proc sumw2_b`` (data stat +
+        MC stat); with it OFF the bare data (chisq) or expected (Poisson)
+        variance. Using the bare variance under bin-by-bin stat makes ``M``
+        roughly a factor ~2 too large, so ``H_data - M`` goes
+        non-positive-definite and the fit diverges
+        (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §1b). The convention is recorded
+        with the term, and the fitter refuses an ``M`` whose convention does not
+        match its bin-by-bin stat setting.
 
         Parameters
         ----------
@@ -380,12 +474,25 @@ class TensorWriter:
             symmetry; only the de-attenuation penalty is formed here).
         param_names : sequence of str
             Length-``n`` parameter names indexing ``M``.
+        variance : {"bblite_inflated", "bare"}
+            The per-bin variance ``V_b`` used in the denominator of ``M``:
+            ``"bblite_inflated"`` (``mu_b + sum_proc sumw2_b``, for fits with
+            bin-by-bin stat) or ``"bare"`` (for fits without it). Required.
         name : str
-            External-term label (default ``"mcstat_M"``); also flags the term as
-            the MC-stat moment so the fitter can build the sandwich covariance.
+            External-term label (default ``"mcstat_M"``); must start with
+            ``"mcstat"``, which is how the fitter recognizes the term.
         """
         import hist as _hist
 
+        if variance not in self.MCSTAT_MOMENT_VARIANCES:
+            raise ValueError(
+                f"add_mc_stat_moment: variance must be one of "
+                f"{self.MCSTAT_MOMENT_VARIANCES}, got {variance!r}"
+            )
+        if not str(name).startswith("mcstat"):
+            raise ValueError(
+                f"add_mc_stat_moment: name must start with 'mcstat', got {name!r}"
+            )
         M = np.asarray(M, dtype=self.dtype)
         names = list(param_names)
         if M.shape != (len(names), len(names)):
@@ -396,12 +503,10 @@ class TensorWriter:
         ax0 = _hist.axis.StrCategory(names, name="mcstat_params0")
         ax1 = _hist.axis.StrCategory(names, name="mcstat_params1")
         h = _hist.Hist(ax0, ax1, storage=_hist.storage.Double())
-        h.view(flow=False)[...] = (
-            -M
-        )  # hess = -M  ->  +1/2 x^T H x = -1/2 theta^T M theta
+        # hess = -M  ->  +1/2 x^T H x = -1/2 theta^T M theta
+        h.view(flow=False)[...] = -M
         self.add_external_likelihood_term(hess=h, name=name)
-        # tag for the fitter's sandwich covariance
-        self.mcstat_moment_term = name
+        self.mcstat_moment_variance[name] = variance
 
     def add_channel(self, axes, name=None, masked=False, flow=False):
         if flow and masked is False:
@@ -1460,18 +1565,20 @@ class TensorWriter:
         **kargs,
     ):
         """Add a systematic whose variation histogram(s) carry an MC-stat fold
-        axis, SPLITTING logk per fold (RABBIT_MCSTAT_DESIGN.md §2a). The full
-        systematic is registered by projecting the fold axis out; per-fold
-        logkavg (and, for an asymmetric symmetrize mode, per-fold logkhalfdiff)
-        [k, nbinschan] are stored for the cross-fit so the systematic's own
-        template noise is de-biased.
+        axis, SPLITTING logk per fold (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §2a).
+        The full systematic is registered by projecting the fold axis out;
+        per-fold logkavg (and, for an asymmetric symmetrize mode, per-fold
+        logkhalfdiff) [k, nbinschan] are stored for the cross-fit so the
+        systematic's own template noise is de-biased. In sparse mode only the
+        per-fold delta against the full logk is stored, over the folded
+        systematics and the sparse norm pattern (log_normal, symmetric only).
 
         `h` is either a single histogram (mirror=True, symmetric) or a list
         [up, down] of two histograms (asymmetric); both must carry the named
         fold_axis (the only extra axis beyond the channel). The process must have
-        been added with the SAME fold_axis. Dense only; the 'linear'/'quadratic'
-        symmetrize modes (which split into two systematics) are not supported with
-        folds."""
+        been added with the SAME fold_axis. The histograms must be hist.Hist (not
+        SparseHist); the 'linear'/'quadratic' symmetrize modes (which split into
+        two systematics) are not supported with folds."""
         is_pair = isinstance(h, (list, tuple))
         h0 = h[0] if is_pair else h
         if self.sparse and self._issparse(h0):
@@ -2189,22 +2296,19 @@ class TensorWriter:
 
             ibin += nbinschan
 
-        # --- MC-stat cross-fit fold templates (two-half / k-fold de-biasing).
-        # Assemble [k, nbinsfull, nproc] if any process was added with fold_axis.
-        # Folded processes store their k fold templates; non-folded processes
-        # store norm_full/k in each fold so they are identical across folds
-        # (MC-stat-exempt -> drop out of the de-bias). A common k across all
-        # folded processes is required.
-        any_folded = any(len(self.fold_k[c]) for c in self.channels)
+        # --- MC-stat cross-fit fold templates (two-half / k-fold de-biasing),
+        # present only if a process was added with a fold_axis. Folded processes
+        # store their k fold templates; the others store norm_full/k in every
+        # fold, identical across folds (MC-stat-exempt: they drop out of the
+        # de-bias). Dense mode: [k, nbinsfull, nproc]. Sparse mode: [k, nnz],
+        # values on the sparsity pattern of the sparse norm, assembled together
+        # with the sparse split-logk deltas once that pattern is in canonical
+        # order (_sparse_fold_values).
+        kfold = self._common_fold_k()
         norm_folds = None
-        if any_folded:
-            kset = {k for c in self.channels for k in self.fold_k[c].values()}
-            if len(kset) != 1:
-                raise NotImplementedError(
-                    f"All folded processes must share a common number of folds k; "
-                    f"got {sorted(kset)}."
-                )
-            kfold = kset.pop()
+        logk_folds_delta = None
+        mcstat_folded_syst_idx = None
+        if kfold is not None and not self.sparse:
             norm_folds = np.zeros([kfold, nbinsfull, nproc], self.dtype)
             ibin = 0
             for chan, chan_info in self.channels.items():
@@ -2217,56 +2321,13 @@ class TensorWriter:
                             self.dict_norm_folds[chan][proc]
                         )
                     else:
-                        # MC-stat-exempt: spread the full template evenly
-                        full = self.dict_norm[chan][proc]
-                        if self._issparse(full):
-                            dense = np.zeros([nbinschan], self.dtype)
-                            dense[full.indices] = full.data
-                            full = dense
                         norm_folds[:, ibin : ibin + nbinschan, iproc] = (
-                            full[None, :] / kfold
+                            self.dict_norm[chan][proc][None, :] / kfold
                         )
                 ibin += nbinschan
 
         systs = self.get_systs()
         nsyst = len(systs)
-
-        # SPARSE split-logk: assemble the per-fold logk DELTA for folded systs
-        # [k, nbinsfull, nproc, n_folded] + the folded global syst indices, so the
-        # sparse fold-yield path can multiply the shared factor by exp(delta.theta).
-        logk_folds_delta = None
-        mcstat_folded_syst_idx = None
-        if norm_folds is not None and self.sparse:
-            folded_systs = sorted(
-                {
-                    s
-                    for c in self.channels
-                    for p in self.dict_logk_folds_delta[c]
-                    for s in self.dict_logk_folds_delta[c][p]
-                },
-                key=lambda s: systs.index(s),
-            )
-            if folded_systs:
-                kfold = norm_folds.shape[0]
-                mcstat_folded_syst_idx = np.array(
-                    [systs.index(s) for s in folded_systs], dtype=np.int64
-                )
-                logk_folds_delta = np.zeros(
-                    [kfold, nbinsfull, nproc, len(folded_systs)], self.dtype
-                )
-                ibin = 0
-                for chan in self.channels.keys():
-                    nbinschan = self.nbinschan[chan]
-                    for iproc, proc in enumerate(procs):
-                        if proc not in self.dict_norm[chan]:
-                            continue
-                        deltas = self.dict_logk_folds_delta[chan].get(proc, {})
-                        for j, s in enumerate(folded_systs):
-                            if s in deltas:
-                                logk_folds_delta[
-                                    :, ibin : ibin + nbinschan, iproc, j
-                                ] = deltas[s]
-                        ibin += nbinschan
 
         if self.symmetric_tensor:
             logger.info("No asymmetric systematics - write fully symmetric tensor")
@@ -2477,6 +2538,13 @@ class TensorWriter:
             norm_sparse_indices = norm_sparse_indices[norm_sort_indices]
             norm_sparse_values = norm_sparse_values[norm_sort_indices]
 
+            if kfold is not None:
+                norm_folds, logk_folds_delta, mcstat_folded_syst_idx = (
+                    self._sparse_fold_values(
+                        kfold, norm_sparse_indices, norm_sparse_values, procs, systs
+                    )
+                )
+
             # now permute the indices of the first dimension of logk_sparse corresponding to the resorting of norm_sparse
 
             # compute the inverse permutation from the sorting of norm_sparse
@@ -2527,8 +2595,12 @@ class TensorWriter:
             )
             logk_folds = None
             if any_folded_syst:
-                kset = {k for c in self.channels for k in self.fold_k[c].values()}
-                kfold = kset.pop()
+                # a variation shared across folds is replicated into each fold:
+                # unchanged for the multiplicative log_normal form; split evenly
+                # (1/k) for the additive normal form, so that the folds sum to
+                # the full variation just as the fold templates sum to the full
+                # nominal
+                shared_scale = 1.0 / kfold if self.systematic_type == "normal" else 1.0
                 if self.symmetric_tensor:
                     logk_folds = np.zeros([kfold, nbinsfull, nproc, nsyst], self.dtype)
                 else:
@@ -2570,7 +2642,7 @@ class TensorWriter:
                             avg_f = (
                                 logkavg_folds_proc[syst]
                                 if syst in logkavg_folds_proc
-                                else dict_logkavg_proc[syst][None, :]
+                                else shared_scale * dict_logkavg_proc[syst][None, :]
                             )
                             if self.symmetric_tensor:
                                 logk_folds[:, bs, iproc, isyst] = avg_f
@@ -2584,7 +2656,8 @@ class TensorWriter:
                                     )
                                 elif syst in dict_logkhalfdiff_proc:
                                     logk_folds[:, bs, iproc, 1, isyst] = (
-                                        dict_logkhalfdiff_proc[syst][None, :]
+                                        shared_scale
+                                        * dict_logkhalfdiff_proc[syst][None, :]
                                     )
 
                         if self.symmetric_tensor:
@@ -2770,8 +2843,9 @@ class TensorWriter:
             sumw2, f, "hsumw2", maxChunkBytes=self.chunkSize
         )
 
-        # MC-stat cross-fit fold templates [k, nbinsfull, nproc] (dense), only
-        # written when at least one process was added with a fold_axis.
+        # MC-stat cross-fit fold templates, only written when at least one
+        # process was added with a fold_axis: [k, nbinsfull, nproc] in dense
+        # mode, [k, nnz] values on the sparse norm pattern in sparse mode.
         if norm_folds is not None:
             nbytes += h5pyutils_write.writeFlatInChunks(
                 norm_folds, f, "hnorm_folds", maxChunkBytes=self.chunkSize
@@ -2779,7 +2853,8 @@ class TensorWriter:
             f.attrs["mcstat_fold_k"] = int(norm_folds.shape[0])
             norm_folds = None
 
-        # SPARSE split-logk: per-fold logk delta for folded systs + their indices.
+        # SPARSE split-logk: per-fold logk delta [k, nnz, nfolded] for the
+        # folded systs + their global syst indices.
         if logk_folds_delta is not None:
             nbytes += h5pyutils_write.writeFlatInChunks(
                 logk_folds_delta, f, "hlogk_folds_delta", maxChunkBytes=self.chunkSize
@@ -2842,6 +2917,10 @@ class TensorWriter:
             ext_group = f.create_group("external_terms")
             for term in self.external_terms:
                 term_group = ext_group.create_group(term["name"])
+                if term["name"] in self.mcstat_moment_variance:
+                    term_group.attrs["mcstat_variance"] = self.mcstat_moment_variance[
+                        term["name"]
+                    ]
                 params_ds = term_group.create_dataset(
                     "params",
                     [len(term["params"])],

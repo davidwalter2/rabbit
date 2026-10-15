@@ -721,13 +721,23 @@ def common_parser():
         "--mcStatDebias",
         default="none",
         choices=["none", "continuousM", "twoHalf", "kfold"],
-        help="Limited-MC-statistics de-biasing of the POI point/curvature. "
-        "'continuousM' subtracts the frozen noise-floor matrix M (supplied via "
-        "TensorWriter.add_mc_stat_moment) from the curvature: -1/2 theta^T M theta in "
-        "the objective. NOTE: only de-biases parameters that enter the prediction "
-        "LINEARLY (use --allowNegativeParam for POIs; rabbit's default x^2 transform "
-        "cancels the correction). 'twoHalf'/'kfold' use cross-fit fold templates "
-        "(general / nonlinear-safe). Default 'none'.",
+        help="Limited-MC-statistics de-biasing of the POI point/curvature "
+        "(docs/mcstat/RABBIT_MCSTAT_DESIGN.md). 'continuousM' subtracts the frozen "
+        "noise-floor matrix M (supplied via TensorWriter.add_mc_stat_moment, whose "
+        "denominator convention must match --binByBinStat) from the curvature: "
+        "-1/2 theta^T M theta in the objective; M is ignored for any other choice. "
+        "NOTE: only de-biases parameters that enter the prediction LINEARLY (use "
+        "--allowNegativeParam for POIs; rabbit's default x^2 transform cancels the "
+        "correction). 'twoHalf' and 'kfold' are the same cross-fit method "
+        "(general / nonlinear-safe) on MC-stat fold templates, written with "
+        "TensorWriter.add_process(..., fold_axis=...): the number of folds k (any "
+        "k >= 2) is inferred from the size of that axis, so there is nothing to "
+        "choose here; the k-fold averaging over all fold pairs is realized in "
+        "--covMode fisher. The fold axis must assign each GENERATED event (with all "
+        "of its oversampled copies) to one fold, independently of the fitted "
+        "observables; the writer cannot check this. Fold templates cost k times "
+        "the nominal templates in the input (dense [k, nbins, nproc], or k times "
+        "the non-zero entries in sparse mode). Default 'none'.",
     )
     parser.add_argument(
         "--mcStatDebiasCov",
@@ -739,16 +749,7 @@ def common_parser():
         "undercovers without). 'dataPropagated' = Huber-White delta-method sandwich "
         "propagating the data AND template (sumw2) variances through theta_hat "
         "(continuous-M, dense): CONSERVATIVE, over-covers (~0.81, needs a downward "
-        "calibration; RESULTS §7d). Default 'sandwich'.",
-    )
-    parser.add_argument(
-        "--mcStatKfold",
-        default=2,
-        type=int,
-        help="DEPRECATED / unused: the number of folds k is inferred from the "
-        "fold-axis size in the input, and the k-fold averaging uses the COMPLETE "
-        "pairwise U-statistic (all C(k,k/2)/2 groupings, O(k), parameter-free) in "
-        "--covMode fisher. No fold/regrouping count needs to be chosen here.",
+        "calibration; docs/mcstat/RESULTS.md §7d). Default 'sandwich'.",
     )
     parser.add_argument(
         "--covMode",

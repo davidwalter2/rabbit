@@ -907,19 +907,13 @@ def fit(args, fitter, ws, dofit=True):
             # sandwich's extra term is reported as the `mcStatDebias` group.
             _debias = getattr(fitter, "mcStatDebias", "none")
             _debiascov = getattr(fitter, "mcStatDebiasCov", "sandwich")
-            _is_debiased = (
-                _debias == "continuousM"
-                and getattr(fitter, "mcstat_M", None) is not None
-            ) or (
-                _debias in ("twoHalf", "kfold")
-                and getattr(fitter, "norm_A", None) is not None
-            )
+            _is_debiased = getattr(fitter, "mcstat_debias_active", False)
             if _debiascov == "dataPropagated" and _is_debiased:
                 # Huber-White delta-method sandwich (conservative; over-covers).
                 cov = fitter.cov_dataprop_sandwich(cov_curv)
                 logger.info(
                     "Reporting data-propagated Var(score) sandwich "
-                    "(Huber-White, conservative/over-covers; RESULTS §7d)"
+                    "(Huber-White, conservative/over-covers; docs/mcstat/RESULTS.md §7d)"
                 )
             elif _debiascov == "sandwich" and _is_debiased:
                 if _debias == "continuousM":

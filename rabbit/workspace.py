@@ -77,13 +77,7 @@ class Workspace:
         # traditional impacts decompose the de-biased CURVATURE and append the
         # extra coverage term diag(sandwich - curvature) as an "mcStatDebias"
         # group (matching the extra column from traditional_impacts.impacts_parms).
-        _is_debiased = (
-            getattr(fitter, "mcStatDebias", "none") == "continuousM"
-            and getattr(fitter, "mcstat_M", None) is not None
-        ) or (
-            getattr(fitter, "mcStatDebias", "none") in ("twoHalf", "kfold")
-            and getattr(fitter, "norm_A", None) is not None
-        )
+        _is_debiased = getattr(fitter, "mcstat_debias_active", False)
         extra_traditional = list(param_impact_group_names)
         if (
             _is_debiased
