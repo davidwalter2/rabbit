@@ -598,6 +598,18 @@ class MultiDeviceFitter(Fitter):
     def cov_mcstat_sandwich(self, *args, **kwargs):
         self._unsharded("MC-stat de-biasing", "--mcStatDebias continuousM")
 
+    def mcstat_meat(self, *args, **kwargs):
+        self._unsharded("MC-stat de-biasing", "--mcStatDebias")
+
+    def mcstat_gof(self, *args, **kwargs):
+        self._unsharded("MC-stat de-biasing", "--mcStatDebias")
+
+    def cov_block_hessfree(self, *args, **kwargs):
+        self._unsharded(
+            "The de-biased or Gauss-Newton Hessian-free covariance",
+            "--mcStatDebias / --covMode fisher with --noHessian",
+        )
+
     def cov_dataprop_sandwich(self, *args, **kwargs):
         self._unsharded(
             "The data-propagated sandwich", "--mcStatDebiasCov dataPropagated"

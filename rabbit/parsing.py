@@ -737,7 +737,9 @@ def common_parser():
         "of its oversampled copies) to one fold, independently of the fitted "
         "observables; the writer cannot check this. Fold templates cost k times "
         "the nominal templates in the input (dense [k, nbins, nproc], or k times "
-        "the non-zero entries in sparse mode). Default 'none'.",
+        "the non-zero entries in sparse mode). A de-biased fit first minimizes "
+        "the ordinary likelihood and starts from its minimum (the de-biased "
+        "objectives are only locally convex). Default 'none'.",
     )
     parser.add_argument(
         "--mcStatDebiasCov",
