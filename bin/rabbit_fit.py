@@ -592,9 +592,12 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False, blind=Fal
                         )
                         saturated_ok = False
                 if saturated_ok:
-                    # mcstat_warm_start=False: the start above is already the main
-                    # (de-biased) fit's minimum, which q >= 0 relies on
-                    cb = fitter_saturated.minimize(mcstat_warm_start=False)
+                    # the start above is already the main (de-biased) fit's
+                    # minimum, which q >= 0 relies on: warm (trust-constr only),
+                    # no MC-stat ordinary-likelihood leg
+                    cb = fitter_saturated.minimize(
+                        warm_start=True, mcstat_warm_start=False
+                    )
                     cov_saturated = None
                     edmval = None
                     if not args.noHessian:
@@ -851,7 +854,9 @@ def fit(args, fitter, ws, dofit=True):
 
     if dofit:
         _t_min = time.perf_counter()
-        cb = fitter.minimize()
+        # an --externalPostfit start is a previous fit's minimum: warm
+        # (trust-constr with --constraints only, see --minimizerWarmStart)
+        cb = fitter.minimize(warm_start=args.externalPostfit is not None)
         logger.debug(
             f"[timing] fitter.minimize(): {time.perf_counter() - _t_min:.1f} s"
         )
