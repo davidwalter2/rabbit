@@ -845,3 +845,164 @@ def test_continuous_m_ignored_without_option(moment_toys, tmp_path):
     f1 = _moment_fit(moment_toys["M"], tmp_path, "--noBinByBinStat")
     assert f1.mcstat_M is None and not f1.mcstat_debias_active
     np.testing.assert_allclose(f1.x.numpy(), f0.x.numpy(), rtol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# minimization robustness: non-finite trial points, ordinary-likelihood warm start
+# ---------------------------------------------------------------------------
+
+POISSON_LINEAR = ("--noBinByBinStat", "--allowNegativeParam")
+
+
+def test_ordinary_fit_recovers_from_nonfinite_trial_step(tmp_path):
+    """From this start, scipy's trust-krylov proposes a step into negative
+    expected yields. A NaN loss there used to freeze the trust radius (every
+    comparison on a NaN rho is False) until --earlyStopping, and the restart
+    re-proposed the same step; it now reads as +inf and the radius shrinks."""
+    fn, _ = make_small_fold_toy(tmp_path, 2)
+    f = fit_toy(fn, tmp_path, *POISSON_LINEAR, "--mcStatDebias", "none")
+    x_ref = f.x.numpy().copy()
+    f.x.assign([2.4629323126223066, 9.486694480004758])
+    f.minimize()
+    np.testing.assert_allclose(f.x.numpy(), x_ref, atol=1e-5)
+
+
+@pytest.mark.parametrize("bbb", [False, True], ids=["noBBB", "BBB"])
+def test_debiased_fit_from_far_start_uses_ordinary_warm_start(bbb, tmp_path):
+    """The Poisson jackknife objective is unbounded below where a half
+    prediction goes to zero while the full one stays positive, so from a far
+    start (e.g. blinding offsets) the de-biased fit could slide away from its
+    minimum. minimize() first minimizes the ordinary likelihood, whose minimum
+    lies in the convex basin of the de-biased one."""
+    fn, _ = make_small_fold_toy(tmp_path, 4)
+    args = ("--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    if not bbb:
+        args = ("--noBinByBinStat",) + args
+    f = fit_toy(fn, tmp_path, *args)
+    x_ref = f.x.numpy().copy()
+    f.x.assign([3.143434, 13.06379379])  # the blinded start of this toy
+    f.minimize()
+    np.testing.assert_allclose(f.x.numpy(), x_ref, atol=1e-5)
+    _, _, h = f.loss_val_grad_hess()
+    assert np.linalg.eigvalsh(np.asarray(h)).min() > 0
+
+
+# ---------------------------------------------------------------------------
+# --noHessian: Hessian-free curvature and sandwich
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "toy,extra",
+    [
+        ("folds", ("--mcStatDebias", "twoHalf")),
+        ("folds", ("--mcStatDebias", "kfold", "--covMode", "fisher")),
+        ("folds", ("--mcStatDebias", "none", "--covMode", "fisher")),
+        ("moment", ("--mcStatDebias", "continuousM")),
+        ("moment", ("--mcStatDebias", "continuousM", "--covMode", "fisher")),
+    ],
+    ids=["twoHalf", "kfold-fisher", "none-fisher", "continuousM", "continuousM-fisher"],
+)
+def test_hessfree_covariance_matches_dense(toy, extra, tmp_path):
+    """cov_block_hessfree (conjugate gradient on Hessian-vector products) gives
+    the dense curvature A^-1 and the dense sandwich: c_i^T H c_j with
+    c_i = A^-1 e_i for the fold methods, C + c_i^T M c_j for continuous-M."""
+    if toy == "folds":
+        fn, _ = make_small_fold_toy(tmp_path, 3, systematic_type="normal", syst=1)
+    else:
+        fn, _ = make_mcstat_moment_toy(tmp_path, bbb_variance=True)
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", *extra)
+    _, g, h = f.loss_val_grad_hess()
+    A = f.fisher_curvature(h) if f.covMode == "fisher" else h
+    C = np.linalg.inv(np.asarray(A))
+    if not f.mcstat_debias_active:
+        S = C
+    elif f.mcStatDebias == "continuousM":
+        S = np.asarray(f.cov_mcstat_sandwich(A))
+    else:
+        S = np.asarray(f.cov_twohalf_sandwich(A, covMode=f.covMode))
+    idx = np.arange(int(f.x.shape[0]))
+    _, curv, rep = f.cov_block_hessfree(g, idx, covMode=f.covMode)
+    np.testing.assert_allclose(curv, C, rtol=1e-6, atol=1e-12)
+    np.testing.assert_allclose(rep, S, rtol=1e-6, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# adjusted profile-likelihood scans
+# ---------------------------------------------------------------------------
+
+
+def test_adjusted_scans_follow_the_sandwich(tmp_path):
+    """For a quadratic (linear chisq) de-biased objective the profiled
+    statistic is d^T C^-1 d exactly; the adjusted statistic must then be the
+    sandwich Wald form d^T Sigma^-1 d, in 1D and 2D, and the adjusted contour
+    interval must be +-sigma_sandwich."""
+    fn, _ = make_small_fold_toy(tmp_path, 2)
+    f = fit_toy(fn, tmp_path, *LINEAR_CHISQ, "--mcStatDebias", "twoHalf")
+    _, _, h = f.loss_val_grad_hess()
+    C = np.linalg.inv(np.asarray(h))
+    S = np.asarray(f.cov_twohalf_sandwich(h))
+    assert not np.allclose(C, S)
+    f.cov.assign(S)
+    f.set_mcstat_scan_covariances(np.arange(2), C, S)
+    assert f.mcstat_scan_needs_adjustment()
+    xh = f.x.numpy().copy()
+
+    xs, dnll, _ = f.nll_scan("flat", 2.0, 5)
+    W = 2 * dnll * f.mcstat_scan_adjustment([0], (xs - xh[0])[:, None])
+    np.testing.assert_allclose(W, (xs - xh[0]) ** 2 / S[0, 0], rtol=1e-6, atol=1e-9)
+
+    xs2, ys2, dnll2 = f.nll_scan2D(("flat", "step"), 1.5, 5)
+    gx, gy = np.meshgrid(
+        np.asarray(xs2) - xh[0], np.asarray(ys2) - xh[1], indexing="ij"
+    )
+    d = np.stack([gx.ravel(), gy.ravel()], -1)
+    W2 = 2 * dnll2.ravel() * f.mcstat_scan_adjustment([0, 1], d)
+    wald = np.einsum("ni,ij,nj->n", d, np.linalg.inv(S), d)
+    np.testing.assert_allclose(W2, wald, rtol=1e-6, atol=1e-9)
+
+    q = 1.0 / float(f.mcstat_scan_adjustment([0], [[1.0]])[0])
+    interval, _ = f.contour_scan("flat", float(f.reduced_nll().numpy()), q)
+    np.testing.assert_allclose(np.abs(interval), np.sqrt(S[0, 0]), rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# goodness of fit at the de-biased minimum
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("k", [2, 3])
+def test_gof_statistic_and_reference(k, tmp_path):
+    """The goodness-of-fit statistic is 2 * reduced_nll() of the de-biased
+    objective at its minimum, bin-by-bin stat included, as for an ordinary fit.
+    For a chisq data term without bin-by-bin stat it is exactly the cross-fit
+    chi2 sum_b (y-n_A)(y-n_B)/V, for any k, and its reference mean is
+    nbins - p (the MC fluctuations cancel). With bin-by-bin stat the profiled
+    beta leaves the fraction s_b ~ 1/(1+rho_b) of a residual, and the reference
+    mean becomes sum_b (1 - rho_b) - p."""
+    fn, arr = make_small_fold_toy(tmp_path, k)
+    y = arr["data"]
+    a, b = k // 2, k - k // 2
+    Ti = [np.stack([arr["folds"][0][i], arr["folds"][1][i]], 1) for i in range(k)]
+    TA, TB = (k / a) * sum(Ti[:a]), (k / b) * sum(Ti[a:])
+
+    f = fit_toy(fn, tmp_path, *LINEAR_CHISQ, "--mcStatDebias", "kfold")
+    x = f.x.numpy()
+    q = 2 * float(f.reduced_nll().numpy())
+    np.testing.assert_allclose(q, np.sum((y - TA @ x) * (y - TB @ x) / y), rtol=1e-8)
+    shrink, rho = (np.asarray(v) for v in f._mcstat_gof_bin_inputs())
+    np.testing.assert_allclose(shrink, 1.0)
+    g = f.mcstat_gof(q, trace_AinvH=2.0)
+    assert g["mean"] == pytest.approx(SMALL_NBINS - 2)
+    assert 0.0 <= g["pvalue"] <= 1.0
+
+    fb = fit_toy(
+        fn, tmp_path, "--chisqFit", "--allowNegativeParam", "--mcStatDebias", "kfold"
+    )
+    shrink_b, rho_b = (np.asarray(v) for v in fb._mcstat_gof_bin_inputs())
+    np.testing.assert_allclose(shrink_b, 1.0 / (1.0 + rho_b), rtol=0.05)
+    gb = fb.mcstat_gof(2 * float(fb.reduced_nll().numpy()), trace_AinvH=2.0)
+    np.testing.assert_allclose(
+        gb["mean"], np.sum(shrink_b * (1 + rho_b) - rho_b) - 2.0, rtol=1e-8
+    )
+    assert 0.0 <= gb["pvalue"] <= 1.0

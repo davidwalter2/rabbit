@@ -727,6 +727,12 @@ _SHARDED_SAFE = {
     "nll_scan",
     "nll_scan2D",
     "edmval_cov_rows_hessfree",
+    # MC-stat de-biasing bookkeeping: parameter-level covariance blocks and
+    # flags only, and never reached sharded since MultiDeviceFitter refuses
+    # --mcStatDebias in its constructor
+    "mcstat_scan_needs_adjustment",
+    "mcstat_scan_adjustment",
+    "set_mcstat_scan_covariances",
     # parameter-level state only
     "defaultassign",
     "load_fitresult",
