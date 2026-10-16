@@ -30,7 +30,7 @@ at the **objective** level and let autodiff produce the de-biased gradient/Hessi
 Fit options (in `Fitter.__init__` / CLI), **three orthogonal axes**:
 ```
 --mcStatDebias {none, continuousM, twoHalf, kfold}   # de-bias the point/curvature; default none
---mcStatDebiasCov {curvature, sandwich, dataPropagated}  # default sandwich when debias != none
+--mcStatDebiasCov {curvature, sandwich, dataPropagated}  # default sandwich; dataPropagated: continuousM only
 --covMode {observed, fisher}                         # curvature primitive; applies EVERYWHERE
 ```
 `twoHalf` and `kfold` are the same method: the number of folds `k` is inferred from
@@ -405,6 +405,13 @@ Under `--noHessian` the parameter count stands in for `tr(A⁻¹H)`. Not availab
 for continuous-M, whose objective contains `−½θᵀMθ`, which depends on the origin
 of θ and is no goodness-of-fit measure. Calibration on rabbit toys: RESULTS.md
 §9r.
+
+The sandwich meat is the curvature of the whole ordinary objective, every term
+of `_compute_nll` (constraints, bin-by-bin stat, external terms, regularization)
+with the data term on the full templates; the bread is the same for the
+de-biased objective. `--mcStatDebiasCov dataPropagated` propagates the variance
+of the full templates (`sumw2`), so it is refused for the fold methods, whose
+objective depends on the fold templates.
 
 **Saturated projection tests** (`--computeSaturatedProjectionTests`). The
 statistic is the difference of the de-biased objective between the main fit and

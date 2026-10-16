@@ -1180,3 +1180,53 @@ def test_projection_test_refuses_an_ill_posed_projection(tmp_path):
     fs.arm_regularizers()
     ok, worst = fs.mcstat_projection_check(np.arange(orig.nparams, comp.nparams))
     assert not ok and worst > 1e-3
+
+
+# ---------------------------------------------------------------------------
+# review follow-ups: regularization in the meat, refused combinations
+# ---------------------------------------------------------------------------
+
+
+def test_meat_includes_every_term_of_the_ordinary_objective(tmp_path):
+    """The sandwich meat is the curvature of the ordinary (--mcStatDebias none)
+    objective at the de-biased point, regularization included: with a
+    regularizer it must equal the Hessian of that objective."""
+    from rabbit.regularization.regularizer import Regularizer
+
+    class Penalty(Regularizer):
+        needs_observables = False
+
+        def __init__(self):
+            self._idx = None
+
+        def set_expectations(self, initial_params, initial_observables, parms=None):
+            self._idx = self.resolve_indices(parms, ["flat"], who="Penalty")["flat"]
+
+        def compute_nll_penalty(self, params, observables):
+            return 50.0 * tf.square(params[self._idx] - 1.0)
+
+    fn, _ = make_small_fold_toy(tmp_path, 2)
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    f.tau.assign(1.0)
+    f.regularizers = [Penalty()]
+    f.arm_regularizers()
+    meat = np.asarray(f.mcstat_meat("observed"))
+    with f._ordinary_likelihood():
+        _, _, h_ordinary = f.loss_val_grad_hess()
+    np.testing.assert_allclose(meat, np.asarray(h_ordinary), rtol=1e-8)
+
+
+def test_data_propagated_sandwich_refused_for_fold_methods(tmp_path):
+    """cov_dataprop_sandwich differentiates the full templates only, while a
+    fold objective depends on the fold templates: refused."""
+    fn, _ = make_small_fold_toy(tmp_path, 2)
+    with pytest.raises(NotImplementedError, match="only available for"):
+        fit_toy(
+            fn,
+            tmp_path,
+            "--allowNegativeParam",
+            "--mcStatDebias",
+            "twoHalf",
+            "--mcStatDebiasCov",
+            "dataPropagated",
+        )
