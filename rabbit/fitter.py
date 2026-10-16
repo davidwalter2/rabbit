@@ -73,6 +73,56 @@ NATIVE_MINIMIZER_OPTIONS = {
 }
 
 
+def weighted_chi2_sf(x, weights):
+    """P(sum_j w_j Z_j^2 > x) for independent standard normal Z_j and w_j > 0,
+    by Imhof's (1961) inversion of the characteristic function (exact up to the
+    numerical integration). Equal weights reduce to the chi2 survival function."""
+    import scipy.integrate
+    import scipy.stats
+
+    w = np.asarray(weights, dtype=np.float64)
+    w = w[w > 1e-12 * max(np.max(w, initial=0.0), 1e-300)]
+    if len(w) == 0:
+        return float(x < 0)
+    if np.allclose(w, w[0], rtol=1e-12):
+        return float(scipy.stats.chi2.sf(x / w[0], len(w)))
+
+    def amp(u):
+        return 1.0 / (u * np.prod((1.0 + (w * u) ** 2) ** 0.25))
+
+    def half_atan(u):
+        return 0.5 * np.sum(np.arctan(w * u))
+
+    def integrand(u):
+        return np.sin(half_atan(u) - 0.5 * x * u) * amp(u)
+
+    # sin(A(u) - x u / 2) = sin A cos(x u / 2) - cos A sin(x u / 2) with a slowly
+    # varying A: a smooth start, then Fourier-weighted quadrature (QAWF) for the
+    # oscillatory tail
+    split = 1.0 / np.max(w)
+    head = scipy.integrate.quad(integrand, 0.0, split, limit=200)[0]
+    if x > 0:
+        tail = (
+            scipy.integrate.quad(
+                lambda u: np.sin(half_atan(u)) * amp(u),
+                split,
+                np.inf,
+                weight="cos",
+                wvar=0.5 * x,
+            )[0]
+            - scipy.integrate.quad(
+                lambda u: np.cos(half_atan(u)) * amp(u),
+                split,
+                np.inf,
+                weight="sin",
+                wvar=0.5 * x,
+            )[0]
+        )
+    else:
+        tail = scipy.integrate.quad(integrand, split, np.inf, limit=500)[0]
+    return float(min(max(0.5 + (head + tail) / np.pi, 0.0), 1.0))
+
+
 def _is_mcstat_term(term):
     """External term written by TensorWriter.add_mc_stat_moment."""
     return str(term["name"]).startswith("mcstat")
@@ -293,11 +343,7 @@ class Fitter:
         # --- limited-MC-statistics de-biasing (docs/mcstat/RABBIT_MCSTAT_DESIGN.md)
         # The options themselves are read before init_fit_parms (which needs
         # mcStatDebias to decide whether the M penalty term is kept).
-        # Frozen noise-floor matrix M (nparams x nparams), reconstructed from the
-        # external term(s) written by TensorWriter.add_mc_stat_moment (stored as
-        # hess = -M, so M = -scatter(hess_dense)). Used for the continuous-M
-        # sandwich covariance Sigma = A^-1 + A^-1 M A^-1 (H - A = M).
-        self.mcstat_M = self._build_mcstat_M()
+        # self.mcstat_M (the continuous-M matrix) is built in init_fit_parms.
         self._check_mcstat_moment_variance()
         # Cross-fit (two-half / k-fold) fold templates, see _init_mcstat_folds.
         self._init_mcstat_folds()
@@ -521,8 +567,16 @@ class Fitter:
                 trainable=False,
                 name="cov",
             )
+            # curvature covariance of an MC-stat de-biased fit (self.cov holds
+            # the reported one); the histogram global impacts decompose it
+            self.mcstat_cov_curv = tf.Variable(
+                tf.linalg.diag(self.var_prefit),
+                trainable=False,
+                name="mcstat_cov_curv",
+            )
         else:
             self.cov = None
+            self.mcstat_cov_curv = None
 
         # regularization
         self.regularizers = []
@@ -559,6 +613,13 @@ class Fitter:
             self.parms,
             self.indata.dtype,
         )
+        # Frozen noise-floor matrix M over the full parameter vector, from the
+        # term(s) written by TensorWriter.add_mc_stat_moment (stored as hess = -M,
+        # so M = -scatter(hess_dense)), for the continuous-M sandwich
+        # Sigma = A^-1 + A^-1 M A^-1 (H - A = M). Rebuilt here because a re-init
+        # (e.g. the saturated projection test's composite model) changes the
+        # parameter layout.
+        self.mcstat_M = self._build_mcstat_M()
 
         # for freezing parameters
         self.frozen_params = []
@@ -1838,6 +1899,161 @@ class Fitter:
         Ainv = tf.linalg.inv(A)
         return Ainv @ tf.cast(H, Ainv.dtype) @ Ainv
 
+    def mcstat_reported_cov(self, bread, cov_curv, covMode="observed"):
+        """The covariance a fit reports, given its curvature covariance
+        cov_curv = bread^-1: unchanged without MC-stat de-biasing or with
+        --mcStatDebiasCov curvature; otherwise the sandwich (continuous-M:
+        A^-1 + A^-1 M A^-1; fold methods: A^-1 H A^-1) or the data-propagated
+        sandwich."""
+        if not self.mcstat_debias_active or self.mcStatDebiasCov == "curvature":
+            return cov_curv
+        if self.mcStatDebiasCov == "dataPropagated":
+            return self.cov_dataprop_sandwich(cov_curv)
+        if self.mcStatDebias == "continuousM":
+            return self.cov_mcstat_sandwich(bread)
+        return self.cov_twohalf_sandwich(bread, covMode=covMode)
+
+    def mcstat_postfit_covariances(self, grad, hess):
+        """(edmval, bread, curvature covariance, reported covariance) at the
+        current point, from the gradient and observed Hessian of the objective:
+        the bread is the observed Hessian or, under --covMode fisher, its
+        Gauss-Newton form."""
+        bread = self.fisher_curvature(hess) if self.covMode == "fisher" else hess
+        edmval, cov_curv = self.edmval_cov(grad, bread)
+        return (
+            edmval,
+            bread,
+            cov_curv,
+            self.mcstat_reported_cov(bread, cov_curv, covMode=self.covMode),
+        )
+
+    def mcstat_curvature_and_meat(self):
+        """Dense bread A (de-biased curvature, observed or Gauss-Newton per
+        --covMode) and the score variance B at the current point, for the
+        saturated projection test.
+
+        B is the sandwich meat (continuous-M: A + M; fold methods: the ordinary
+        likelihood's curvature) where bin-by-bin stat carries the MC variance of
+        the data term. Without bin-by-bin stat that meat has none, so the data
+        term's MC variance is added explicitly, sum_b rho_b J_b J_b^T / V_b with
+        rho_b the MC/data variance ratio (_mcstat_gof_bin_inputs)."""
+        _, _, hess = self.loss_val_grad_hess()
+        bread = self.fisher_curvature(hess) if self.covMode == "fisher" else hess
+        if self.mcStatDebias == "continuousM":
+            meat = bread + tf.cast(self.mcstat_M, bread.dtype)
+        else:
+            meat = self.mcstat_meat(self.covMode)
+        if not self.bbstat.enabled:
+            meat = meat + self._mc_data_variance_curvature()
+        return np.asarray(bread), np.asarray(meat)
+
+    @tf.function
+    def _mc_data_variance_curvature(self):
+        """sum_b rho_b J_b J_b^T / V_b, J = d nexp / dx: the score variance the
+        MC fluctuations of the predictions add to the data term, as the Hessian
+        of a zero-residual surrogate (cf. _gauss_newton_surrogate)."""
+        _, rho = self._mcstat_gof_bin_inputs()
+        rho = tf.stop_gradient(rho)
+        with tf.GradientTape() as t2:
+            with tf.GradientTape() as t1:
+                n = self._compute_yields_noBBB(full=False, compute_norm=False)[0][
+                    : self.indata.nbins
+                ]
+                r = n - tf.stop_gradient(n)
+                if self.chisqFit:
+                    D = 1.0 / self.varnobs
+                elif self.covarianceFit:
+                    D = tf.linalg.diag_part(self.data_cov_inv)
+                else:
+                    D = tf.math.divide_no_nan(tf.ones_like(n), tf.stop_gradient(n))
+                val = 0.5 * tf.reduce_sum(rho * D * tf.square(r))
+            g = t1.gradient(val, self.x)
+        return t2.jacobian(g, self.x)
+
+    def mcstat_projection_check(self, psi_indices, rtol=1e-8):
+        """Whether the saturated projection test of a de-biased fit is defined.
+
+        Directions of the bin scales psi that the data cannot constrain must
+        also be flat for the de-biased objective. Both are judged from the
+        Gauss-Newton forms of the data term plus the constraints, whose null
+        spaces are exact (J v = 0; the observed Hessians, and bin-by-bin stat's
+        observed curvature, add residual * d2n terms that are small but not zero
+        there): the profiled Fisher of the ordinary likelihood,
+        H~ = H_pp - H_pl H_ll^-1 H_lp, and the profiled cross-fit Fisher, A~. A common normalization is
+        flat for both (the halves scale with the full prediction). A projection
+        that integrates out what separates the processes is not: the bin scales
+        then absorb a change of process composition in the full prediction while
+        the half predictions, whose composition fluctuates, still change, and the
+        saturated de-biased fit would follow template noise (or run to the
+        singularity of the Poisson jackknife). Returns (ok, worst ratio)."""
+        psi = np.asarray(psi_indices)
+        lam = np.setdiff1d(np.asarray(self.floating_indices), psi)
+        A, H = (np.asarray(m) for m in self._mcstat_gn_data_curvatures())
+
+        def schur(M):
+            R = np.linalg.solve(M[np.ix_(lam, lam)], M[np.ix_(psi, lam)].T).T
+            St = M[np.ix_(psi, psi)] - R @ M[np.ix_(psi, lam)].T
+            return 0.5 * (St + St.T)
+
+        A_t, H_t = schur(A), schur(H)
+        h, V = np.linalg.eigh(H_t)
+        null = V[:, np.abs(h) <= rtol * np.max(np.abs(h))]
+        if null.shape[1] == 0:
+            return True, 0.0
+        scale = np.max(np.abs(np.linalg.eigvalsh(A_t)))
+        worst = float(np.max(np.abs(np.linalg.eigvalsh(null.T @ A_t @ null)))) / scale
+        return worst <= 1e-6, worst
+
+    @tf.function
+    def _mcstat_gn_data_curvatures(self):
+        """(cross-fit, full-sample) data Gauss-Newton Fisher plus the constraint
+        curvature: the Hessians of the surrogates of _gauss_newton_surrogate."""
+        out = []
+        for debiased in (True, False):
+            with tf.GradientTape() as t2:
+                with tf.GradientTape() as t1:
+                    val = (
+                        self._gauss_newton_surrogate(self._fisher_data_terms(debiased))
+                        + self._compute_lc()
+                    )
+                g = t1.gradient(val, self.x)
+            out.append(t2.jacobian(g, self.x))
+        return out
+
+    def mcstat_projection_test(self, dq, psi_indices, bread, meat):
+        """p-value of the saturated projection test of a de-biased fit.
+
+        dq = 2 (L(main fit) - L(saturated fit)) is the difference of the
+        de-biased objective between two nested fits, the saturated one adding
+        the bin scales psi to the analysis parameters lambda. The objective is
+        not a likelihood, so dq is not chi2(dim psi); as a composite-likelihood
+        ratio statistic (Kent 1982) it is asymptotically sum_j mu_j Z_j^2, with
+        mu_j the eigenvalues of A~^+ B~: A~ = A_pp - A_pl A_ll^-1 A_lp the
+        profiled curvature of psi (Schur complement of the bread A) and
+        B~ = P H P^T, P = [1, -A_pl A_ll^-1], the variance of the profiled score
+        from the meat H, both at the null point (the main fit's minimum, scales
+        at 1). Only A_ll is inverted, so a direction in which the bin scales are
+        degenerate with the analysis parameters (e.g. a common normalization)
+        is simply not testable and drops out. Returns (pvalue, mu)."""
+        psi = np.asarray(psi_indices)
+        lam = np.setdiff1d(np.asarray(self.floating_indices), psi)
+        A = np.asarray(bread)
+        H = np.asarray(meat)
+        if not np.isfinite(dq):
+            return float("nan"), np.full(len(psi), np.nan)
+        A_ll = A[np.ix_(lam, lam)]
+        A_pl = A[np.ix_(psi, lam)]
+        R = np.linalg.solve(A_ll, A_pl.T).T  # A_pl A_ll^-1
+        A_t = A[np.ix_(psi, psi)] - R @ A_pl.T
+        P = np.concatenate([np.eye(len(psi)), -R], axis=1)
+        idx = np.concatenate([psi, lam])
+        B_t = P @ H[np.ix_(idx, idx)] @ P.T
+        a, V = np.linalg.eigh(0.5 * (A_t + A_t.T))
+        keep = a > 1e-10 * np.max(np.abs(a))
+        T = V[:, keep] / np.sqrt(a[keep])
+        mu = np.linalg.eigvalsh(T.T @ (0.5 * (B_t + B_t.T)) @ T)
+        return weighted_chi2_sf(dq, mu), np.sort(mu)
+
     def mcstat_meat(self, covMode="observed"):
         """Dense sandwich meat H: the curvature of the ordinary (full-sample)
         likelihood at the current point, in the given --covMode. Continuous-M
@@ -2318,13 +2534,14 @@ class Fitter:
             tf.constant([nstat, nstat], dtype=tf.int64),
         )
 
-    def impacts_parms(self, hess, cov=None, extra_group_vars=None):
+    def impacts_parms(self, hess, cov=None, mcstat_extra_var=None):
         # cov: the covariance matrix to DECOMPOSE (per-nuisance + grouped syst
         # impacts). Defaults to self.cov. For a de-biased fit pass the de-biased
         # CURVATURE covariance (A^-1, in the selected --covMode) and `hess` = the
         # matching de-biased curvature, so the whole decomposition (total / syst /
-        # stat) is internally consistent; the sandwich's extra coverage term is
-        # then reported as the `mcStatDebias` extra group via extra_group_vars.
+        # stat) is internally consistent; the reported covariance's extra term is
+        # then reported as the `mcStatDebias` group, and with bin-by-bin stat as
+        # the combined `mcStat` group, via mcstat_extra_var.
         #
         # The profile=False Hessian is taken here, outside the graph, because
         # assembling it from HVPs (--hvpBatch) runs a Python loop.
@@ -2333,10 +2550,10 @@ class Fitter:
             _, _, hess_no_bbb = self.loss_val_grad_hess(profile=False)
         if cov is None:
             cov = self.cov
-        return self._impacts_parms(hess, hess_no_bbb, cov, extra_group_vars)
+        return self._impacts_parms(hess, hess_no_bbb, cov, mcstat_extra_var)
 
     @tf.function
-    def _impacts_parms(self, hess, hess_no_bbb, cov, extra_group_vars=None):
+    def _impacts_parms(self, hess, hess_no_bbb, cov, mcstat_extra_var=None):
 
         nstat = (
             self.param_model.npoi
@@ -2360,13 +2577,13 @@ class Fitter:
             self.indata.systgroupidxs,
             nmodel_params=self.param_model.npoi + self.param_model.npou,
             param_groupidxs=[idxs for _, idxs in param_groups],
-            extra_group_vars=extra_group_vars,
+            mcstat_extra_var=mcstat_extra_var,
         )
 
         return impacts, impacts_grouped
 
     @tf.function
-    def global_impacts_parms(self, cov=None):
+    def global_impacts_parms(self, cov=None, mcstat_extra_var=None):
         # cov: covariance to decompose (default self.cov). For a de-biased fit
         # pass the de-biased CURVATURE covariance so the global-impact groups
         # (theta0 / nobs / beta0 / syst) decompose it consistently.
@@ -2389,6 +2606,7 @@ class Fitter:
             self.globalImpactsFromJVP,
             cov,
             param_groupidxs=param_groupidxs,
+            mcstat_extra_var=mcstat_extra_var,
         )
 
     @tf.function
@@ -2746,6 +2964,15 @@ class Fitter:
 
         if compute_cov or compute_global_impacts:
             cov_dexpdx = tf.matmul(self.cov, dexpdx, transpose_b=True)
+        # An MC-stat de-biased fit's global impacts decompose its curvature
+        # covariance (the reported one, self.cov, is the sandwich) and add the
+        # difference as the mcStatDebias / mcStat groups.
+        mcstat_impacts = compute_global_impacts and self.mcstat_debias_active
+        if mcstat_impacts:
+            cov_dexpdx_curv = tf.matmul(self.mcstat_cov_curv, dexpdx, transpose_b=True)
+            var_mcstat_extra = tf.einsum(
+                "ij,ji->i", dexpdx, cov_dexpdx - cov_dexpdx_curv
+            )
 
         if compute_cov:
             expcov = dexpdx @ cov_dexpdx
@@ -2801,8 +3028,8 @@ class Fitter:
                 self.bbstat.enabled,
                 self.bbstat.binByBinStatMode,
                 self.globalImpactsFromJVP,
-                cov_dexpdx,
-                expvar_flat,
+                cov_dexpdx_curv if mcstat_impacts else cov_dexpdx,
+                (expvar_flat - var_mcstat_extra) if mcstat_impacts else expvar_flat,
                 expvar.shape,
                 profile,
                 param_groupidxs=param_groupidxs,
@@ -2813,6 +3040,7 @@ class Fitter:
                 prefit_unconstrained_nuisance_uncertainty=(
                     self.prefit_unconstrained_nuisance_uncertainty
                 ),
+                mcstat_extra_var=var_mcstat_extra if mcstat_impacts else None,
             )
         else:
             impacts = None
@@ -3218,6 +3446,40 @@ class Fitter:
                 tf.reshape(var_beta0, [-1])[:, None] * tf.transpose(dresdbeta0)
             )
             res_cov += res_cov_BBB
+
+        if self.mcstat_debias_active:
+            # The propagation above covers the parameters' response to the data,
+            # constraint and beta0 fluctuations, Sigma_prop = sum dx/ds V_s dx/ds^T,
+            # but not the template (MC) noise that the de-biased estimator's
+            # reported covariance Sigma (the sandwich) carries. And unlike an
+            # ordinary fit, whose residual is orthogonal to the fitted directions,
+            # the de-biased minimum leaves a residual component along them, which
+            # would otherwise read as having zero variance. Add the missing
+            # J (Sigma - Sigma_prop) J^T, J = d(expected)/dx.
+            with tf.GradientTape() as t:
+                res_x = fun_res()
+            J = tf.reshape(
+                t.jacobian(res_x, self.x, unconnected_gradients="zero"),
+                [-1, self.x.shape[0]],
+            )
+            dxdx0, dxdnobs, dxdbeta0 = self._dxdvars()
+            if self.covarianceFit:
+                cov_nobs = tf.linalg.inv(self.data_cov_inv)
+            else:
+                v = self.varnobs if self.varnobs is not None else self.nobs
+                cov_nobs = tf.linalg.diag(v)
+            sigma_prop = dxdx0 @ (self.var_x0[:, None] * tf.transpose(dxdx0))
+            sigma_prop += dxdnobs @ cov_nobs @ tf.transpose(dxdnobs)
+            if self.bbstat.enabled:
+                sigma_prop += dxdbeta0 @ (
+                    tf.reshape(var_beta0, [-1])[:, None] * tf.transpose(dxdbeta0)
+                )
+            # the missing piece is a covariance (the template-noise part of the
+            # parameters' variance): keep its positive semi-definite part
+            d = self.cov - sigma_prop
+            evals, evecs = tf.linalg.eigh(0.5 * (d + tf.transpose(d)))
+            sigma_mc = (evecs * tf.nn.relu(evals)[None, :]) @ tf.transpose(evecs)
+            res_cov += J @ sigma_mc @ tf.transpose(J)
 
         return residuals, res_cov
 

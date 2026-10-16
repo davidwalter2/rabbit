@@ -601,6 +601,15 @@ class MultiDeviceFitter(Fitter):
     def mcstat_meat(self, *args, **kwargs):
         self._unsharded("MC-stat de-biasing", "--mcStatDebias")
 
+    def mcstat_reported_cov(self, *args, **kwargs):
+        self._unsharded("MC-stat de-biasing", "--mcStatDebias")
+
+    def mcstat_postfit_covariances(self, *args, **kwargs):
+        self._unsharded("MC-stat de-biasing", "--mcStatDebias")
+
+    def mcstat_curvature_and_meat(self, *args, **kwargs):
+        self._unsharded("MC-stat de-biasing", "--mcStatDebias")
+
     def mcstat_gof(self, *args, **kwargs):
         self._unsharded("MC-stat de-biasing", "--mcStatDebias")
 

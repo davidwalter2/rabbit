@@ -1528,7 +1528,10 @@ def get_chi2(result, no_chi2=True, fittype="postfit", chi2type="automatic"):
         else:
             saturated = False
 
-    return result.get(chi2_key, None), result.get(ndf_key, None), saturated, None
+    # an MC-stat de-biased fit's saturated projection test is not chi2(ndf): use
+    # the p-value from its own reference
+    pvalue = result.get("mcstat_pvalue_saturated") if saturated else None
+    return result.get(chi2_key, None), result.get(ndf_key, None), saturated, pvalue
 
 
 def main():
