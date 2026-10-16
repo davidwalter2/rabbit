@@ -733,6 +733,7 @@ _SHARDED_SAFE = {
     "mcstat_scan_needs_adjustment",
     "mcstat_scan_adjustment",
     "set_mcstat_scan_covariances",
+    "mcstat_projection_test",
     # parameter-level state only
     "defaultassign",
     "load_fitresult",

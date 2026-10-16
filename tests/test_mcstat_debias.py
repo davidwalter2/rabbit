@@ -29,6 +29,8 @@ from pathlib import Path
 import hist
 import numpy as np
 import pytest
+import scipy.stats
+import tensorflow as tf
 
 from rabbit import fitter, inputdata
 from rabbit.param_models import helpers as ph
@@ -1006,3 +1008,175 @@ def test_gof_statistic_and_reference(k, tmp_path):
         gb["mean"], np.sum(shrink_b * (1 + rho_b) - rho_b) - 2.0, rtol=1e-8
     )
     assert 0.0 <= gb["pvalue"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# impacts: mcStatDebias and the combined mcStat group
+# ---------------------------------------------------------------------------
+
+
+def _debiased_postfit(tmp_path, *extra):
+    fn, _ = make_small_fold_toy(tmp_path, 4)
+    f = fit_toy(
+        fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf", *extra
+    )
+    _, g, h = f.loss_val_grad_hess()
+    _, bread, C, S = f.mcstat_postfit_covariances(g, h)
+    f.cov.assign(S)
+    f.mcstat_cov_curv.assign(C)
+    return f, bread, np.asarray(C), np.asarray(S)
+
+
+def test_impact_groups_add_up_to_the_reported_uncertainty(tmp_path):
+    """The traditional and global impacts of a de-biased fit decompose its
+    curvature covariance and append mcStatDebias (reported - curvature) and the
+    combined mcStat (bin-by-bin stat and de-biasing in quadrature), so the
+    groups add up to the reported (sandwich) uncertainty; the same holds for the
+    histogram global impacts."""
+    from rabbit.mappings import helpers as mh
+
+    f, bread, C, S = _debiased_postfit(tmp_path)
+    extra = tf.constant(np.diag(S) - np.diag(C))
+    sigma = np.sqrt(np.diag(S))[:2]
+    for _, grouped in (
+        f.impacts_parms(bread, cov=tf.constant(C), mcstat_extra_var=extra),
+        f.global_impacts_parms(cov=tf.constant(C), mcstat_extra_var=extra),
+    ):
+        g = np.asarray(grouped)  # [stat, binByBinStat, mcStatDebias, mcStat]
+        assert g.shape[1] == 4
+        np.testing.assert_allclose(np.sqrt(np.sum(g[:, :3] ** 2, axis=1)), sigma)
+        np.testing.assert_allclose(g[:, 3], np.hypot(g[:, 1], g[:, 2]))
+        assert np.all(g[:, 2] > 0)
+
+    mapping = mh.load_mapping("BaseMapping", f.indata)
+    exp, aux = f.expected_events(mapping, compute_global_impacts=True)
+    var, grouped = np.asarray(aux[0]).ravel(), np.asarray(aux[3])
+    grouped = grouped.reshape(-1, grouped.shape[-1])
+    np.testing.assert_allclose(np.sum(grouped[:, :3] ** 2, axis=1), var, rtol=1e-8)
+    np.testing.assert_allclose(grouped[:, 3], np.hypot(grouped[:, 1], grouped[:, 2]))
+
+
+# ---------------------------------------------------------------------------
+# saturated projection test of a de-biased fit
+# ---------------------------------------------------------------------------
+
+
+def test_weighted_chi2_sf():
+    rng = np.random.default_rng(1)
+    np.testing.assert_allclose(
+        [fitter.weighted_chi2_sf(x, [1.0] * 5) for x in (1, 5, 12)],
+        scipy.stats.chi2.sf([1, 5, 12], 5),
+    )
+    for w in ([0.5, 1.3, 2.0, 0.2], [3.0, 0.3], list(rng.uniform(0.5, 2, 30))):
+        s = (rng.standard_normal((200000, len(w))) ** 2 * np.asarray(w)).sum(1)
+        xs = np.quantile(s, [0.3, 0.9, 0.99])
+        np.testing.assert_allclose(
+            [fitter.weighted_chi2_sf(x, w) for x in xs], [0.7, 0.1, 0.01], atol=4e-3
+        )
+
+
+def test_projection_test_reference(tmp_path):
+    """The reference of the de-biased saturated projection test,
+    sum_j mu_j chi2_1 with mu = eig(A~^+ B~) of the bin scales' profiled
+    curvature and score variance at the null point. For an ordinary fit (bread
+    = meat) every mu is 1, and a bin-scale direction degenerate with the
+    analysis parameters (here the common normalization, as both processes are
+    free) is not testable and drops out: npou - 1 values."""
+    import copy
+
+    from rabbit.param_models.param_model import (
+        CompositeParamModel,
+        SaturatedProjectModel,
+    )
+
+    ngroup = 6
+    groups = np.repeat(np.arange(ngroup), SMALL_NBINS // ngroup)
+    chinfo = {"ch0": {"axes": [hist.axis.Regular(ngroup, 0, 1, name="g")]}}
+    fn, _ = make_small_fold_toy(tmp_path, 2)
+    for debias, n_mu in (("none", ngroup - 1), ("twoHalf", ngroup - 1)):
+        f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", debias)
+        orig = f.param_model
+        comp = CompositeParamModel(
+            [orig, SaturatedProjectModel(f.indata, chinfo, {"ch0": groups})]
+        )
+        fs = copy.deepcopy(f)
+        fs.init_fit_parms(comp, [], unblind=[], blinding_group=[], freeze_parameters=[])
+        fs.xdefaultassign()
+        xm = f.x.numpy()
+        fs.x[: orig.nparams].assign(xm[: orig.nparams])
+        fs.x[comp.nparams :].assign(xm[orig.nparams :])
+        fs.arm_regularizers()
+        psi = np.arange(orig.nparams, comp.nparams)
+        if debias != "none":
+            assert fs.mcstat_projection_check(psi)[0]
+        if debias == "none":
+            _, _, h = fs.loss_val_grad_hess()
+            A0 = H0 = np.asarray(h)
+        else:
+            A0, H0 = fs.mcstat_curvature_and_meat()
+        fs.minimize(mcstat_warm_start=False)
+        dq = 2 * float(f.reduced_nll().numpy() - fs.reduced_nll().numpy())
+        assert dq >= -1e-6
+        p, mu = fs.mcstat_projection_test(dq, psi, A0, H0)
+        assert len(mu) == n_mu
+        assert np.all(mu > 0)
+        if debias == "none":
+            np.testing.assert_allclose(mu, 1.0, rtol=1e-6)
+        assert 0.0 <= p <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# rabbit_limit.py
+# ---------------------------------------------------------------------------
+
+
+def test_rabbit_limit_uses_the_sandwich_and_adjusted_contours(tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "_rabbit_limit_for_mcstat_tests", REPO / "bin" / "rabbit_limit.py"
+    )
+    rl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rl)
+    fn, _ = make_small_fold_toy(tmp_path, 4)
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    rl._postfit_cov(f)
+    _, g, h = f.loss_val_grad_hess()
+    C = np.linalg.inv(np.asarray(h))
+    S = np.asarray(f.cov_twohalf_sandwich(h))
+    np.testing.assert_allclose(f.cov.numpy(), S, rtol=1e-8)
+    np.testing.assert_allclose(
+        rl._mcstat_contour_factor(f, idx=0), C[0, 0] / S[0, 0], rtol=1e-8
+    )
+
+
+def test_projection_test_refuses_an_ill_posed_projection(tmp_path):
+    """With one bin scale per bin, the scales absorb any change of process
+    composition in the full prediction, which the half predictions still feel:
+    a direction the data cannot constrain but the de-biased objective is not
+    flat along. The check must flag it (the saturated de-biased fit would
+    follow template noise)."""
+    import copy
+
+    from rabbit.param_models.param_model import (
+        CompositeParamModel,
+        SaturatedProjectModel,
+    )
+
+    fn, _ = make_small_fold_toy(tmp_path, 2)
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    chinfo = {"ch0": {"axes": [hist.axis.Regular(SMALL_NBINS, 0, 1, name="x")]}}
+    orig = f.param_model
+    comp = CompositeParamModel(
+        [
+            orig,
+            SaturatedProjectModel(f.indata, chinfo, {"ch0": np.arange(SMALL_NBINS)}),
+        ]
+    )
+    fs = copy.deepcopy(f)
+    fs.init_fit_parms(comp, [], unblind=[], blinding_group=[], freeze_parameters=[])
+    fs.xdefaultassign()
+    xm = f.x.numpy()
+    fs.x[: orig.nparams].assign(xm[: orig.nparams])
+    fs.x[comp.nparams :].assign(xm[orig.nparams :])
+    fs.arm_regularizers()
+    ok, worst = fs.mcstat_projection_check(np.arange(orig.nparams, comp.nparams))
+    assert not ok and worst > 1e-3
