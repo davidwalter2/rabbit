@@ -406,6 +406,47 @@ for continuous-M, whose objective contains `−½θᵀMθ`, which depends on the
 of θ and is no goodness-of-fit measure. Calibration on rabbit toys: RESULTS.md
 §9r.
 
+**Saturated projection tests** (`--computeSaturatedProjectionTests`). The
+statistic is the difference of the de-biased objective between the main fit and
+the composite fit with one free scale per projected bin, `Δq = 2(L − L_sat)`, the
+saturated fit started at the main fit's minimum (without the ordinary-likelihood
+warm start, so `Δq ≥ 0`). As a composite-likelihood ratio (Kent 1982) it is
+asymptotically `Σ_j μ_j χ²₁`, with `μ_j` the eigenvalues of `Ã⁺B̃` at the null
+point: `Ã = A_ψψ − A_ψλ A_λλ⁻¹ A_λψ` the profiled curvature of the bin scales ψ
+(Schur complement of the bread), `B̃ = P H Pᵀ`, `P = [1, −A_ψλ A_λλ⁻¹]`, the
+variance of the profiled score from the meat; p-values by Imhof's inversion
+(`weighted_chi2_sf`). Only `A_λλ` is inverted, so a direction in which the scales
+are degenerate with the analysis parameters (a common normalization) is not
+testable and drops out. Without bin-by-bin stat the meat carries no MC variance,
+so for this test the data term's `Σ_b ρ_b J_bJ_bᵀ/V_b` is added. The test is
+skipped (p = NaN, with a warning) when a bin-scale direction the data cannot
+constrain is not flat for the de-biased objective (`mcstat_projection_check`,
+from the data Gauss–Newton forms): a projection that integrates out what
+separates the processes lets the scales absorb a change of process composition
+that the half predictions still feel. Refused for continuous-M (the free scales
+open directions without data curvature, along which `−½θᵀMθ` is unbounded), and
+with `--noHessian`.
+
+**Impacts.** The traditional and global impacts (parameters and histograms) of a
+de-biased fit decompose its curvature covariance and append `mcStatDebias` (the
+variance the reported covariance adds, `diag(Σ − C)`) and `mcStat`, the whole
+MC-statistical contribution (`binByBinStat` and `mcStatDebias` in quadrature), so
+the groups add up to the reported uncertainty. The Gaussian global impacts
+propagate the data, constraint and β0 variances through the de-biased estimator,
+so the de-biasing changes their data-stat term itself; they get no extra groups.
+
+**Linear χ² of a mapping.** Its residual covariance propagates the data,
+constraint and β0 variances through the fit; for a de-biased fit the parameters'
+template-noise variance, the positive part of `Σ − Σ_prop`, is added through
+`J(·)Jᵀ`. Without it the de-biased minimum, which unlike an ordinary one leaves
+a residual component along the fitted directions, read as a zero-variance
+direction (χ² 565 instead of 33 on a 60-bin toy). Without bin-by-bin stat the
+sandwich itself lacks the MC variance, and so does this term.
+
+**`rabbit_limit.py`.** Gaussian limits use the reported (sandwich) uncertainty;
+likelihood limits use the contour at `q_μ,A / factor`, factor = curvature /
+reported variance of the parameter or mapping output.
+
 **`--noHessian`.** The covariance rows of the POIs and NOIs come from conjugate
 gradient on the bread HVP (`c_i = A⁻¹e_i`; the Gauss–Newton HVP under
 `--covMode fisher`, via the same surrogate as §2c). The sandwich block is
@@ -426,7 +467,9 @@ sandwich Wald statistic to quadratic order while keeping the shape of the profil
 along each ray (exactly `dᵀΣ⁻¹d` for a quadratic objective). `--scan` and
 `--scan2D` write the adjusted values, and the raw profiles as
 `nll_scan_unadjusted_*`; `--contourScan` uses the threshold `cl²/factor`.
-`--asymImpacts` (contour-based) is refused under de-biasing.
+`--asymImpacts` (contour-based) is refused under de-biasing, as is
+`--externalPostfit` without recomputing the covariance when global or histogram
+impacts are requested (the curvature covariance is not stored).
 
 ## 5. Validation hooks (port the toy)
 - `tests/test_mcstat_debias.py`: the 2-process / 200-bin near-degenerate toy (and

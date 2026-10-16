@@ -1355,3 +1355,42 @@ Follow-up to §9q, prompted by end-to-end runs of `rabbit_fit.py`.
   (second-order expansion of the data term, moment-matched shape); an exact
   alternative is a parametric bootstrap with Poisson data and resampled fold
   templates (not implemented).
+
+### §9s. Projection tests, impacts, limits (rabbit)
+- **Saturated projection tests** (design doc §5a): composite-likelihood ratio of
+  the nested de-biased fits, `Σ_j μ_j χ²₁` with `μ = eig(Ã⁺B̃)` from the Schur
+  complements at the null point. rabbit toys: 60 bins = 10 projected bins × 6
+  bins of an integrated-out axis that separates the two processes, data and
+  templates fluctuated; a common normalization is degenerate with the bin
+  scales, leaving 9 testable directions:
+
+  | config | toys | mean Δq (pred Σμ) | var (pred 2Σμ²) | p<0.05 | mean p | naive χ²(10) p<0.05 |
+  |---|---|---|---|---|---|---|
+  | Poisson, BB-lite, k=2 | 150 | 9.26±0.37 (9.00) | 20.1 (18.0) | 0.047 | 0.49 | 0.040 |
+  | Poisson, BB-lite, k=3 | 150 | 9.35±0.37 (9.00) | 20.5 (18.0) | 0.067 | 0.48 | 0.040 |
+  | chisq, BB-lite, k=2   | 150 | 9.29±0.37 (9.00) | 20.4 (18.0) | 0.053 | 0.48 | 0.040 |
+  | Poisson, no BB, k=2   | 150 | 18.20±0.70 (18.00) | 74.2 (72.0) | 0.067 | 0.50 | 0.400 |
+  | chisq, no BB, k=2     |  90 | 17.50±0.91 (18.06) | 74.1 (72.4) | 0.044 | 0.53 | 0.400 |
+
+  With BB-lite μ ≈ 1 (the meat carries the MC variance). Without it the meat
+  needs the data term's MC variance added explicitly (`Σ_b ρ_b J_bJ_bᵀ/V_b`);
+  before that, the same no-BB toys gave mean 18.50 against a prediction of 9.00
+  and p<0.05 = 0.52. With one scale per bin the projection is ill-posed for the
+  de-biased objective: the scales absorb a change of process composition that
+  the halves still feel, and the saturated fit ran to `+∞`. This is now detected
+  from the data Gauss–Newton forms (relative curvature 0.049 / 0.011 with and
+  without BB-lite, against ~1e-16 for the grouped projection) and the test is
+  skipped.
+- **Impacts**: the traditional and global groups add up to the reported
+  (sandwich) uncertainty exactly (0.02924 = 0.02924 on the k=4 toy), with `mcStat`
+  = √(binByBinStat² + mcStatDebias²); also for the histogram global impacts.
+- **Linear χ²**: on an Asimov toy the de-biased fit gave 565 (ndf 60) against 33
+  for the ordinary fit, because one residual direction (along the fitted
+  parameters) had zero propagated variance; with the template-noise term 34. On
+  fluctuated toys the linear χ² of *ordinary* fits is itself unreliable: it
+  solves with a rank-deficient residual covariance (the fitted directions have
+  no variance, `ndf_reduction = 0`), giving medians ~60 but 99th percentiles
+  ~2·10⁴. That is a pre-existing issue, and the de-biased linear χ² (median ~70)
+  could not be calibrated on top of it.
+- **`rabbit_limit.py`**: on the k=4 toy the Gaussian σ goes 0.0282 → 0.0291
+  (sandwich) and the likelihood contour level is divided by 0.969.
