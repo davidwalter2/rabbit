@@ -351,6 +351,19 @@ class Fitter:
             self.mcStatDebias == "continuousM" and self.mcstat_M is not None
         ) or self._fold_debias_active()
 
+        if (
+            self.mcStatDebias in ("twoHalf", "kfold")
+            and self.mcStatDebiasCov == "dataPropagated"
+        ):
+            # cov_dataprop_sandwich differentiates the full templates only; the
+            # fold objectives depend on the separately stored fold templates,
+            # whose own MC variances are not stored
+            raise NotImplementedError(
+                "--mcStatDebiasCov dataPropagated is only available for "
+                "--mcStatDebias continuousM: it propagates the variance of the full "
+                "templates, not of the fold templates a two-half / k-fold fit "
+                "depends on."
+            )
         if self.mcStatDebias in ("twoHalf", "kfold") and self.n_folds is None:
             logger.warning(
                 f"--mcStatDebias {self.mcStatDebias} requested but no fold "
@@ -1503,8 +1516,9 @@ class Fitter:
 
     def _compute_nll_meat(self):
         """Plain full-sample NLL (no jackknife de-bias), used as the two-half
-        sandwich meat H = grad^2 L_full. Mirrors _compute_nll but always uses the
-        full templates and the ordinary per-bin ln."""
+        sandwich meat H = grad^2 L_full. Mirrors _compute_nll -- every term of the
+        objective, regularization included -- but always uses the full templates
+        and the ordinary per-bin ln."""
         nexpfullcentral, _, beta = self._compute_yields_with_beta(
             profile=True,
             compute_norm=False,
@@ -1515,6 +1529,9 @@ class Fitter:
         lbeta = self._compute_lbeta(beta)
         if lbeta is not None:
             l = l + lbeta
+        lpenalty = self._compute_lpenalty(nexpfullcentral)
+        if lpenalty is not None:
+            l = l + lpenalty
         lext = self._compute_external_nll()
         if lext is not None:
             l = l + lext
@@ -2007,7 +2024,8 @@ class Fitter:
     @tf.function
     def _mcstat_gn_data_curvatures(self):
         """(cross-fit, full-sample) data Gauss-Newton Fisher plus the constraint
-        curvature: the Hessians of the surrogates of _gauss_newton_surrogate."""
+        and regularization curvature: the Hessians of the surrogates of
+        _gauss_newton_surrogate."""
         out = []
         for debiased in (True, False):
             with tf.GradientTape() as t2:
@@ -2016,6 +2034,15 @@ class Fitter:
                         self._gauss_newton_surrogate(self._fisher_data_terms(debiased))
                         + self._compute_lc()
                     )
+                    lpenalty = self._compute_lpenalty(
+                        self._compute_yields_with_beta(
+                            profile=True,
+                            compute_norm=False,
+                            full=self._regularizers_need_observables(),
+                        )[0]
+                    )
+                    if lpenalty is not None:
+                        val = val + lpenalty
                 g = t1.gradient(val, self.x)
             out.append(t2.jacobian(g, self.x))
         return out
@@ -3693,30 +3720,30 @@ class Fitter:
         # weight 1.
         lbeta = self._compute_lbeta(beta, full_nll)
 
-        if len(self.regularizers):
-            if not getattr(self, "_regularizers_armed", False):
-                raise RuntimeError(
-                    "Regularizers not armed against the current parameter layout; "
-                    "call arm_regularizers() (or defaultassign()) first."
-                )
-            x = self.get_x()
-            penalties = [
-                reg.compute_nll_penalty(
-                    x,
-                    (
-                        nexpfullcentral
-                        if getattr(reg, "needs_observables", True)
-                        else None
-                    ),
-                )
-                * tf.exp(2 * self.tau)
-                for reg in self.regularizers
-            ]
-            lpenalty = tf.add_n(penalties)
-        else:
-            lpenalty = None
+        lpenalty = self._compute_lpenalty(nexpfullcentral)
 
         return ln, lc, lbeta, lpenalty, beta
+
+    def _compute_lpenalty(self, nexpfullcentral):
+        """Sum of the regularization penalties (None without regularizers);
+        `nexpfullcentral` are the profiled yields the regularizers read."""
+        if not len(self.regularizers):
+            return None
+        if not getattr(self, "_regularizers_armed", False):
+            raise RuntimeError(
+                "Regularizers not armed against the current parameter layout; "
+                "call arm_regularizers() (or defaultassign()) first."
+            )
+        x = self.get_x()
+        penalties = [
+            reg.compute_nll_penalty(
+                x,
+                nexpfullcentral if getattr(reg, "needs_observables", True) else None,
+            )
+            * tf.exp(2 * self.tau)
+            for reg in self.regularizers
+        ]
+        return tf.add_n(penalties)
 
     def _compute_external_nll(self, full_nll=False):
         """Sum of external likelihood term contributions.

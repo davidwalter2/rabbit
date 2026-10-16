@@ -750,7 +750,7 @@ def common_parser():
         "A^-1 + A^-1 M A^-1 (analytic meat; calibration-free ~0.68 with BB-lite, "
         "undercovers without). 'dataPropagated' = Huber-White delta-method sandwich "
         "propagating the data AND template (sumw2) variances through theta_hat "
-        "(continuous-M, dense): CONSERVATIVE, over-covers (~0.81, needs a downward "
+        "(continuous-M only, dense): CONSERVATIVE, over-covers (~0.81, needs a downward "
         "calibration; docs/mcstat/RESULTS.md §7d). Default 'sandwich'.",
     )
     parser.add_argument(

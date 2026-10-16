@@ -1108,7 +1108,8 @@ def make_plot(
 
     if chi2[0] is not None and data and not args.noExtraText:
         if len(chi2) > 2 and chi2[2] is not None:
-            p_val = int(np.round(chi2[2] * 100))
+            # a stored p-value (MC-stat de-biased fit); NaN = not available
+            p_val = int(np.round(chi2[2] * 100)) if np.isfinite(chi2[2]) else None
         else:
             p_val = int(np.round(scipy.stats.chi2.sf(chi2[0], chi2[1]) * 100))
         if saturated_chi2:
@@ -1116,10 +1117,9 @@ def make_plot(
         else:
             chi2_name = r"$\mathit{\chi}^2/\mathit{ndf}$"
 
-        chi2_text = [
-            rf"{chi2_name} = ${np.round(chi2[0],1)}/{chi2[1]}$",
-            rf"$(\mathit{{p}}={p_val}\%)$",
-        ]
+        chi2_text = [rf"{chi2_name} = ${np.round(chi2[0],1)}/{chi2[1]}$"]
+        if p_val is not None:
+            chi2_text.append(rf"$(\mathit{{p}}={p_val}\%)$")
 
         if args.extraTextLoc is None or len(args.extraTextLoc) <= 2:
             text_pieces.extend(chi2_text)

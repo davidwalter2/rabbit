@@ -1248,6 +1248,8 @@ def fit(args, fitter, ws, dofit=True):
         )
     if fitter.mcstat_debias_active and fitter.mcStatDebias == "continuousM":
         p_val = float("nan")
+        # persisted, so consumers do not fall back to chi2(ndfsat)
+        ws.results["mcstat_gof_pvalue"] = p_val
         logger.warning(
             "    p-value: not available for --mcStatDebias continuousM (the "
             "objective contains -1/2 theta^T M theta, which is not a "
