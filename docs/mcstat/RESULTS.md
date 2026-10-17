@@ -1487,6 +1487,41 @@ weakest direction.
   `G` mean `−Σ sρ`, variance `Σ s²[2ρ² + (1+ρ)ρ(a−b)²/(ab)]`; `q` excludes the
   compensator.
 
+**Validation of the redesigned fold methods** (separate profiles + compensator;
+100 toys per point; bias of the degenerate difference, truth 0.42; coverage
+target 0.683, ±0.05):
+
+| ρ | method | bin-by-bin stat | mean bias | median bias | rms | median σ | coverage |
+|---|---|---|---|---|---|---|---|
+| 0.1 | twoHalf | gamma-lite | +0.033 ± 0.017 | +0.059 | 0.171 | 0.155 | 0.60 |
+| 0.1 | twoHalf | gamma-lite dynamic | −0.009 ± 0.017 | −0.024 | 0.172 | 0.153 | 0.62 |
+| 0.1 | twoHalf | normal-additive lite | −0.018 ± 0.016 | −0.025 | 0.161 | 0.154 | 0.72 |
+| 0.1 | twoHalf | normal-mult. full | −0.004 ± 0.014 | −0.002 | 0.140 | 0.153 | 0.72 |
+| 0.3 | twoHalf | gamma-lite | +0.016 ± 0.020 | +0.039 | 0.204 | 0.189 | 0.65 |
+| 0.3 | twoHalf | gamma-lite dynamic | −0.011 ± 0.021 | −0.029 | 0.207 | 0.194 | 0.63 |
+| 0.3 | twoHalf | normal-additive lite | −0.007 ± 0.022 | −0.013 | 0.222 | 0.189 | 0.62 |
+| 0.3 | twoHalf | normal-mult. full | +0.024 ± 0.019 | +0.046 | 0.187 | 0.185 | 0.67 |
+| 0.3 | 2-fold, fisher | gamma-lite | +0.000 ± 0.023 | +0.008 | 0.232 | 0.190 | 0.63 |
+| 0.3 | 2-fold, fisher | normal-mult. full | +0.011 ± 0.023 | +0.029 | 0.231 | 0.191 | 0.59 |
+| 1.0 | twoHalf | gamma-lite | +0.112 ± 0.068 | −0.044 | 0.677 | 0.319 | 0.50 |
+| 1.0 | twoHalf | gamma-lite dynamic | +0.040 ± 0.047 | −0.021 | 0.473 | 0.295 | 0.57 |
+| 1.0 | twoHalf | normal-additive lite | +0.027 ± 0.044 | −0.025 | 0.438 | 0.303 | 0.62 |
+| 1.0 | twoHalf | normal-mult. full (1 fit failed) | +0.057 ± 0.045 | +0.011 | 0.444 | 0.310 | 0.58 |
+| 1.0 | 2-fold, fisher | gamma-lite | +0.041 ± 0.043 | +0.002 | 0.433 | 0.325 | 0.60 |
+| 1.0 | 2-fold, fisher | normal-mult. full | −0.031 ± 0.038 | −0.003 | 0.375 | 0.323 | 0.68 |
+
+The shared-β biases are gone (ρ = 0.3: +0.09 to +0.13 before, now within
+±0.025, every mode), and nothing fails (1 of 1600 fits). Coverage is close to
+the target up to ρ = 0.3 (0.59–0.72, a little low on average). At ρ = 1 the
+medians are unbiased but the point has heavy tails along the degenerate
+direction (rms 0.38–0.68 against σ 0.30–0.33), and coverage drops to
+0.50–0.68; continuous-M covers 0.64–0.77 on the same toy. The likely cause is
+the meat: the full-sample curvature lacks the variance of the jackknife's own
+split-noise term (the `Δ_h` part of the cross-fit score), which is second order in
+the noise floor and matters only where the floor is comparable to the
+information. A cross-half score-variance meat (outlook of the original study)
+would address it; not done.
+
 **Continuous-M with the compensator** (log form's first-order version; 200 toys
 each, ρ ≈ 1; the bias of the ordinary gamma-lite fit is −0.27):
 
