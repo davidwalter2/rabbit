@@ -1429,3 +1429,58 @@ def test_continuous_m_removes_only_what_bin_by_bin_stat_does_not(bbb, models, tm
         S = np.asarray(f.cov_mcstat_sandwich(h))
         Ainv = np.linalg.inv(np.asarray(h))
         np.testing.assert_allclose(S, Ainv + Ainv @ arr["M"] @ Ainv, rtol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "toy,args",
+    [
+        ("moment", ["--mcStatDebias", "continuousM", "--binByBinStatMode", "full"]),
+        ("folds", ["--mcStatDebias", "twoHalf"]),
+        ("folds", ["--mcStatDebias", "twoHalf", "--binByBinStatMode", "full"]),
+        ("folds", ["--mcStatDebias", "none"]),
+    ],
+    ids=["continuousM-full", "twoHalf-gammalite", "twoHalf-full", "none"],
+)
+def test_asimov_is_recentred_with_the_expected_covariance(toy, args, tmp_path):
+    """Asimov data are the expected yields of the noisy templates, so they carry
+    no attenuation and the de-biased objective is not stationary at the
+    generating point. set_mcstat_asimov recentres it there with a linear term
+    (Hessian unchanged) and uses the Gauss-Newton covariance, which does not
+    depend on the data: the Asimov sandwich equals that of real data at the
+    same point. A fit without de-biasing is left untouched."""
+    if toy == "moment":
+        fn, _ = make_mcstat_moment_toy(tmp_path, bbb_variance=True)
+    else:
+        fn, _ = make_small_fold_toy(tmp_path, 2)
+    common = ["--chisqFit", "--allowNegativeParam", *args]
+    f = fit_toy(fn, tmp_path, *common)
+    f.defaultassign()
+    x0 = f.x.numpy()
+    asimov = f.expected_yield()
+    f.set_nobs(asimov)
+    _, g_raw, h_raw = f.loss_val_grad_hess()
+    f.set_mcstat_asimov(True)
+    if not f.mcstat_debias_active:
+        assert f.covMode == "observed"
+        np.testing.assert_array_equal(np.asarray(f.loss_val_grad()[1]), g_raw)
+        return
+    assert np.abs(np.asarray(g_raw)).max() > 1e-3  # the overshoot it removes
+    _, g, h = f.loss_val_grad_hess()
+    np.testing.assert_allclose(np.asarray(g), 0.0, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(h), np.asarray(h_raw), rtol=1e-12)
+    assert f.covMode == "fisher"
+    f.minimize()
+    np.testing.assert_allclose(f.x.numpy(), x0, atol=1e-6)
+    S_asimov = np.asarray(f.mcstat_postfit_covariances(g, h)[3])
+
+    # real data at the same point, same data variance: same fisher sandwich
+    f.set_mcstat_asimov(False)
+    assert f.covMode == "observed"
+    rng = np.random.default_rng(1)
+    y = rng.normal(np.asarray(asimov), np.sqrt(np.asarray(asimov)))
+    f.set_nobs(tf.constant(y), variances=asimov)
+    f.x.assign(x0)
+    f.covMode = "fisher"
+    _, g_d, h_d = f.loss_val_grad_hess()
+    S_data = np.asarray(f.mcstat_postfit_covariances(g_d, h_d)[3])
+    np.testing.assert_allclose(S_asimov, S_data, rtol=1e-6)

@@ -108,6 +108,10 @@ def do_asymptotic_limits(args, fitter, ws, data_values, mapping=None, fit_data=F
         # defreeze process again to evaluate it's dependencies
         fitter.defreeze_params(args.asymptoticLimits)
 
+        # a de-biased objective on Asimov data is recentred at the generating
+        # point, and its covariance is the expected one
+        fitter.set_mcstat_asimov(True)
+
     if not args.noHessian:
         # compute the covariance matrix and estimated distance to minimum
 
@@ -120,6 +124,7 @@ def do_asymptotic_limits(args, fitter, ws, data_values, mapping=None, fit_data=F
 
     if fit_data:
         logger.info("Unconditional fit to real data")
+        fitter.set_mcstat_asimov(False)
         fitter.set_nobs(data_values)
         fitter.minimize()
 
@@ -427,6 +432,7 @@ def main():
                 prefit_time.append(time.time())
 
                 observations = data_values if ifit >= 0 else ifitter.expected_yield()
+                ifitter.set_mcstat_asimov(ifit == -1)
 
                 do_asymptotic_limits(
                     args,

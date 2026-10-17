@@ -325,6 +325,9 @@ class Fitter:
         self.mcStatDebias = getattr(options, "mcStatDebias", "none")
         self.mcStatDebiasCov = getattr(options, "mcStatDebiasCov", "sandwich")
         self.covMode = getattr(options, "covMode", "observed")
+        # the --covMode asked for; set_mcstat_asimov switches self.covMode to
+        # fisher for an Asimov dataset of a de-biased fit
+        self._covMode_requested = self.covMode
         # True while minimize() runs the ordinary-likelihood warm start
         self._mcstat_debias_suspended = False
 
@@ -489,6 +492,15 @@ class Fitter:
             xdefault = self.theta0default
 
         self.x = tf.Variable(xdefault, trainable=True, name="x")
+        # Asimov recentring of an MC-stat de-biased objective
+        # (set_mcstat_asimov): the gradient g0 at x0, zero unless set. Rebuilt
+        # here with the parameter layout, so a re-init drops it.
+        self.mcstat_asimov_g0 = tf.Variable(
+            tf.zeros_like(xdefault), trainable=False, name="mcstat_asimov_g0"
+        )
+        self.mcstat_asimov_x0 = tf.Variable(
+            tf.zeros_like(xdefault), trainable=False, name="mcstat_asimov_x0"
+        )
 
         # ParamModel Gaussian priors (declared by the model via prior_sigmas /
         # prior_means; see ParamModel). They are folded into the same
@@ -1731,6 +1743,44 @@ class Fitter:
         if self.mcstat_bb_vref is None:
             return 0.0
         return float(self._compute_mcstat_bb_compensator())
+
+    def set_mcstat_asimov(self, asimov):
+        """Mark the current data as an Asimov dataset of the current parameters
+        (asimov=True) or as anything else (False). A no-op for a fit without
+        MC-stat de-biasing.
+
+        Asimov data are the expected yields of the (noisy) templates
+        themselves, so they carry no attenuation, and the de-biasing would
+        overshoot: the de-biased objective is not stationary at the generating
+        point x0, although the de-biased estimator's expectation over data and
+        template fluctuations is x0 by design. Its gradient g0 at x0 is
+        recorded, and the objective carries -g0^T (x - x0) (_compute_mcstat_
+        penalty), whose minimum is x0; being linear it leaves every Hessian
+        unchanged. Scans, contours and limits on the Asimov data are then
+        centred at x0.
+
+        The observed curvature at Asimov is not the expected one either: the
+        bin-by-bin stat compensator stands in for the expected squared residual
+        while the residuals vanish (and the fold half terms keep residuals
+        -Delta_h). The Gauss-Newton forms are the expectations of the observed
+        bread and meat and do not depend on the data, so the covariance of an
+        Asimov dataset uses --covMode fisher (self.covMode), restored when
+        unset. (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §5a)
+        """
+        if not self.mcstat_debias_active:
+            return
+        self.mcstat_asimov_g0.assign(tf.zeros_like(self.mcstat_asimov_g0))
+        self.covMode = self._covMode_requested
+        if not asimov:
+            return
+        _, g = self.loss_val_grad()
+        self.mcstat_asimov_x0.assign(self.x)
+        self.mcstat_asimov_g0.assign(g)
+        self.covMode = "fisher"
+        logger.info(
+            "Asimov dataset with MC-stat de-biasing: the objective is recentred "
+            "at the generating point and the covariance uses --covMode fisher."
+        )
 
     def _init_mcstat_folds(self):
         """Prepare the cross-fit (two-half / k-fold) fold templates.
@@ -4019,9 +4069,10 @@ class Fitter:
     def _compute_mcstat_penalty(self, full_nll=False):
         """The MC-stat de-biasing terms outside the data term: the continuous-M
         penalty -1/2 theta^T M theta (the external quadratic term with Hessian
-        -M), and the bin-by-bin stat compensator
-        (_compute_mcstat_bb_compensator) of either method. None if there are
-        none, or while the de-biasing is suspended for the warm start."""
+        -M), the bin-by-bin stat compensator (_compute_mcstat_bb_compensator) of
+        either method, and the Asimov recentring (set_mcstat_asimov). None if
+        there are none, or while the de-biasing is suspended for the warm
+        start."""
         if self._mcstat_debias_suspended:
             return None
         terms = []
@@ -4033,6 +4084,11 @@ class Fitter:
             )
         if self.mcstat_bb_vref is not None:
             terms.append(self._compute_mcstat_bb_compensator())
+        if self.mcstat_debias_active:
+            # Asimov recentring (set_mcstat_asimov); zero unless set
+            terms.append(
+                -tf.reduce_sum(self.mcstat_asimov_g0 * (self.x - self.mcstat_asimov_x0))
+            )
         return tf.add_n(terms) if terms else None
 
     def _compute_loss(self, profile=True):

@@ -1514,3 +1514,10 @@ templates; 30 data toys with the same templates for comparison):
   full-mode fit 0.114 against 0.194): the `r²`-dependent curvature terms vanish
   at Asimov. Expected uncertainties need the expected-information covariance at
   θ₀ or data-only toys with the fixed templates.
+- Implemented (design doc §5a): for an Asimov dataset of a de-biased fit the
+  objective is recentred at the generating point by a linear term (Hessian
+  unchanged) and the covariance uses the Gauss–Newton forms, which equal the
+  real-data ones at the same point (test: to 1e-6). Fits without de-biasing are
+  unchanged. (`rabbit_fit.py` does not minimize on Asimov, so its point was
+  already the generating one; the recentring matters for scans, contours,
+  limits and the EDM.)

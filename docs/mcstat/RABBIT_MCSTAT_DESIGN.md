@@ -433,6 +433,25 @@ until `--earlyStopping` (and again after each restart). Far-start scan on a
 at any MC statistics; without the warm start, 8/40 and 6/41 at 200 and 2000
 events per fold per bin.
 
+**Asimov datasets** (`Fitter.set_mcstat_asimov`, called by `rabbit_fit.py` for
+`-t -1` and by `rabbit_limit.py` for its Asimov datasets; a no-op without
+de-biasing). Asimov data are the expected yields of the noisy templates
+themselves, so they carry no attenuation and the de-biasing overshoots: the
+de-biased objective is not stationary at the generating point `x₀` (continuous-M
+gamma-lite at ρ ≈ 1: minimum at 1.13 for a true 0.42; RESULTS.md §9u), although
+the estimator's expectation over data and template fluctuations is `x₀` by
+design. The objective gets `−g₀ᵀ(x − x₀)`, `g₀` its gradient at `x₀` on the Asimov
+data: the minimum is `x₀`, and being linear the term leaves every Hessian
+unchanged, so scans, contours and limits on Asimov are centred at `x₀`. The
+observed curvature at Asimov is not the expected one either: the bin-by-bin stat
+compensator stands in for `E[r²]` while the residuals vanish, and the fold half
+terms keep residuals `−Δ_h`. The Gauss–Newton bread and meat (§2c) are the
+expectations of the observed ones and do not depend on the data, so an Asimov
+dataset of a de-biased fit uses `--covMode fisher`; its sandwich equals that of
+real data at the same point. (Omitting the compensator instead would neither
+remove the overshoot, which is there without any compensator, nor fix the fold
+methods' curvature.)
+
 **Goodness of fit at the de-biased minimum.** The statistic is the same as for
 an ordinary fit: `q = 2·(L_cf(θ̂) − L_sat)` = 2·(reduced NLL), the de-biased
 objective *including* bin-by-bin stat at its own minimum (the jackknife weights

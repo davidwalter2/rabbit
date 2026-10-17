@@ -1784,6 +1784,9 @@ def main():
 
                 if not args.prefitOnly:
                     ifitter.set_blinding_offsets(blind=blinded_fits[i])
+                    # a de-biased objective on Asimov data is recentred at the
+                    # generating point, and its covariance is the expected one
+                    ifitter.set_mcstat_asimov(ifit == -1)
                     fit(args, ifitter, ws, dofit=ifit >= 0 and not args.noFit)
                     fit_time.append(time.time())
 

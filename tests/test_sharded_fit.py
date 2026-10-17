@@ -734,6 +734,8 @@ _SHARDED_SAFE = {
     "mcstat_scan_adjustment",
     "set_mcstat_scan_covariances",
     "mcstat_projection_test",
+    # a no-op without de-biasing
+    "set_mcstat_asimov",
     # parameter-level state only
     "defaultassign",
     "load_fitresult",
