@@ -94,12 +94,12 @@ def _build(fn, T0, T1, folds0, folds1, data, debias, bbb, poisson):
         var = data + (T0 + T1) if bbb else data
         M = np.diag([np.sum(T0 / var), np.sum(T1 / var)])
         tw.add_mc_stat_moment(
-            M, ["p0", "p1"], variance="bblite_inflated" if bbb else "bare"
+            M, ["p0", "p1"], variance="bb_inflated" if bbb else "bare"
         )
     tw.write(outfolder=os.path.dirname(fn), outfilename=os.path.basename(fn))
 
 
-def _fit(fn, debias, covMode, debiasCov, bbb, poisson, outdir=None):
+def _fit(fn, debias, covMode, debiasCov, bbb, poisson, outdir=None, bbargs=()):
     argv = [
         fn,
         "-o",
@@ -115,8 +115,7 @@ def _fit(fn, debias, covMode, debiasCov, bbb, poisson, outdir=None):
         debiasCov,
     ]
     argv += [] if poisson else ["--chisqFit"]
-    if not bbb:
-        argv.append("--noBinByBinStat")
+    argv += list(bbargs) if bbb else ["--noBinByBinStat"]
     a = _rfm.make_parser().parse_args(argv)
     ind = inputdata.FitInputData(fn, None)
     f = fitter.Fitter(
@@ -149,12 +148,15 @@ def run_coverage(
     k=2,
     seed=1,
     outdir=None,
+    bbargs=(),
 ):
     """Coverage of the degenerate (DDIF) and sum (DSUM) POI directions over `ntoy`
-    template+data fluctuations. Tensors are written to `outdir` (default OUT)."""
+    template+data fluctuations. Tensors are written to `outdir` (default OUT).
+    `bbargs`: bin-by-bin stat options (type, mode, dynamic) when `bbb`."""
     rng = np.random.default_rng(seed)
     out = outdir or OUT
-    fn = f"{out}/cov_{debias}_{covMode}_{debiasCov}_{int(bbb)}_{int(poisson)}.hdf5"
+    fn = f"{out}/cov_{debias}_{covMode}_{debiasCov}_{int(bbb)}_{int(poisson)}"
+    fn += f"{'_'.join(a.lstrip('-') for a in bbargs)}.hdf5"
     cov_dif = cov_sum = 0
     res_dif = []
     sig_dif = []
@@ -166,7 +168,7 @@ def run_coverage(
         data = rng.poisson(MU).astype(float)
         try:
             _build(fn, T0, T1, folds0, folds1, data, debias, bbb, poisson)
-            x, C, gmax = _fit(fn, debias, covMode, debiasCov, bbb, poisson, out)
+            x, C, gmax = _fit(fn, debias, covMode, debiasCov, bbb, poisson, out, bbargs)
             v_dif = DDIF @ C @ DDIF
             v_sum = DSUM @ C @ DSUM
             # require convergence and POSITIVE variance in the measured directions

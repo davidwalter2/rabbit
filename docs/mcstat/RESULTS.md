@@ -957,7 +957,9 @@ Caveats: (i) β is the standard full-profiled β shared with the halves; the res
 cross-fit β-non-stationarity is higher order (results are sensible). (ii) Extremely
 degenerate problems (corr −0.9999 toy_folds) can find spurious far minima under
 BB-lite+two-half — an amplification of the degeneracy, mitigated by good starting
-values; the milder split-logk toy is well-behaved. Validation: `tests/verify_bblite.py`
+values; the milder split-logk toy is well-behaved. [Superseded by §9u: sharing
+the full-sample β over-subtracts by 1 + ρ, and these failures were that.]
+Validation: `tests/verify_bblite.py`
 (asserts PD convergence + de-bias for both methods with BB-lite on). No-BB paths
 unchanged (verify_mcstat / verify_twohalf still exact).
 
@@ -1394,3 +1396,121 @@ Follow-up to §9q, prompted by end-to-end runs of `rabbit_fit.py`.
   could not be calibrated on top of it.
 - **`rabbit_limit.py`**: on the k=4 toy the Gaussian σ goes 0.0282 → 0.0291
   (sandwich) and the likelihood contour level is divided by 0.969.
+
+### §9t. Bin-by-bin stat variants, `--hvpBatch` (rabbit)
+- **Variant matrix** (Poisson for all, chisq for a subset; two-half and k-fold
+  fisher, on the small well-conditioned k = 4 toy, with the full-sample β then
+  shared with the halves): every bin-by-bin stat type/mode/dynamic converges,
+  bread and sandwich are positive definite, the Hessian-free covariance equals the
+  dense one (~1e-14), and `--hvpBatch 1` reproduces the point exactly and the
+  sandwich to ~1e-14. These are mechanical checks only; the β sharing itself is
+  wrong beyond small ρ (§9u).
+- **`--hvpBatch`** now assembles every dense Hessian of a de-biased fit from
+  batched HVPs (`Fitter._scalar_hessian`): the sandwich meat, the Gauss–Newton
+  shift, the MC-variance curvature without bin-by-bin stat, and the
+  projection-test Gauss–Newton forms; they match `tape.jacobian` to 1e-10.
+- **Continuous-M** failed (H − M indefinite) with multiplicative full mode and
+  with `--binByBinStatDynamic`. The cause is not the denominator of `M` but the
+  profile's own de-attenuation (§9u).
+- The coverage, goodness-of-fit and projection-test toys (§9n–§9s) used no
+  bin-by-bin stat and gamma-lite only.
+
+### §9u. Bin-by-bin stat and the de-biasing: separate profiles, compensator (rabbit)
+Notation: `ρ_b = σ²_MC,b / D_b`, the MC variance of the prediction over the data
+variance (≈ N_data/N_MC for unit weights; ≈ 1 for MC with the data's luminosity,
+the slides toy). `V_b = D_b + σ²_MC,b` is the per-bin variance of a bin-by-bin
+stat profile. Toys: the near-degenerate harness toy (`tests/mcstat_coverage.py`,
+true strengths (1.3, 0.7), degenerate difference 0.42), chisq unless noted;
+weighted MC (weight w) gives ρ ≈ w.
+
+**Three defects, found by toys that measure point bias and coverage for every
+bin-by-bin stat mode across ρ** (earlier validation never did this for the fold
+methods with bin-by-bin stat: §9g checked convergence on a small-ρ toy, §9n–§9o
+measured coverage only for continuous-M, §9r–§9s validated test-statistic null
+distributions, §9t was mechanical; failures seen in §9g ("spurious far minima")
+and §9o (23% of toys filtered as rank-deficient) were attributed to degeneracy).
+
+1. *Shared β over-subtracts* (fold methods, every bin-by-bin stat type). With
+   the full-sample β applied to the halves, a Gaussian term becomes (k = 2,
+   normal-additive) `e²/(2V) − Σ_hΔ_h²/(4D)`: the noise floor is removed with
+   weight `1/D` instead of `1/V`, a factor `1 + ρ` too much. Direct check at
+   ρ ≈ 1 (degenerate-direction curvature): shared β 11.98 (bread indefinite),
+   separately profiled terms 55.89, true-template target 55.96.
+2. *Missing compensator* (multiplicative full mode, `--binByBinStatDynamic`).
+   With per-process β the profile `r²/(2V(θ))`, `V = D + Σ_p u_p(θ)²`, is the
+   errors-in-variables profile: its gradient `−r²∂V/(2V²)` cancels the
+   attenuation when `E[r²] = V`, so the ordinary full-mode fit is already
+   unbiased (+0.006 at ρ ≈ 1, against −0.27 for gamma-lite). De-biasing on top
+   removes the noise floor twice. Lite multiplicative β scales only the total
+   yield (a `1/kstat` effect); static normal-additive has no θ-dependence.
+   Exact-template fits (no template noise, `sumw2` claimed = what the jackknife
+   converges to) show the size, bias of the degenerate difference:
+
+   | ρ | 0.03 | 0.1 | 0.3 | 1.0 |
+   |---|---|---|---|---|
+   | full / dynamic, uncompensated | +0.014 | +0.071 | +0.270 | +1.358 |
+   | gamma-lite, no bin-by-bin stat (ρ = 1) | | | | −0.009 |
+
+3. *Fold sandwich without bin-by-bin stat*: the reported meat is the plain data
+   Hessian, without the template-noise variance (the `Σρ JJᵀ/V` term is used only
+   by the projection test). Unbiased, but coverage 0.69 / 0.60 / 0.57 at
+   ρ = 0.03 / 0.1 / 0.3 (σ/scatter 0.97 / 0.87 / 0.81). Not yet fixed.
+
+ρ scan of the shared-β fold code (twoHalf, 100 toys per point; bias of the
+degenerate difference; the ordinary gamma-lite fit's attenuation for scale):
+
+| ρ | attenuation | gamma-lite | normal-additive lite | full, compensated (wt 1) | full, uncompensated | no bin-by-bin stat |
+|---|---|---|---|---|---|---|
+| 0.03 | −0.020 | −0.002 | +0.033 | −0.015 | +0.002 | +0.006 |
+| 0.1 | −0.052 | +0.020 | +0.004 | +0.022 | +0.104 | +0.008 |
+| 0.3 | −0.152 | +0.089 | +0.134 | +0.111 | 82% of toys fail | +0.017 |
+
+(uncertainties ±0.013–0.028). Effect 1 is relevant from ρ between 0.1 and 0.3,
+effect 2 from ρ between 0.03 and 0.1. Thresholds are for this extremely
+degenerate toy; both scale with ρ × (noise floor / information) along the
+weakest direction.
+
+**Redesign** (design doc §1b, §2b, §2c, §5a):
+- Fold methods: every jackknife term is its own profiled likelihood at the
+  full-sample kstat (per-half kstat would jackknife the bin-by-bin stat variance
+  itself away), each with its own constraint term and, with `profile=False`, its
+  own stored β.
+- Compensator where the bin-by-bin stat variance moves with the parameters:
+  continuous-M (and every meat) `½Σ log(V/V_ref)`, i.e. the marginal instead of
+  the profiled bin-by-bin stat likelihood; fold objective `½Σ D(1/V_ref − 1/V)`,
+  exact for `E[r²] = D` at any θ (an estimating-equation correction, not a
+  likelihood).
+- `--covMode fisher`: the Gauss–Newton form of a profiled term on the raw
+  predictions with weight `1/(D + σ²_bb)`, replacing the profiled terms and the
+  compensator together (keeps the U-statistic identity exact).
+- GOF reference: with separate profiles the `Δ_AΔ_B` term carries the shrink `s`:
+  `G` mean `−Σ sρ`, variance `Σ s²[2ρ² + (1+ρ)ρ(a−b)²/(ab)]`; `q` excludes the
+  compensator.
+
+**Continuous-M with the compensator** (log form's first-order version; 200 toys
+each, ρ ≈ 1; the bias of the ordinary gamma-lite fit is −0.27):
+
+| bin-by-bin stat | coverage (diff) | median bias | rms | median σ |
+|---|---|---|---|---|
+| gamma-lite | 0.635 ± 0.034 | +0.050 | 0.368 | 0.310 |
+| normal-additive full | 0.715 ± 0.032 | +0.029 | 0.338 | 0.316 |
+| normal-multiplicative full | 0.740 ± 0.031 | −0.001 | 0.352 | 0.330 |
+| gamma full | 0.773 ± 0.030 | +0.020 | 0.313 | 0.332 |
+| gamma-lite dynamic | 0.705 ± 0.032 | −0.036 | 0.351 | 0.327 |
+| normal-additive dynamic | 0.755 ± 0.030 | +0.013 | 0.330 | 0.324 |
+| Poisson, normal-multiplicative full | 0.720 ± 0.032 | +0.002 | 0.317 | 0.319 |
+| Poisson, gamma-lite dynamic | 0.730 ± 0.031 | +0.041 | 0.340 | 0.342 |
+
+**Asimov fits** (one template set; Asimov = expected yields from the noisy
+templates; 30 data toys with the same templates for comparison):
+- The Asimov point is shifted by any de-biasing: Asimov data carry no attenuation,
+  so the correction overshoots (continuous-M lite: 1.13 against 0.42, data
+  0.47; twoHalf without bin-by-bin stat at ρ ≈ 1: 1.28, data 0.55). With
+  continuous-M in full mode on unit-weight per-process scores `M_BB = M` and the
+  Asimov point is the truth.
+- The Asimov σ equals the median σ of real data with a fixed bin-by-bin stat
+  variance (0.299 / 0.299, 0.231 / 0.230), but is too small where it moves with
+  the parameters (continuous-M full mode 0.147 against 0.330; the ordinary
+  full-mode fit 0.114 against 0.194): the `r²`-dependent curvature terms vanish
+  at Asimov. Expected uncertainties need the expected-information covariance at
+  θ₀ or data-only toys with the fixed templates.

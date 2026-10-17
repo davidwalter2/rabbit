@@ -440,7 +440,7 @@ class TensorWriter:
             )
         return norm_folds, logk_folds_delta, folded_syst_idx
 
-    MCSTAT_MOMENT_VARIANCES = ("bblite_inflated", "bare")
+    MCSTAT_MOMENT_VARIANCES = ("bb_inflated", "bare")
 
     def add_mc_stat_moment(self, M, param_names, *, variance, name="mcstat_M"):
         """Frozen MC-stat noise-floor matrix for the continuous-M de-biasing.
@@ -458,14 +458,20 @@ class TensorWriter:
 
         Denominator: ``V_b`` must be the same per-bin variance the fit's per-bin
         term uses, which depends on whether the fit runs with bin-by-bin stat.
-        With it ON that is the inflated ``mu_b + sum_proc sumw2_b`` (data stat +
-        MC stat); with it OFF the bare data (chisq) or expected (Poisson)
-        variance. Using the bare variance under bin-by-bin stat makes ``M``
-        roughly a factor ~2 too large, so ``H_data - M`` goes
-        non-positive-definite and the fit diverges
+        With it ON (any type or mode) that is the inflated
+        ``mu_b + sum_proc sumw2_b`` (data stat + MC stat); with it OFF the bare
+        data (chisq) or expected (Poisson) variance. Using the bare variance
+        under bin-by-bin stat makes ``M`` roughly a factor ~2 too large, so
+        ``H_data - M`` goes non-positive-definite and the fit diverges
         (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §1b). The convention is recorded
         with the term, and the fitter refuses an ``M`` whose convention does not
         match its bin-by-bin stat setting.
+
+        ``M`` is always the full moment of the template noise. Where the
+        bin-by-bin stat variance moves with the parameters (multiplicative types
+        in full mode, ``--binByBinStatDynamic``, and the overall yield in lite
+        mode), the profiled likelihood already removes part of it; the fitter
+        computes that part from ``sumw2`` and subtracts only the rest.
 
         Parameters
         ----------
@@ -474,9 +480,9 @@ class TensorWriter:
             symmetry; only the de-attenuation penalty is formed here).
         param_names : sequence of str
             Length-``n`` parameter names indexing ``M``.
-        variance : {"bblite_inflated", "bare"}
+        variance : {"bb_inflated", "bare"}
             The per-bin variance ``V_b`` used in the denominator of ``M``:
-            ``"bblite_inflated"`` (``mu_b + sum_proc sumw2_b``, for fits with
+            ``"bb_inflated"`` (``mu_b + sum_proc sumw2_b``, for fits with
             bin-by-bin stat) or ``"bare"`` (for fits without it). Required.
         name : str
             External-term label (default ``"mcstat_M"``); must start with

@@ -423,8 +423,10 @@ def common_parser():
         default=None,
         type=int,
         help="Number of Hessian-vector products evaluated together when the "
-        "dense Hessian is assembled from HVPs, for both the preconditioner "
-        "reference matrix and the postfit Hessian. The multi-device path "
+        "dense Hessian is assembled from HVPs, for the preconditioner "
+        "reference matrix, the postfit Hessian, and the other dense Hessians "
+        "of an MC-stat de-biased fit (sandwich meat, Gauss-Newton forms). The "
+        "multi-device path "
         "(--nDevices > 1) always assembles it this way, with 256 by default. "
         "The single-device path uses tape.jacobian unless this is given; "
         "tape.jacobian vectorises over all parameters at once, so its memory "
@@ -739,7 +741,11 @@ def common_parser():
         "the nominal templates in the input (dense [k, nbins, nproc], or k times "
         "the non-zero entries in sparse mode). A de-biased fit first minimizes "
         "the ordinary likelihood and starts from its minimum (the de-biased "
-        "objectives are only locally convex). Default 'none'.",
+        "objectives are only locally convex). With bin-by-bin stat each jackknife "
+        "term is profiled separately, and where the bin-by-bin stat variance moves "
+        "with the parameters (full mode, --binByBinStatDynamic) a compensator "
+        "keeps the profile's own de-attenuation from being applied twice (both "
+        "methods). Default 'none'.",
     )
     parser.add_argument(
         "--mcStatDebiasCov",
@@ -750,8 +756,8 @@ def common_parser():
         "A^-1 + A^-1 M A^-1 (analytic meat; calibration-free ~0.68 with BB-lite, "
         "undercovers without). 'dataPropagated' = Huber-White delta-method sandwich "
         "propagating the data AND template (sumw2) variances through theta_hat "
-        "(continuous-M only, dense): CONSERVATIVE, over-covers (~0.81, needs a downward "
-        "calibration; docs/mcstat/RESULTS.md §7d). Default 'sandwich'.",
+        "(continuous-M only, dense): conservative, over-covers (~0.81; "
+        "docs/mcstat/RESULTS.md §7d, §9p). Default 'sandwich'.",
     )
     parser.add_argument(
         "--covMode",

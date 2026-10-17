@@ -1220,7 +1220,9 @@ def fit(args, fitter, ws, dofit=True):
     if fitter.mcstat_debias_active and fitter.mcStatDebias != "continuousM":
         # Same statistic as for an ordinary fit (the de-biased objective, with
         # bin-by-bin stat, at its minimum), but its reference distribution is not
-        # chi2(ndfsat): see Fitter.mcstat_gof
+        # chi2(ndfsat): see Fitter.mcstat_gof. The bin-by-bin stat compensator,
+        # an offset of order sum_b rho_b, is not part of the statistic.
+        chi2_val = 2.0 * (nllvalreduced - fitter.mcstat_bb_compensator_value())
         if mcstat_gof_trace is None:
             logger.warning(
                 "No Hessian: the goodness-of-fit reference uses the ordinary "

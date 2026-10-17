@@ -174,7 +174,7 @@ def make_mcstat_moment_toy(path, with_M=True, bbb_variance=False, seed=DEGEN_SEE
         tw.add_mc_stat_moment(
             arr["M"],
             ["flat", "step"],
-            variance="bblite_inflated" if bbb_variance else "bare",
+            variance="bb_inflated" if bbb_variance else "bare",
         )
     name = f"toy_{'M' if with_M else 'noM'}{'_bb' if bbb_variance else ''}.hdf5"
     return _write(tw, path, name), arr
@@ -676,9 +676,13 @@ def test_coverage_harness_smoke(coverage_harness, tmp_path, config):
 SMALL_NBINS = 60
 
 
-def make_small_fold_toy(path, k, sparse=False, systematic_type="log_normal", syst=0):
+def make_small_fold_toy(
+    path, k, sparse=False, systematic_type="log_normal", syst=0, exempt=False
+):
     """Well-conditioned 2-process toy with k MC-stat folds and optionally one
-    SHARED (unfolded) shape systematic on `flat`. Returns (filename, arrays)."""
+    SHARED (unfolded) shape systematic on `flat`, and (exempt) a third,
+    unfolded background with zero MC variance (MC-stat-exempt, e.g.
+    data-driven). Returns (filename, arrays)."""
     rng = np.random.default_rng(3)
     nb = SMALL_NBINS
     n_flat = np.full(nb, 400.0)
@@ -703,7 +707,11 @@ def make_small_fold_toy(path, k, sparse=False, systematic_type="log_normal", sys
         tw.add_systematic(
             _hist1d(ax, folds[0].sum(0) + svar), "s0", "flat", "ch0", mirror=True
         )
-    fname = f"small_k{k}_{int(sparse)}_{systematic_type}_{syst}.hdf5"
+    if exempt:
+        tw.add_process(
+            _hist1d(ax, np.full(nb, 150.0), variances=np.zeros(nb)), "exempt", "ch0"
+        )
+    fname = f"small_k{k}_{int(sparse)}_{systematic_type}_{syst}_{int(exempt)}.hdf5"
     return _write(tw, path, fname), dict(folds=folds, data=data, svar=svar)
 
 
@@ -833,7 +841,7 @@ def test_continuous_m_variance_convention_enforced(tmp_path):
     _moment_fit(fn_bb, tmp_path, "--mcStatDebias", "continuousM")
     with pytest.raises(RuntimeError, match="'bare' per-bin variance"):
         _moment_fit(fn_bare, tmp_path, "--mcStatDebias", "continuousM")
-    with pytest.raises(RuntimeError, match="'bblite_inflated' per-bin variance"):
+    with pytest.raises(RuntimeError, match="'bb_inflated' per-bin variance"):
         _moment_fit(
             fn_bb, tmp_path, "--noBinByBinStat", "--mcStatDebias", "continuousM"
         )
@@ -981,7 +989,7 @@ def test_gof_statistic_and_reference(k, tmp_path):
     chi2 sum_b (y-n_A)(y-n_B)/V, for any k, and its reference mean is
     nbins - p (the MC fluctuations cancel). With bin-by-bin stat the profiled
     beta leaves the fraction s_b ~ 1/(1+rho_b) of a residual, and the reference
-    mean becomes sum_b (1 - rho_b) - p."""
+    mean becomes sum_b s_b - p (each jackknife term separately profiled)."""
     fn, arr = make_small_fold_toy(tmp_path, k)
     y = arr["data"]
     a, b = k // 2, k - k // 2
@@ -1004,9 +1012,7 @@ def test_gof_statistic_and_reference(k, tmp_path):
     shrink_b, rho_b = (np.asarray(v) for v in fb._mcstat_gof_bin_inputs())
     np.testing.assert_allclose(shrink_b, 1.0 / (1.0 + rho_b), rtol=0.05)
     gb = fb.mcstat_gof(2 * float(fb.reduced_nll().numpy()), trace_AinvH=2.0)
-    np.testing.assert_allclose(
-        gb["mean"], np.sum(shrink_b * (1 + rho_b) - rho_b) - 2.0, rtol=1e-8
-    )
+    np.testing.assert_allclose(gb["mean"], np.sum(shrink_b) - 2.0, rtol=1e-8)
     assert 0.0 <= gb["pvalue"] <= 1.0
 
 
@@ -1190,7 +1196,9 @@ def test_projection_test_refuses_an_ill_posed_projection(tmp_path):
 def test_meat_includes_every_term_of_the_ordinary_objective(tmp_path):
     """The sandwich meat is the curvature of the ordinary (--mcStatDebias none)
     objective at the de-biased point, regularization included: with a
-    regularizer it must equal the Hessian of that objective."""
+    regularizer it must equal the Hessian of that objective, plus that of the
+    bin-by-bin stat compensator (marginal instead of profiled beta; here the
+    small total-yield term of a lite multiplicative beta)."""
     from rabbit.regularization.regularizer import Regularizer
 
     class Penalty(Regularizer):
@@ -1213,7 +1221,13 @@ def test_meat_includes_every_term_of_the_ordinary_objective(tmp_path):
     meat = np.asarray(f.mcstat_meat("observed"))
     with f._ordinary_likelihood():
         _, _, h_ordinary = f.loss_val_grad_hess()
-    np.testing.assert_allclose(meat, np.asarray(h_ordinary), rtol=1e-8)
+    h_comp = f._scalar_hessian(
+        "test", lambda: f._compute_mcstat_bb_compensator(meat=True)
+    )
+    assert np.abs(np.asarray(h_comp)).max() > 0
+    np.testing.assert_allclose(
+        meat, np.asarray(h_ordinary) + np.asarray(h_comp), rtol=1e-8
+    )
 
 
 def test_data_propagated_sandwich_refused_for_fold_methods(tmp_path):
@@ -1230,3 +1244,188 @@ def test_data_propagated_sandwich_refused_for_fold_methods(tmp_path):
             "--mcStatDebiasCov",
             "dataPropagated",
         )
+
+
+@pytest.mark.parametrize("exempt", [False, True], ids=["all-mc", "zerovar"])
+@pytest.mark.parametrize("k", [2, 4, 5])
+def test_jackknife_terms_are_separately_profiled(k, exempt, tmp_path):
+    """With bin-by-bin stat each jackknife term is its own profiled likelihood
+    at the full-sample kstat. For a chisq fit with normal-additive bin-by-bin
+    stat the profile of a term is exactly (y - n_X)^2 / (2 V), V = y + sigma^2,
+    so the de-biased curvature is sum_X c_X J_X^T J_X / V: the noise floor is
+    removed with the profiled weight 1/V. Sharing the full-sample beta instead
+    weighted the halves' MC deviations by 1/y (docs/mcstat/RESULTS.md §9u)."""
+    fn, arr = make_small_fold_toy(tmp_path, k, exempt=exempt)
+    args = ["--chisqFit", "--allowNegativeParam", "--mcStatDebias", "kfold"]
+    f = fit_toy(fn, tmp_path, *args, "--binByBinStatType", "normal-additive")
+    y = arr["data"]
+    a, b = k // 2, k - k // 2
+    Ti = [np.stack([arr["folds"][0][i], arr["folds"][1][i]], 1) for i in range(k)]
+    TA, TB, Tf = (k / a) * sum(Ti[:a]), (k / b) * sum(Ti[a:]), sum(Ti)
+    V = y + Tf.sum(1)  # unit weights: sumw2 = sumw; the exempt process has none
+    w_full, w_A, w_B = f.jackknife_weights
+    H_ref = sum(
+        c * T.T @ (T / V[:, None]) for T, c in ((Tf, w_full), (TA, -w_A), (TB, -w_B))
+    )
+    _, _, h = f.loss_val_grad_hess()
+    np.testing.assert_allclose(np.asarray(h)[:2, :2], H_ref, rtol=1e-8)
+
+
+def make_exact_fold_toy(path, rho=0.5):
+    """Two processes whose k = 2 folds are EXACT halves of the true templates,
+    each fold claiming the MC variance rho * N / 2 (as weighted MC would): the
+    template noise the jackknife removes is absent, so what is left is the
+    jackknife's limit, the bin-by-bin stat likelihood at the true templates."""
+    nb = SMALL_NBINS
+    n = np.stack([np.full(nb, 400.0), np.linspace(100.0, 700.0, nb)])
+    ax = hist.axis.Regular(nb, 0.0, 1.0, name="x")
+    tw = TensorWriter(sparse=False)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, n.sum(0)), "ch0")
+    axf = hist.axis.IntCategory([0, 1], name="mcfold")
+    for name, t in zip(("flat", "step"), n):
+        h = hist.Hist(ax, axf, storage=hist.storage.Weight())
+        for i in range(2):
+            h.view()["value"][:, i] = t / 2
+            h.view()["variance"][:, i] = rho * t / 2
+        tw.add_process(h, name, "ch0", signal=True, fold_axis="mcfold")
+    return _write(tw, path, f"exact_folds_{rho}.hdf5"), n
+
+
+@pytest.mark.parametrize(
+    "bbb",
+    [
+        [
+            "--binByBinStatType",
+            "normal-multiplicative",
+            "--binByBinStatMode",
+            "full",
+        ],
+        ["--binByBinStatType", "normal-additive", "--binByBinStatDynamic"],
+    ],
+    ids=["nmult-full", "nadd-dynamic"],
+)
+def test_fold_compensator_unbiases_the_jackknife_limit(bbb, tmp_path):
+    """Where the bin-by-bin stat variance moves with the parameters, the
+    profile's -r^2 dV / (2 V^2) has mean -D dV / (2 V^2) once the jackknife has
+    removed the template noise (E[r^2] = D): a bias of its own, large along
+    weakly constrained directions. The compensator 1/2 sum D (1/V_ref - 1/V)
+    cancels it at any point. With exact fold templates the jackknife limit is
+    reached exactly, and for chisq with normal bin-by-bin stat the score is
+    quadratic and separable in the data, so its mean over y ~ N(mu, D) is the
+    average over y = mu +- sqrt(D): it must vanish at the truth."""
+    fn, n = make_exact_fold_toy(tmp_path)
+    args = ["--chisqFit", "--allowNegativeParam", "--mcStatDebias", "twoHalf"]
+    f = fit_toy(fn, tmp_path, *args, *bbb)
+    theta0 = np.array([1.3, 0.7])
+    mu = theta0 @ n
+    f.x.assign(theta0)
+    grads = []
+    for sign in (1.0, -1.0):
+        f.set_nobs(tf.constant(mu + sign * np.sqrt(mu)), variances=tf.constant(mu))
+        grads.append(np.asarray(f.loss_val_grad()[1]))
+    scale = np.abs(grads[0]).max()
+    np.testing.assert_allclose(0.5 * (grads[0] + grads[1]), 0.0, atol=1e-9 * scale)
+    # without it the mean score is the compensator's gradient, which is not small
+    with tf.GradientTape() as t:
+        c = f._compute_mcstat_bb_compensator()
+    g_comp = np.asarray(t.gradient(c, f.x))
+    assert np.abs(g_comp).max() > 1e-3 * scale
+
+
+@pytest.mark.parametrize("bbb", [[], ["--noBinByBinStat"]], ids=["bblite", "nobbb"])
+def test_hvp_batch_assembles_the_extra_hessians(bbb, tmp_path):
+    """--hvpBatch assembles every Hessian the de-biasing adds (sandwich meat,
+    Gauss-Newton forms, MC-variance curvature) from batched HVPs, and they
+    match the one-pass tape.jacobian."""
+    fn, _ = make_small_fold_toy(tmp_path, 4, syst=1)
+    args = ["--allowNegativeParam", "--mcStatDebias", "kfold", "--covMode", "fisher"]
+    f = fit_toy(fn, tmp_path, *args, *bbb)
+    fb = fit_toy(fn, tmp_path, *args, *bbb, "--hvpBatch", "2")
+    assert fb.hessian_from_hvp and not f.hessian_from_hvp
+    fb.x.assign(f.x)
+
+    def extra(fit):
+        _, _, h = fit.loss_val_grad_hess()
+        out = [fit.fisher_curvature(h), fit.mcstat_meat("fisher")]
+        out += [fit.hess_meat(), fit._mc_data_variance_curvature()]
+        return out + list(fit._mcstat_gn_data_curvatures())
+
+    for a, b in zip(extra(f), extra(fb)):
+        a, b = np.asarray(a), np.asarray(b)
+        np.testing.assert_allclose(b, a, rtol=1e-10, atol=1e-10 * np.abs(a).max())
+    assert fb._scalar_hessian_fns, "the batched path was not used"
+
+
+@pytest.mark.parametrize(
+    "bbb,models",
+    [
+        (["--binByBinStatType", "gamma"], "total"),
+        (["--binByBinStatType", "normal-additive"], "none"),
+        (
+            [
+                "--binByBinStatType",
+                "normal-multiplicative",
+                "--binByBinStatMode",
+                "full",
+            ],
+            "per-process",
+        ),
+        (
+            ["--binByBinStatType", "normal-additive", "--binByBinStatMode", "full"],
+            "none",
+        ),
+        (["--binByBinStatType", "gamma", "--binByBinStatDynamic"], "per-process"),
+        (
+            ["--binByBinStatType", "normal-additive", "--binByBinStatDynamic"],
+            "per-process",
+        ),
+    ],
+    ids=["gamma-lite", "nadd-lite", "nmult-full", "nadd-full", "gamma-dyn", "nadd-dyn"],
+)
+def test_continuous_m_removes_only_what_bin_by_bin_stat_does_not(bbb, models, tmp_path):
+    """Continuous-M with every bin-by-bin stat type and mode. Where the
+    bin-by-bin stat variance V(x) = D + sum_c u_c(x)^2 moves with the
+    parameters, the profiled likelihood already removes part of M; the
+    compensator 1/2 sum_b log(V_b(x) / V_ref,b) (marginal instead of profiled
+    beta) restores it, with Hessian M_BB = sum du du^T / V at the reference.
+    On the unit-weight toy (normalization POIs, D = data): per-process betas
+    model all of M (u_p = sqrt(sumw_p) x_p); a lite multiplicative beta the
+    noise of the total yield (u = n(x) / sqrt(sumw)); a static additive one
+    none."""
+    fn, arr = make_mcstat_moment_toy(tmp_path, bbb_variance=True)
+    args = ["--chisqFit", "--allowNegativeParam", *bbb]
+    f = fit_toy(fn, tmp_path, *args, "--mcStatDebias", "continuousM")
+    sumw = arr["sumw"]
+    tot = sumw.sum(0)
+    x = f.x.numpy()[:2]
+    if models == "none":
+        assert f.mcstat_bb_vref is None
+    else:
+        # Hessian of 1/2 log V = 1/2 V'' / V - 1/2 V' V'^T / V^2 at x
+        if models == "per-process":
+            V = arr["data"] + x**2 @ sumw
+            dV = 2 * sumw * x[:, None]
+            d2V = 2 * np.einsum("ib,ij->ijb", sumw, np.eye(2))
+        else:
+            nx = x @ sumw
+            V = arr["data"] + nx**2 / tot
+            dV = 2 * nx * sumw / tot
+            d2V = 2 * np.einsum("ib,jb->ijb", sumw, sumw) / tot
+        ref = 0.5 * np.sum(d2V / V - np.einsum("ib,jb->ijb", dV, dV) / V**2, -1)
+        H_c = f._scalar_hessian("test", f._compute_mcstat_bb_compensator)
+        np.testing.assert_allclose(np.asarray(H_c)[:2, :2], ref, rtol=1e-10)
+
+    _, g, h = f.loss_val_grad_hess()
+    assert np.abs(np.asarray(g)).max() < 1e-3
+    assert np.linalg.eigvalsh(np.asarray(h)).min() > 0
+    if models == "per-process":
+        # nothing left to remove: the point is the ordinary fit's (up to M being
+        # frozen at the reference while V moves), and only the covariance is
+        # the sandwich A^-1 + A^-1 M A^-1
+        f0 = fit_toy(fn, tmp_path, *args)
+        sigma0 = sigma(np.linalg.inv(np.asarray(f0.loss_val_grad_hess()[2])))
+        np.testing.assert_allclose(f.x.numpy(), f0.x.numpy(), atol=0.01 * sigma0)
+        S = np.asarray(f.cov_mcstat_sandwich(h))
+        Ainv = np.linalg.inv(np.asarray(h))
+        np.testing.assert_allclose(S, Ainv + Ainv @ arr["M"] @ Ainv, rtol=1e-8)

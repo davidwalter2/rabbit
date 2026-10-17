@@ -613,6 +613,9 @@ class MultiDeviceFitter(Fitter):
     def mcstat_gof(self, *args, **kwargs):
         self._unsharded("MC-stat de-biasing", "--mcStatDebias")
 
+    def mcstat_bb_compensator_value(self, *args, **kwargs):
+        self._unsharded("MC-stat de-biasing", "--mcStatDebias")
+
     def cov_block_hessfree(self, *args, **kwargs):
         self._unsharded(
             "The de-biased or Gauss-Newton Hessian-free covariance",

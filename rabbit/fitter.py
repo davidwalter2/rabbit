@@ -140,6 +140,7 @@ class Fitter:
             "loss_val_grad_hessp_fwdrev",
             "loss_val_grad_hessp_revrev",
             "_hessp_batch_graph",
+            "_scalar_hessian_fns",
         }
     )
     valid_systematic_types = ["log_normal", "normal"]
@@ -350,6 +351,29 @@ class Fitter:
         self.mcstat_debias_active = (
             self.mcStatDebias == "continuousM" and self.mcstat_M is not None
         ) or self._fold_debias_active()
+        # Reference per-bin data variance D and total variance V of the
+        # bin-by-bin stat compensator (_compute_mcstat_bb_compensator); None if
+        # there is nothing to compensate.
+        self.mcstat_bb_dref = None
+        self.mcstat_bb_vref = None
+        if self.mcstat_debias_active and self._bbstat_variance_moves():
+            zeros = tf.zeros([self.indata.nbins], dtype=self.indata.dtype)
+            self.mcstat_bb_dref = tf.Variable(
+                zeros, trainable=False, name="mcstat_bb_dref"
+            )
+            self.mcstat_bb_vref = tf.Variable(
+                zeros, trainable=False, name="mcstat_bb_vref"
+            )
+            self._update_mcstat_bb_vref()
+        # betas of the separately profiled half terms (_profiled_half_terms),
+        # held fixed when not profiling
+        self.mcstat_half_beta = None
+        if self._fold_debias_active() and self.bbstat.enabled:
+            self.mcstat_half_beta = tf.Variable(
+                tf.stack([self.bbstat.beta0, self.bbstat.beta0]),
+                trainable=False,
+                name="mcstat_half_beta",
+            )
 
         if (
             self.mcStatDebias in ("twoHalf", "kfold")
@@ -629,7 +653,7 @@ class Fitter:
         # Frozen noise-floor matrix M over the full parameter vector, from the
         # term(s) written by TensorWriter.add_mc_stat_moment (stored as hess = -M,
         # so M = -scatter(hess_dense)), for the continuous-M sandwich
-        # Sigma = A^-1 + A^-1 M A^-1 (H - A = M). Rebuilt here because a re-init
+        # Sigma = A^-1 + A^-1 M A^-1 (H = A + M). Rebuilt here because a re-init
         # (e.g. the saturated projection test's composite model) changes the
         # parameter layout.
         self.mcstat_M = self._build_mcstat_M()
@@ -1032,6 +1056,9 @@ class Fitter:
         # the offset is chosen to give the saturated likelihood
         nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
         self.lognobs.assign(tf.math.log(nobssafe))
+        if self.chisqFit and getattr(self, "mcstat_bb_vref", None) is not None:
+            # its per-bin variance is the data variance
+            self._update_mcstat_bb_vref()
 
     def x0defaultassign(self):
         # reset all constraint centers
@@ -1517,8 +1544,8 @@ class Fitter:
     def _compute_nll_meat(self):
         """Plain full-sample NLL (no jackknife de-bias), used as the two-half
         sandwich meat H = grad^2 L_full. Mirrors _compute_nll -- every term of the
-        objective, regularization included -- but always uses the full templates
-        and the ordinary per-bin ln."""
+        objective, regularization and the bin-by-bin stat compensator included
+        -- but always uses the full templates and the ordinary per-bin ln."""
         nexpfullcentral, _, beta = self._compute_yields_with_beta(
             profile=True,
             compute_norm=False,
@@ -1535,34 +1562,34 @@ class Fitter:
         lext = self._compute_external_nll()
         if lext is not None:
             l = l + lext
+        if self.mcstat_bb_vref is not None:
+            l = l + self._compute_mcstat_bb_compensator(meat=True)
         return l
 
-    @tf.function
-    def loss_val_grad_hess_meat(self):
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                val = self._compute_nll_meat()
-            grad = t1.gradient(val, self.x)
-        hess = t2.jacobian(grad, self.x)
-        return val, grad, hess
+    def hess_meat(self):
+        """Dense Hessian of _compute_nll_meat (batched under --hvpBatch)."""
+        return self._scalar_hessian("meat", self._compute_nll_meat)
 
     def _check_mcstat_moment_variance(self):
         """Refuse an M whose denominator convention does not match the fit.
 
         M_ij = sum_b (sum_e w_e^2 s_i s_j) / V_b depends on the per-bin variance
-        V_b the fit itself uses: with bin-by-bin stat on, the BB-lite-inflated
-        mu_b + sum_proc sumw2_b; without it, the bare data/expected variance
-        (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §1b). A mismatched M over- (or
+        V_b the fit itself uses: with bin-by-bin stat on (any type or mode), the
+        inflated mu_b + sum_proc sumw2_b; without it, the bare data/expected
+        variance (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §1b). A mismatched M over- (or
         under-) subtracts the curvature, and H - M can go indefinite far from
         where M was produced, so the convention recorded by
         TensorWriter.add_mc_stat_moment is checked here rather than trusted.
         """
         if self.mcstat_M is None:
             return
-        expected = "bblite_inflated" if self.bbstat.enabled else "bare"
+        expected = "bb_inflated" if self.bbstat.enabled else "bare"
         conventions = getattr(self.indata, "mcstat_moment_variance", {})
         for t in self.mcstat_terms:
             got = conventions.get(str(t["name"]))
+            # the name written before full mode and dynamic bin-by-bin stat
+            # were supported
+            got = "bb_inflated" if got == "bblite_inflated" else got
             if got is None:
                 raise RuntimeError(
                     f"MC-stat moment term '{t['name']}' does not record the "
@@ -1580,6 +1607,131 @@ class Fitter:
                     "bin-by-bin stat to match it."
                 )
 
+    def _mcstat_bb_noise_scales(self):
+        """[nbins, ncomp] standard deviations of the template noise that
+        bin-by-bin stat models, as functions of the parameters: one component
+        per beta, u = sigma * m(x) / m0, with m the yield beta scales.
+
+        - multiplicative types, full mode: one beta per (bin, process), scaling
+          that process's yield (the relative variance sumw2 / sumw^2 is fixed);
+        - --binByBinStatDynamic (any type): the same per-process scaling, by
+          construction (BinByBinStat._dynamic_variance);
+        - multiplicative types, lite mode: one beta per bin, scaling the yield
+          of the processes with MC variance;
+        - normal-additive, static (lite or full): absolute shifts whose variance
+          does not depend on the parameters (returns None).
+        """
+        bb = self.bbstat
+        nb = self.indata.nbins
+        _, norm = self._compute_yields_noBBB(full=False, compute_norm=True)
+        norm = norm[:nb]
+        betamask = bb.betamask[:nb]
+        additive = bb.binByBinStatType == "normal-additive"
+        if additive and not bb.dynamic:
+            return None
+        if bb.dynamic or bb.binByBinStatMode == "full":
+            sumw = self.indata.sumw[:nb]
+            sumw2 = self.indata.sumw2[:nb]
+            ok = (
+                (sumw != 0.0)
+                & (sumw2 > 0.0)
+                & ~(betamask if bb.binByBinStatMode == "full" else betamask[:, None])
+            )
+            scale = tf.sqrt(tf.where(ok, sumw2, 0.0)) / tf.where(ok, sumw, 1.0)
+            return tf.where(ok, scale * norm, 0.0)
+        if bb.proc_zero_var_mask is not None:
+            zv = bb.proc_zero_var_mask[:nb]
+            n_active = tf.reduce_sum(tf.where(zv, tf.zeros_like(norm), norm), axis=-1)
+        else:
+            n_active = tf.reduce_sum(norm, axis=-1)
+        ok = ~betamask
+        scale = tf.sqrt(tf.where(ok, bb.varbeta[:nb], 0.0)) / tf.where(
+            ok, bb.sumw[:nb], 1.0
+        )
+        return tf.where(ok, scale * n_active, 0.0)[:, None]
+
+    def _bbstat_variance_moves(self):
+        """Whether the variance of the profiled bin-by-bin stat beta moves with
+        the parameters (_mcstat_bb_noise_scales is not None)."""
+        bb = self.bbstat
+        return bb.enabled and (bb.dynamic or bb.binByBinStatType != "normal-additive")
+
+    def _bb_model_variance(self):
+        """Per-bin variance bin-by-bin stat assigns to the prediction at the
+        current point (None without bin-by-bin stat): sum_c u_bc^2, or the
+        fixed varbeta of a static normal-additive one."""
+        if not self.bbstat.enabled:
+            return None
+        nb = self.indata.nbins
+        if not self._bbstat_variance_moves():
+            var = self.bbstat.varbeta[:nb]
+            return tf.reduce_sum(var, axis=-1) if len(var.shape) > 1 else var
+        return tf.reduce_sum(tf.square(self._mcstat_bb_noise_scales()), axis=-1)
+
+    def _update_mcstat_bb_vref(self):
+        """Set the reference per-bin variances of the compensator: D_b the data
+        variance (chisq) or the prefit expectation (Poisson), and V_b = D_b +
+        sum_proc sumw2_b (M's 'bb_inflated' convention)."""
+        nb = self.indata.nbins
+        if self.chisqFit:
+            var_data = tf.convert_to_tensor(self.varnobs)[:nb]
+        elif self.covarianceFit:
+            var_data = tf.linalg.diag_part(tf.linalg.inv(self.data_cov_inv))[:nb]
+        else:
+            var_data = tf.convert_to_tensor(self.nexpnom)[:nb]
+        sumw2 = self.indata.sumw2[:nb]
+        var_mc = tf.reduce_sum(sumw2, axis=-1) if len(sumw2.shape) > 1 else sumw2
+        self.mcstat_bb_dref.assign(var_data)
+        self.mcstat_bb_vref.assign(var_data + var_mc)
+
+    def _compute_mcstat_bb_compensator(self, meat=False):
+        """Bin-by-bin stat compensator, with V_b(x) = D_b + sum_c u_bc(x)^2
+        (u from _mcstat_bb_noise_scales, D_b and V_ref,b the reference
+        variances of _update_mcstat_bb_vref):
+
+            continuous-M, and the meat:  1/2 sum_b log(V_b(x) / V_ref,b)
+            fold objective:              1/2 sum_b D_b (1 / V_ref,b - 1 / V_b(x))
+
+        The profiled bin-by-bin stat term is ~ r_b^2 / (2 V_b(x)). Where V
+        moves with the parameters, its gradient -r^2 dV / (2 V^2) is a
+        de-attenuation of its own: per-process betas (full mode, dynamic) are
+        the errors-in-variables profile, which removes the noise floor of the
+        per-process templates; a lite multiplicative beta removes that of the
+        total yield. The de-biasing (the continuous-M penalty, the cross-fit
+        objective) removes the whole noise floor, so without this term it
+        would be removed twice.
+
+        With noisy templates E[r^2] = V, and the gradient of 1/2 log V,
+        dV / (2 V), cancels it exactly. 1/2 log V is the difference between
+        integrating beta out and profiling it (Gaussian case): continuous-M
+        then minimizes the marginal bin-by-bin stat likelihood less
+        1/2 theta^T M theta, and the meat is the marginal likelihood's
+        curvature. After the jackknife the template noise is gone from the
+        residual, E[r^2] = D, and -D / (2 V), of gradient D dV / (2 V^2),
+        cancels it exactly instead: it centres each profiled term on its
+        expectation, r^2 / (2 V) - D / (2 V), an estimating-equation correction
+        rather than a likelihood (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §1b,
+        §2b). Both vanish at the reference point."""
+        u = self._mcstat_bb_noise_scales()
+        vref = self.mcstat_bb_vref
+        ok = vref > 0.0
+        vref_safe = tf.where(ok, vref, tf.ones_like(vref))
+        V = tf.where(
+            ok, self.mcstat_bb_dref + tf.reduce_sum(tf.square(u), -1), vref_safe
+        )
+        if self._fold_debias_active() and not meat:
+            terms = self.mcstat_bb_dref * (1.0 / vref_safe - 1.0 / V)
+        else:
+            terms = tf.math.log(V / vref_safe)
+        return 0.5 * tf.reduce_sum(tf.where(ok, terms, 0.0))
+
+    def mcstat_bb_compensator_value(self):
+        """Value of _compute_mcstat_bb_compensator at the current point (0 if
+        there is none): not part of the goodness-of-fit statistic."""
+        if self.mcstat_bb_vref is None:
+            return 0.0
+        return float(self._compute_mcstat_bb_compensator())
+
     def _init_mcstat_folds(self):
         """Prepare the cross-fit (two-half / k-fold) fold templates.
 
@@ -1588,7 +1740,7 @@ class Fitter:
         pattern of indata.norm. Any k >= 2 is supported. The objective splits the
         folds into the halves G_A = {0..a-1}, G_B = {a..k-1}, a = k//2, b = k-a,
         each rescaled to the full-sample normalization, and combines them with
-        the jackknife weights of _jackknife_ln_terms; the curvature in
+        the jackknife weights of _jackknife_terms; the curvature in
         --covMode fisher uses the raw folds (complete U-statistic,
         _fisher_data_terms).
         """
@@ -1655,7 +1807,7 @@ class Fitter:
         mthetaalpha = tf.stack([theta, thetaalpha], axis=0)  # [2, nsyst]
         return tf.reshape(mthetaalpha, [2 * self.indata.nsyst, 1])
 
-    def _compute_fold_yields(self, halves=False, full=False):
+    def _compute_fold_yields(self, halves=False, full=False, return_norm=False):
         """Predicted yields of the MC-stat folds, without bin-by-bin stat.
 
         halves=False: the k RAW per-fold predictions n_i, [k, nbins], used by
@@ -1671,19 +1823,31 @@ class Fitter:
 
         All folds are evaluated in one batched contraction, so the graph does not
         grow with k.
+
+        return_norm: also return the per-process predictions [m, nbins, nproc]
+        (dense), which bin-by-bin stat needs in full mode, with zero-variance
+        processes, or with --binByBinStatDynamic.
         """
         k = self.n_folds
         split = self.logk_folds is not None or self.logk_folds_delta is not None
         if halves and split:
             # the halves of a split-logk systematic are sums of fold predictions
-            n = self._compute_fold_yields(halves=False, full=full)
-            a, b = self.n_half_folds
-            return tf.stack(
-                [
-                    (k / a) * tf.reduce_sum(n[:a], axis=0),
-                    (k / b) * tf.reduce_sum(n[a:], axis=0),
-                ]
+            out = self._compute_fold_yields(
+                halves=False, full=full, return_norm=return_norm
             )
+            a, b = self.n_half_folds
+
+            def halve(n):
+                return tf.stack(
+                    [
+                        (k / a) * tf.reduce_sum(n[:a], axis=0),
+                        (k / b) * tf.reduce_sum(n[a:], axis=0),
+                    ]
+                )
+
+            if return_norm:
+                return halve(out[0]), halve(out[1])
+            return halve(out)
         norm = self.norm_halves if halves else self.indata.norm_folds
         # scale of a SHARED additive variation in each template of `norm`
         add_scale = 1.0 if halves else 1.0 / k
@@ -1724,7 +1888,15 @@ class Fitter:
             )
             if not full:
                 nexp = nexp[:, : self.indata.nbins]
-            return nexp
+            if not return_norm:
+                return nexp
+            shape = [nbinsfull, self.indata.nproc]
+            normcentral = tf.stack(
+                [tf.scatter_nd(idx, vals[i], shape) for i in range(vals.shape[0])]
+            )
+            if not full:
+                normcentral = normcentral[:, : self.indata.nbins]
+            return nexp, normcentral
 
         rnorm = self.param_model.compute(all_params, full)
         if full or self.indata.nbinsmasked == 0:
@@ -1748,43 +1920,88 @@ class Fitter:
             if self.rnorm_init is not None:
                 logsnorm = logsnorm * self.rnorm_init[:nbins]
             normcentral = norm * rnorm + add_scale * logsnorm
+        if return_norm:
+            return tf.reduce_sum(normcentral, axis=-1), normcentral
         return tf.reduce_sum(normcentral, axis=-1)
 
-    def _jackknife_ln_terms(self, nexp):
-        """(prediction, weight) terms of the cross-fit jackknife objective
-        L_cf = w_full L_full - w_A L_A - w_B L_B (weights: _init_mcstat_folds).
+    def _profiled_half_terms(self, profile=True):
+        """[(n_h, beta_h)] for the two rescaled halves, each with its own
+        bin-by-bin stat beta, profiled on that half's prediction with the
+        full-sample kstat (beta_h None without bin-by-bin stat).
 
-        `nexp` is the profiled full prediction [nbins]. The half predictions
-        share its BB-lite beta (per-bin factor nexp / nexp_raw): without it the
-        BB-lite profiling flattens L_full's curvature while the half terms keep
-        full curvature, which makes the jackknife Hessian indefinite.
+        The jackknife then combines the profiled likelihoods themselves, the
+        smooth function of the templates whose O(1/N_MC) bias it removes. Giving
+        the halves the full-sample beta instead weights their MC deviations by
+        the data variance D rather than the profiled V = D + sigma_MC^2, which
+        over-subtracts the noise floor by a factor 1 + rho
+        (docs/mcstat/RESULTS.md §9u). The full-sample kstat is kept because it
+        is part of the function being jackknifed: per-half kstat would remove
+        the bin-by-bin stat variance itself as a 1/N_MC "bias".
+
+        With profile=False the halves keep the betas stored by _profile_beta.
+        Their betas are not the fit's bin-by-bin stat nuisances, so they carry
+        no ubeta.
         """
-        w_full, w_A, w_B = self.jackknife_weights
-        n_h = self._compute_fold_yields(halves=True)
-        if self.bbstat.enabled:
-            nexp_raw = self._compute_yields_noBBB(full=False, compute_norm=False)[0][
-                : self.indata.nbins
-            ]
-            beta_factor = nexp / tf.where(
-                nexp_raw == 0.0, tf.ones_like(nexp_raw), nexp_raw
+        nb = self.indata.nbins
+        if not self.bbstat.enabled:
+            n_h = self._compute_fold_yields(halves=True)
+            return [(n_h[0], None), (n_h[1], None)]
+        if self.bbstat.needs_per_proc_norm():
+            n_h, norm_h = self._compute_fold_yields(halves=True, return_norm=True)
+        else:
+            n_h, norm_h = self._compute_fold_yields(halves=True), None
+        out = []
+        for h in range(2):
+            nexp_h, _, beta_h = self.bbstat.profile_and_apply(
+                n_h[h],
+                None if norm_h is None else norm_h[h],
+                self.nobs,
+                self.varnobs,
+                self.lognobs,
+                profile=profile,
+                full=False,
+                fixed_beta=None if profile else self.mcstat_half_beta[h],
+                add_ubeta=False,
             )
-            n_h = n_h * beta_factor[None, :]
-        return [(nexp, w_full), (n_h[0], -w_A), (n_h[1], -w_B)]
+            out.append((nexp_h[:nb], beta_h))
+        return out
 
-    def _ln_terms_for_fisher(self, debiased):
-        """List of (nexp[:nbins], coeff) summed in the active ln term: the
-        jackknife combination when debiased and a fold de-bias is active (its
-        Gauss-Newton data part is exactly the cross-half Fisher F_ch), else the
-        plain full term. Yields are taken through the BB-lite profiling, so this
-        is the data term of the objective whose observed Hessian is replaced."""
-        nexp_full = self._compute_yields_with_beta(
+    def _jackknife_terms(self, nexp, beta, profile=True):
+        """(prediction, weight, beta) terms of the cross-fit jackknife
+        objective L_cf = w_full L_full - w_A L_A - w_B L_B (weights:
+        _init_mcstat_folds), each term a profiled bin-by-bin stat likelihood:
+        `nexp`, `beta` are the full term's, the halves' from
+        _profiled_half_terms."""
+        w_full, w_A, w_B = self.jackknife_weights
+        (n_A, beta_A), (n_B, beta_B) = self._profiled_half_terms(profile)
+        return [(nexp, w_full, beta), (n_A, -w_A, beta_A), (n_B, -w_B, beta_B)]
+
+    def _profiled_data_nll(self, debiased):
+        """The part of the objective (debiased) or of the meat whose observed
+        Hessian --covMode fisher replaces by the Gauss-Newton form: the
+        (jackknifed) profiled data terms, bin-by-bin stat constraint included,
+        and the bin-by-bin stat compensator. Their residual-dependent curvature
+        (residual * d2n, and the r^2 terms of a variance that moves with the
+        parameters, which the compensator cancels) is what the Gauss-Newton
+        form drops."""
+        nexp_full, _, beta = self._compute_yields_with_beta(
             profile=True,
             compute_norm=False,
             full=self._regularizers_need_observables(),
-        )[0][: self.indata.nbins]
+        )
+        nexp_full = nexp_full[: self.indata.nbins]
         if debiased and self._fold_debias_active():
-            return self._jackknife_ln_terms(nexp_full)
-        return [(nexp_full, 1.0)]
+            terms = self._jackknife_terms(nexp_full, beta)
+        else:
+            terms = [(nexp_full, 1.0, beta)]
+        l = tf.add_n([c * self._compute_ln(n) for n, c, _ in terms])
+        if self.bbstat.enabled:
+            l = l + tf.add_n([c * self._compute_lbeta(b) for _, c, b in terms])
+        if self.mcstat_bb_vref is not None and not (
+            debiased and self._mcstat_debias_suspended
+        ):
+            l = l + self._compute_mcstat_bb_compensator(meat=not debiased)
+        return l
 
     def _fisher_data_terms(self, debiased):
         """Terms (n, coeff) whose Gauss-Newton sum sum_i coeff_i J_i^T D J_i is
@@ -1802,31 +2019,26 @@ class Fitter:
         cross-half Fisher exactly; for larger k it reduces the curvature-
         estimate variance toward the continuous-M floor. The RAW folds
         (~n_full/k) are used only here (the GN form is residual-independent),
-        never in the objective ln (which keeps the rescaled halves)."""
+        never in the objective ln (which keeps the rescaled halves).
+
+        The predictions are the raw ones, without bin-by-bin stat: its profile
+        enters through the weight of _gauss_newton_surrogate (the Gauss-Newton
+        form of a profiled term is J^T J / (D + sigma_bb^2)), which keeps the
+        full-minus-self identity of the U-statistic exact."""
         nbins = self.indata.nbins
-        nexp_full = self._compute_yields_with_beta(
-            profile=True,
-            compute_norm=False,
-            full=self._regularizers_need_observables(),
-        )[0][:nbins]
         if not self._fold_debias_active():
+            nexp_full = self._compute_yields_noBBB(
+                full=self._regularizers_need_observables(), compute_norm=False
+            )[0][:nbins]
             return [(nexp_full, 1.0)]
 
-        # Per-fold raw predictions n_i (each with its own logk for split-logk),
-        # times the full-sample BB-lite beta so all terms are consistently
-        # profiled. The "full" term is the SUM of the per-fold predictions,
+        # Per-fold raw predictions n_i (each with its own logk for split-logk).
+        # The "full" term is the SUM of the per-fold predictions,
         # J_sumfold = sum_i J_i, so the full-minus-self identity holds EXACTLY
         # for both shared logk (where sum_i n_i == nexp_full) and split logk
         # (where it does not). Using n_sumfold for the meat too keeps bread/meat
         # consistent (H - A = M) under split-logk.
         per_fold = self._compute_fold_yields(halves=False)
-        if self.bbstat.enabled:
-            nexp_raw = self._compute_yields_noBBB(full=False, compute_norm=False)[0][
-                :nbins
-            ]
-            per_fold = per_fold * (
-                nexp_full / tf.where(nexp_raw == 0.0, tf.ones_like(nexp_raw), nexp_raw)
-            )
         n_sumfold = tf.reduce_sum(per_fold, axis=0)
         if debiased:
             coeff = self.n_folds / (self.n_folds - 1.0)
@@ -1839,25 +2051,34 @@ class Fitter:
         S(x) = 1/2 sum_i c_i r_i^T D r_i with r_i = n_i(x) - stop_gradient(n_i(x)):
         the residual is identically zero at the evaluation point, so the
         residual * d2n piece of its Hessian vanishes and only J^T D J survives.
-        D = ell''(nexp), treated as constant: 1/V chisq, data_cov_inv covFit,
-        1/nexp Poisson. The Poisson weight is the SHARED full / sum-of-folds
-        prediction (fisher_terms[0]) for every term: a per-term 1/n_i
-        (~k/nexp_full for a raw fold) breaks the full-minus-self identity of the
-        U-statistic and leaves a -sum_i F_i self-term that drives the bread
-        indefinite.
+        D = the curvature of a profiled per-bin term, treated as constant:
+        1 / (var + sigma_bb^2) with var the data variance (chisq) or the
+        prediction (Poisson) and sigma_bb^2 the variance bin-by-bin stat
+        assigns to the prediction (_bb_model_variance; 0 without it), and
+        (C + diag(sigma_bb^2))^-1 for covFit. The Poisson weight is the SHARED
+        full / sum-of-folds prediction (fisher_terms[0]) for every term: a
+        per-term 1/n_i (~k/nexp_full for a raw fold) breaks the full-minus-self
+        identity of the U-statistic and leaves a -sum_i F_i self-term that
+        drives the bread indefinite.
         """
         nref = tf.stop_gradient(fisher_terms[0][0])
-        if not self.covarianceFit:
-            D = (
-                (1.0 / self.varnobs)
-                if self.chisqFit
-                else tf.math.divide_no_nan(tf.ones_like(nref), nref)
-            )
+        var_bb = self._bb_model_variance()
+        if var_bb is not None:
+            var_bb = tf.stop_gradient(var_bb)
+        if self.covarianceFit:
+            Cinv = self.data_cov_inv
+            if var_bb is not None:
+                Cinv = tf.linalg.inv(tf.linalg.inv(Cinv) + tf.linalg.diag(var_bb))
+        else:
+            var = self.varnobs if self.chisqFit else nref
+            if var_bb is not None:
+                var = var + var_bb
+            D = tf.math.divide_no_nan(tf.ones_like(nref), var)
         terms = []
         for n, c in fisher_terms:
             r = n - tf.stop_gradient(n)
             if self.covarianceFit:
-                q = tf.reduce_sum(r * tf.linalg.matvec(self.data_cov_inv, r))
+                q = tf.reduce_sum(r * tf.linalg.matvec(Cinv, r))
             else:
                 q = tf.reduce_sum(D * tf.square(r))
             terms.append(0.5 * c * q)
@@ -1869,34 +2090,33 @@ class Fitter:
 
             F = hess_obj - H_ln_obs + F_data
 
-        H_ln_obs is the observed Hessian of the OBJECTIVE's data term, so
-        `hess_obj - H_ln_obs` is the non-data curvature (constraints, external
-        M, BB-lite). F_data is the de-biased data Gauss-Newton Fisher from
+        H_ln_obs is the observed Hessian of the OBJECTIVE's profiled data terms
+        (_profiled_data_nll: bin-by-bin stat and its compensator included), so
+        `hess_obj - H_ln_obs` is the remaining curvature (constraints,
+        regularization, external terms, the continuous-M -M). F_data is the
+        de-biased data Gauss-Newton Fisher from
         _fisher_data_terms (the complete k-fold U-statistic for the bread; the
-        full J^T D J for the meat). Drops the residual * d2nexp piece while
-        keeping the non-data curvature (docs/mcstat/RABBIT_MCSTAT_DESIGN.md
-        §2c/§2d).
+        full J^T D J for the meat). Drops the residual-dependent pieces while
+        keeping the rest (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §2c/§2d).
 
         F_data - H_ln_obs is evaluated as ONE Hessian, of the Gauss-Newton
-        surrogate minus the data term, through the same reverse-over-reverse
-        jacobian as hess_obj: O(nparams) backward passes, each linear in nbins.
+        surrogate minus the data term, the same way as hess_obj (one
+        reverse-over-reverse jacobian, or batched HVPs under --hvpBatch):
+        O(nparams) backward passes, each linear in nbins.
         No per-term [nbins, nparams] Jacobian is built (a reverse-mode jacobian
         of an [nbins] output costs one backward pass per bin, i.e. O(nbins^2)).
         """
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                val = self._gn_shift(debiased)
-            g = t1.gradient(val, self.x)
-        return hess_obj + t2.jacobian(g, self.x)
+        shift = self._scalar_hessian(
+            f"gn_shift_{debiased}", lambda: self._gn_shift(debiased)
+        )
+        return hess_obj + tf.cast(shift, hess_obj.dtype)
 
-    @tf.function
     def fisher_curvature(self, hess_obj):
         """Gauss-Newton curvature of the ACTIVE objective (jackknife if a
         two-half debias is on; else the full term). Used as the sandwich bread
         and as the standard-covariance curvature under --covMode fisher."""
         return self._fisher_core(hess_obj, True)
 
-    @tf.function
     def fisher_curvature_full(self, hess_meat):
         """Gauss-Newton curvature of the FULL (undebiased) objective. Used as the
         sandwich meat under --covMode fisher."""
@@ -1964,28 +2184,26 @@ class Fitter:
             meat = meat + self._mc_data_variance_curvature()
         return np.asarray(bread), np.asarray(meat)
 
-    @tf.function
     def _mc_data_variance_curvature(self):
         """sum_b rho_b J_b J_b^T / V_b, J = d nexp / dx: the score variance the
         MC fluctuations of the predictions add to the data term, as the Hessian
         of a zero-residual surrogate (cf. _gauss_newton_surrogate)."""
-        _, rho = self._mcstat_gof_bin_inputs()
-        rho = tf.stop_gradient(rho)
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                n = self._compute_yields_noBBB(full=False, compute_norm=False)[0][
-                    : self.indata.nbins
-                ]
-                r = n - tf.stop_gradient(n)
-                if self.chisqFit:
-                    D = 1.0 / self.varnobs
-                elif self.covarianceFit:
-                    D = tf.linalg.diag_part(self.data_cov_inv)
-                else:
-                    D = tf.math.divide_no_nan(tf.ones_like(n), tf.stop_gradient(n))
-                val = 0.5 * tf.reduce_sum(rho * D * tf.square(r))
-            g = t1.gradient(val, self.x)
-        return t2.jacobian(g, self.x)
+
+        def surrogate():
+            rho = tf.stop_gradient(self._mcstat_gof_bin_inputs()[1])
+            n = self._compute_yields_noBBB(full=False, compute_norm=False)[0][
+                : self.indata.nbins
+            ]
+            r = n - tf.stop_gradient(n)
+            if self.chisqFit:
+                D = 1.0 / self.varnobs
+            elif self.covarianceFit:
+                D = tf.linalg.diag_part(self.data_cov_inv)
+            else:
+                D = tf.math.divide_no_nan(tf.ones_like(n), tf.stop_gradient(n))
+            return 0.5 * tf.reduce_sum(rho * D * tf.square(r))
+
+        return self._scalar_hessian("mc_data_variance", surrogate)
 
     def mcstat_projection_check(self, psi_indices, rtol=1e-8):
         """Whether the saturated projection test of a de-biased fit is defined.
@@ -2021,31 +2239,31 @@ class Fitter:
         worst = float(np.max(np.abs(np.linalg.eigvalsh(null.T @ A_t @ null)))) / scale
         return worst <= 1e-6, worst
 
-    @tf.function
     def _mcstat_gn_data_curvatures(self):
         """(cross-fit, full-sample) data Gauss-Newton Fisher plus the constraint
         and regularization curvature: the Hessians of the surrogates of
         _gauss_newton_surrogate."""
-        out = []
-        for debiased in (True, False):
-            with tf.GradientTape() as t2:
-                with tf.GradientTape() as t1:
-                    val = (
-                        self._gauss_newton_surrogate(self._fisher_data_terms(debiased))
-                        + self._compute_lc()
-                    )
-                    lpenalty = self._compute_lpenalty(
-                        self._compute_yields_with_beta(
-                            profile=True,
-                            compute_norm=False,
-                            full=self._regularizers_need_observables(),
-                        )[0]
-                    )
-                    if lpenalty is not None:
-                        val = val + lpenalty
-                g = t1.gradient(val, self.x)
-            out.append(t2.jacobian(g, self.x))
-        return out
+
+        def surrogate(debiased):
+            val = (
+                self._gauss_newton_surrogate(self._fisher_data_terms(debiased))
+                + self._compute_lc()
+            )
+            lpenalty = self._compute_lpenalty(
+                self._compute_yields_with_beta(
+                    profile=True,
+                    compute_norm=False,
+                    full=self._regularizers_need_observables(),
+                )[0]
+            )
+            if lpenalty is not None:
+                val = val + lpenalty
+            return val
+
+        return [
+            self._scalar_hessian(f"gn_data_{d}", lambda d=d: surrogate(d))
+            for d in (True, False)
+        ]
 
     def mcstat_projection_test(self, dq, psi_indices, bread, meat):
         """p-value of the saturated projection test of a de-biased fit.
@@ -2085,7 +2303,7 @@ class Fitter:
         """Dense sandwich meat H: the curvature of the ordinary (full-sample)
         likelihood at the current point, in the given --covMode. Continuous-M
         uses the analytic H = A + M instead (cov_mcstat_sandwich)."""
-        _, _, H_obs = self.loss_val_grad_hess_meat()
+        H_obs = self.hess_meat()
         if covMode == "fisher":
             return self.fisher_curvature_full(H_obs)
         return H_obs
@@ -2096,9 +2314,9 @@ class Fitter:
         """Scalar whose Hessian is F_data - H_ln_obs (see _fisher_core): adding
         it to an objective turns that objective's observed Hessian into the
         Gauss-Newton one."""
-        obj_terms = self._ln_terms_for_fisher(debiased)
-        ln = tf.add_n([c * self._compute_ln(n) for n, c in obj_terms])
-        return self._gauss_newton_surrogate(self._fisher_data_terms(debiased)) - ln
+        return self._gauss_newton_surrogate(
+            self._fisher_data_terms(debiased)
+        ) - self._profiled_data_nll(debiased)
 
     def _hvp_function(self, scalar_fn):
         """tf.function p -> (d^2 scalar_fn / dx^2) p, reverse-over-reverse."""
@@ -2192,6 +2410,14 @@ class Fitter:
         dnhat = t.gradient(total, self.nobs, unconnected_gradients="zero")
         shrink = 1.0 - dnhat
 
+        var_data, var_mc = self._mcstat_bin_variances()
+        rho = tf.math.divide_no_nan(var_mc, var_data)
+        return shrink, rho
+
+    def _mcstat_bin_variances(self):
+        """Per-bin data variance and MC variance of the prediction at the
+        current point (each process keeping its relative MC variance)."""
+        nbins = self.indata.nbins
         nexp, norm = self._compute_yields_noBBB(full=False, compute_norm=True)
         nexp = nexp[:nbins]
         norm = norm[:nbins]
@@ -2201,13 +2427,12 @@ class Fitter:
             sumw = tf.reduce_sum(self.indata.sumw[:nbins], axis=-1)
             var_mc = self.indata.sumw2[:nbins] * tf.math.divide_no_nan(nexp, sumw) ** 2
         if self.chisqFit:
-            var_data = self.varnobs
+            var_data = self.varnobs[:nbins]
         elif self.covarianceFit:
             var_data = tf.linalg.diag_part(tf.linalg.inv(self.data_cov_inv))
         else:
             var_data = nexp
-        rho = tf.math.divide_no_nan(var_mc, var_data)
-        return shrink, rho
+        return var_data, var_mc
 
     def mcstat_gof(self, q, trace_AinvH=None):
         """p-value of the saturated statistic of a fold-de-biased fit.
@@ -2221,22 +2446,24 @@ class Fitter:
         MC), Delta_A,B = n_A,B - n the halves' MC deviations (independent of e,
         E[Delta_A Delta_B] = -sigma_MC^2, Var(Delta_A + Delta_B) =
         sigma_MC^2 (a - b)^2 / (a b)), and s the shrink of _mcstat_gof_bin_inputs
-        (bin-by-bin stat absorbs the fraction 1 - s of e, and its constraint term
-        restores the e^2 coefficient to s), to leading order
+        (a profiled term's curvature in its residual is s / V: bin-by-bin stat
+        absorbs the fraction 1 - s of it), each jackknife term being separately
+        profiled, to leading order
 
-            q_b V = s e^2 - s e (Delta_A + Delta_B) + Delta_A Delta_B.
+            q_b V = s [e^2 - e (Delta_A + Delta_B) + Delta_A Delta_B].
 
         So q is a weighted chi2, sum_b lambda_b z_b^2 with lambda_b = s_b (1 +
         rho_b), minus the fitted parameters, plus an approximately Gaussian G of
 
-            mean  -sum_b rho_b
-            var    sum_b [2 rho_b^2 + s_b^2 (1 + rho_b) rho_b (a - b)^2 / (a b)].
+            mean  -sum_b s_b rho_b
+            var    sum_b s_b^2 [2 rho_b^2 + (1 + rho_b) rho_b (a - b)^2 / (a b)].
 
         Without bin-by-bin stat (s = 1) the mean is nbins: the MC fluctuations
         cancel in the cross-fit chi2 sum_b D_b (y - n_A)(y - n_B). With it the
-        mean is sum_b (1 - rho_b) for s = 1/(1 + rho), and can be negative;
-        a mismodelling shift d_b still raises E[q_b] by d_b^2 / (V_b + sigma_b^2),
-        as in the ordinary test. The weighted chi2 is moment-matched to
+        mean is sum_b s_b = sum_b 1 / (1 + rho_b) for s = 1 / (1 + rho); a
+        mismodelling shift d_b still raises E[q_b] by d_b^2 / (V_b + sigma_b^2),
+        as in the ordinary test. q excludes the bin-by-bin stat compensator
+        (mcstat_bb_compensator_value), an offset of order sum_b rho_b. The weighted chi2 is moment-matched to
         c chi2_nu (Satterthwaite) with mean sum_b lambda_b + n_constrained -
         tr(A^-1 H), tr(A^-1 H) being the effective number of fitted parameters
         (constrained ones are balanced by their pseudo-measurements; without
@@ -2264,9 +2491,9 @@ class Fitter:
         sum_lam2 = float(np.sum(lam**2)) + n_constrained
         c = sum_lam2 / sum_lam
         nu = mean1 / c
-        g_mean = -float(np.sum(rho))
+        g_mean = -float(np.sum(shrink * rho))
         g_var = float(
-            np.sum(2 * rho**2 + shrink**2 * (1 + rho) * rho * (a - b) ** 2 / (a * b))
+            np.sum(shrink**2 * (2 * rho**2 + (1 + rho) * rho * (a - b) ** 2 / (a * b)))
         )
         g_sigma = np.sqrt(g_var)
 
@@ -2394,9 +2621,13 @@ class Fitter:
         """Continuous-M robust (sandwich) covariance.
 
         Sigma = A^-1 H A^-1 with bread A = de-biased curvature (grad^2 of the
-        objective WITH the -1/2 theta^T M theta penalty) and meat H = the
-        same-sample curvature WITHOUT the penalty. Because the penalty is the
-        frozen quadratic -1/2 theta^T M theta, H = A + M exactly, so
+        objective WITH the penalty -1/2 theta^T M theta and the bin-by-bin stat
+        compensator, whose Hessian is M_BB) and meat H = the score variance, the
+        same-sample curvature WITHOUT the penalty plus M_BB, the part of the
+        template noise bin-by-bin stat removes from it
+        (_compute_mcstat_bb_compensator; zero without bin-by-bin stat or with a
+        static normal-additive one). Because the penalty is a frozen quadratic,
+        H = A + M exactly, so
 
             Sigma = A^-1 (A + M) A^-1 = A^-1 + A^-1 M A^-1.
 
@@ -3395,6 +3626,10 @@ class Fitter:
     def _profile_beta(self):
         nexp, norm, beta = self._compute_yields_with_beta(full=False)
         self.bbstat.beta.assign(beta)
+        if self.mcstat_half_beta is not None and self._fold_debias_active():
+            self.mcstat_half_beta.assign(
+                tf.stack([b for _, b in self._profiled_half_terms(profile=True)])
+            )
 
     def _compute_yields(self, inclusive=True, profile=True, full=True):
         nexpcentral, normcentral, beta = self._compute_yields_with_beta(
@@ -3699,26 +3934,25 @@ class Fitter:
 
         if self._fold_debias_active():
             # Cross-fit jackknife combination L_cf = w_full L_full - w_A L_A -
-            # w_B L_B (= 2 L_full - 1/2 L_A - 1/2 L_B for even k). The halves
-            # average to the full prediction, so this de-biases the point
-            # (gradient = cross-fit score) and the curvature (cross-half Fisher)
-            # regardless of nonlinearity; see _jackknife_ln_terms.
-            ln = tf.add_n(
-                [
-                    c * self._compute_ln(n, full_nll)
-                    for n, c in self._jackknife_ln_terms(nexp)
-                ]
-            )
+            # w_B L_B (= 2 L_full - 1/2 L_A - 1/2 L_B for even k) of the
+            # profiled likelihoods. The halves average to the full prediction,
+            # so this de-biases the point (gradient = cross-fit score) and the
+            # curvature (cross-half Fisher) regardless of nonlinearity; each
+            # term carries its own bin-by-bin stat beta and constraint
+            # (_jackknife_terms), weighted like its data term.
+            terms = self._jackknife_terms(nexp, beta, profile=profile)
+            ln = tf.add_n([c * self._compute_ln(n, full_nll) for n, c, _ in terms])
+            lbeta = None
+            if self.bbstat.enabled:
+                lbeta = tf.add_n(
+                    [c * self._compute_lbeta(b, full_nll) for _, c, b in terms]
+                )
         else:
             ln = self._compute_ln(nexp, full_nll)
+            lbeta = self._compute_lbeta(beta, full_nll)
 
+        # lc (theta priors) is counted once.
         lc = self._compute_lc(full_nll)
-
-        # lbeta (BB-lite MC-stat constraint) and lc (theta priors) are counted
-        # once. With two-half the same profiled beta is shared across the full
-        # and half terms (_jackknife_ln_terms), so its constraint enters with
-        # weight 1.
-        lbeta = self._compute_lbeta(beta, full_nll)
 
         lpenalty = self._compute_lpenalty(nexpfullcentral)
 
@@ -3783,14 +4017,23 @@ class Fitter:
         return l
 
     def _compute_mcstat_penalty(self, full_nll=False):
-        """The continuous-M penalty -1/2 theta^T M theta (an external quadratic
-        term with Hessian -M); None unless --mcStatDebias continuousM, or while
-        the de-biasing is suspended for the warm start."""
-        if not self.mcstat_terms or self._mcstat_debias_suspended:
+        """The MC-stat de-biasing terms outside the data term: the continuous-M
+        penalty -1/2 theta^T M theta (the external quadratic term with Hessian
+        -M), and the bin-by-bin stat compensator
+        (_compute_mcstat_bb_compensator) of either method. None if there are
+        none, or while the de-biasing is suspended for the warm start."""
+        if self._mcstat_debias_suspended:
             return None
-        return external_likelihood.compute_external_nll(
-            self.mcstat_terms, self.x, self.indata.dtype, full_nll=full_nll
-        )
+        terms = []
+        if self.mcstat_terms:
+            terms.append(
+                external_likelihood.compute_external_nll(
+                    self.mcstat_terms, self.x, self.indata.dtype, full_nll=full_nll
+                )
+            )
+        if self.mcstat_bb_vref is not None:
+            terms.append(self._compute_mcstat_bb_compensator())
+        return tf.add_n(terms) if terms else None
 
     def _compute_loss(self, profile=True):
         return self._compute_nll(profile=profile)
@@ -3856,6 +4099,8 @@ class Fitter:
         # batch, which on a large model costs more than the HVPs themselves.
         # In a tf.function it is traced once per batch width (and profile).
         self._hessp_batch_graph = tf.function(self._hessp_batch)
+        # traced Hessians of the auxiliary scalars (_scalar_hessian)
+        self._scalar_hessian_fns = {}
         # tf.autodiff.ForwardAccumulator does not support tangent
         # propagation through SparseMatrixMatMul (no JVP rule for the
         # CSR variant), so the fwdrev HVP cannot be used in sparse mode.
@@ -4025,41 +4270,9 @@ class Fitter:
         # the sequential loop below goes through loss_val_grad_hessp, which
         # only knows the profiled loss
         if k > 1 or not profile:
-            s0 = 0
-            while s0 < idx.size:
-                cols = idx[s0 : s0 + k]
-                basis = np.zeros((cols.size, n), dtype=np.float64)
-                basis[np.arange(cols.size), cols] = 1.0
-                try:
-                    hp = self._hessp_batch_dispatch(
-                        tf.constant(basis, dtype=self.indata.dtype), profile=profile
-                    )
-                except tf.errors.ResourceExhaustedError:
-                    # The per-batch memory is k * nbins * 9 * 8 in principle,
-                    # but the loss graph holds several bins-shaped tensors at
-                    # once -- measured at ~6.5x that on one model -- so the
-                    # right k is model dependent. Halve and retry rather than
-                    # making the caller guess: this runs once per build, so a
-                    # couple of wasted attempts cost far less than falling back
-                    # to an unpreconditioned fit or losing the covariance.
-                    if k == 1:
-                        raise
-                    k = max(1, k // 2)
-                    # Persist it: the limit is a property of this device and
-                    # model, not of this call, so the postfit Hessian and every
-                    # preconditioner rebuild in the restart loop would otherwise
-                    # re-discover it -- paying the same compile, allocate and
-                    # unwind each time. min() so an explicit oversized batch=
-                    # that shrinks cannot raise a lower standing default.
-                    self.hvp_batch = min(self.hvp_batch, k)
-                    logger.warning(
-                        f"HVP batch too large for the device; retrying with "
-                        f"--hvpBatch {k}"
-                    )
-                    continue
-                out[:, s0 : s0 + cols.size] = np.asarray(hp).T
-                s0 += cols.size
-            return out
+            return self._hessian_from_hvp_batches(
+                lambda P: self._hessp_batch_dispatch(P, profile=profile), idx, k
+            )
 
         v = np.zeros(n, dtype=np.float64)
         for c, j in enumerate(idx):
@@ -4068,6 +4281,85 @@ class Fitter:
             out[:, c] = np.asarray(hp)
             v[j] = 0.0
         return out
+
+    def _hessian_from_hvp_batches(self, hessp_batch, idx, k):
+        """Columns `idx` of a dense Hessian from `hessp_batch(P)`, the HVPs of a
+        [k', npar] batch of directions, k columns at a time (halving k if the
+        device runs out of memory)."""
+        n = int(self.x.shape[0])
+        out = np.empty((n, idx.size), dtype=np.float64)
+        s0 = 0
+        while s0 < idx.size:
+            cols = idx[s0 : s0 + k]
+            basis = np.zeros((cols.size, n), dtype=np.float64)
+            basis[np.arange(cols.size), cols] = 1.0
+            try:
+                hp = hessp_batch(tf.constant(basis, dtype=self.indata.dtype))
+            except tf.errors.ResourceExhaustedError:
+                # The per-batch memory is k * nbins * 9 * 8 in principle,
+                # but the loss graph holds several bins-shaped tensors at
+                # once -- measured at ~6.5x that on one model -- so the
+                # right k is model dependent. Halve and retry rather than
+                # making the caller guess: this runs once per build, so a
+                # couple of wasted attempts cost far less than falling back
+                # to an unpreconditioned fit or losing the covariance.
+                if k == 1:
+                    raise
+                k = max(1, k // 2)
+                # Persist it: the limit is a property of this device and
+                # model, not of this call, so the postfit Hessian and every
+                # preconditioner rebuild in the restart loop would otherwise
+                # re-discover it -- paying the same compile, allocate and
+                # unwind each time. min() so an explicit oversized batch=
+                # that shrinks cannot raise a lower standing default.
+                self.hvp_batch = min(self.hvp_batch, k)
+                logger.warning(
+                    f"HVP batch too large for the device; retrying with "
+                    f"--hvpBatch {k}"
+                )
+                continue
+            out[:, s0 : s0 + cols.size] = np.asarray(hp).T
+            s0 += cols.size
+        return out
+
+    def _scalar_hessian(self, key, scalar_fn):
+        """Dense Hessian of an auxiliary scalar scalar_fn() (the sandwich meat,
+        a Gauss-Newton surrogate) w.r.t. x. Like loss_val_grad_hess: one
+        tape.jacobian, or with --hvpBatch assembled from batches of HVPs, which
+        bounds the memory by the batch. `key` names the scalar; its traced
+        functions are built once (and dropped with the others on retrace)."""
+        fns = self._scalar_hessian_fns.get(key)
+        if fns is None:
+
+            def hess():
+                with tf.GradientTape() as t2:
+                    with tf.GradientTape() as t1:
+                        val = scalar_fn()
+                    g = t1.gradient(val, self.x)
+                return t2.jacobian(g, self.x)
+
+            def hessp_batch(P):
+                def one(p):
+                    p = tf.stop_gradient(p)
+                    with tf.GradientTape() as t2:
+                        with tf.GradientTape() as t1:
+                            val = scalar_fn()
+                        g = t1.gradient(val, self.x)
+                    return t2.gradient(
+                        g, self.x, output_gradients=p, unconnected_gradients="zero"
+                    )
+
+                return tf.vectorized_map(one, P)
+
+            fns = (tf.function(hess), tf.function(hessp_batch))
+            self._scalar_hessian_fns[key] = fns
+        if not self.hessian_from_hvp:
+            return fns[0]()
+        n = int(self.x.shape[0])
+        out = self._hessian_from_hvp_batches(
+            fns[1], np.arange(n), max(1, self.hvp_batch)
+        )
+        return tf.constant(out, dtype=self.indata.dtype)
 
     def _hessp_batch_dispatch(self, P, profile=True):
         """Batched HVP; subclasses override to keep the work distributed."""

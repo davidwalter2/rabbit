@@ -60,7 +60,7 @@ accumulated at the expansion point in the event loop and stored once:
 # tensorwriter.py
 def add_mc_stat_moment(self, M, param_names, *, variance, name="mcstat_M"):
     # M[i,j] = Σ_b (Σ_{e∈b} w_e² s_i s_j)/V_b at nominal
-    # variance: "bblite_inflated" (V_b = μ_b + Σ_proc sumw2_b) | "bare" (V_b = μ_b)
+    # variance: "bb_inflated" (V_b = μ_b + Σ_proc sumw2_b) | "bare" (V_b = μ_b)
 ```
 It is stored as an external quadratic term (`hess = -M`) with the `variance`
 convention recorded next to it. The fitter consumes it directly as a constant, and
@@ -108,6 +108,40 @@ def _compute_mcstat_penalty(self):
   indefinite (RESULTS.md §9g); hence the recorded `variance` convention (§1a).
   Storing a configuration-independent quantity instead would need the per-bin
   moments `Q_b` (`nparams²·nbins`), which is exactly what the frozen `M` avoids.
+  (`"bblite_inflated"`, the name used before full mode and dynamic bin-by-bin
+  stat were supported, is read as `"bb_inflated"`.)
+- **What bin-by-bin stat already removes.** `M` is the moment of the true
+  template noise. When the variance of the profiled β moves with the parameters,
+  the profiled likelihood already removes part of it. With
+  `V_b(θ) = D_b + Σ_c u_bc(θ)²`, where `u_bc` is the noise standard deviation β
+  component `c` models, the profiled per-bin term is `r_b²/(2V_b(θ))`. Its
+  gradient `−r²∂V/(2V²)` has mean `−∂V/(2V)` (with noisy templates
+  `E[r²] = V`), which de-attenuates on its own: with per-process β (full mode,
+  dynamic) this is the errors-in-variables profile, which removes the noise
+  floor of the per-process templates, `M_BB = Σ_bΣ_c ∂u_bc∂u_bcᵀ/V_b` (for linear
+  parameters; with unit-weight events and per-process scores, all of `M`).
+  Penalizing `M` on top removes it twice: `H − M` went indefinite with
+  multiplicative full mode and dynamic bin-by-bin stat (RESULTS.md §9t).
+  The fitter adds the **compensator** `½Σ_b log(V_b(θ)/V_b,ref)`
+  (`Fitter._compute_mcstat_bb_compensator`), whose gradient `∂V/(2V)` cancels
+  the profile's term exactly. In the Gaussian case `½ log V` is exactly the
+  difference between integrating β out and profiling it, so continuous-M
+  minimizes the **marginal** bin-by-bin stat likelihood less `½θᵀMθ`:
+
+      −log L_marginal(θ) − ½ θᵀMθ,   −log L_marginal = −log L_profile + ½ Σ_b log V_b(θ)
+
+  The marginal likelihood is attenuated, and the M penalty removes exactly that.
+  `u` per configuration (`_mcstat_bb_noise_scales`):
+  - multiplicative types in full mode, and `--binByBinStatDynamic` (any type):
+    one component per (bin, process), `u = √sumw2 · n_p(θ)/sumw`;
+  - multiplicative types in lite mode: one component per bin, scaling the yield
+    of the processes with MC variance (the noise of the total yield only, a
+    relative `1/kstat` correction along the well-measured directions);
+  - normal-additive, static (lite or full): fixed absolute shifts, no term.
+
+  `D_b` and `V_b,ref = D_b + Σ_proc sumw2_b` are frozen at the reference (the data
+  variance for chisq, the prefit expectation for Poisson), as for `M`. The meat
+  is the marginal likelihood's curvature, `A + M` (§1c).
 
 ### 1c. Covariance (sandwich) — RESULTS.md §8c
 The minimized-objective Hessian `A = ∇²L = H_bb − M` is the de-biased *curvature*
@@ -119,6 +153,9 @@ def cov_mcstat_sandwich(self):
     Ainv = tf.linalg.inv(A)
     return Ainv @ H @ Ainv             # = A⁻¹ + A⁻¹ M A⁻¹ ; H−A = M
 ```
+With bin-by-bin stat whose variance moves with the parameters, `A` includes the
+compensator's curvature (§1b) and the meat is that of the marginal likelihood,
+again `A + M`.
 `hess_full` = the existing `loss_val_grad_hess` evaluated with the M-penalty
 disabled (rabbit already toggles BBB off for `impacts_parms`, line ~934 — reuse
 that pattern). Matrix-free variant: `Σ·v = A⁻¹ H (A⁻¹ v)` via two HVP solves of
@@ -245,11 +282,38 @@ def _compute_ln_debiased(self, full_nll=False):
     return self._compute_ln(nexp_full[:nbins])
 ```
 `_compute_yields_noBBB` gains a `templates="full"|"A"|"B"` switch selecting
-`norm`/`logk` vs `norm_A`/`logk_A` vs `norm_B`/`logk_B`. Everything else (BB-lite β
-profiling on the FULL templates for σ_MC, penalties, autodiff grad/HVP) is
-unchanged. Autodiff of this scalar gives:
+`norm`/`logk` vs `norm_A`/`logk_A` vs `norm_B`/`logk_B`. Everything else
+(penalties, autodiff grad/HVP) is unchanged; bin-by-bin stat is profiled per term
+(below). Autodiff of this scalar gives:
 - gradient = cross-fit score → **de-biased point** (RESULTS.md §8d verified);
 - Hessian = cross-half Fisher `F_ch` → de-biased curvature.
+*Bin-by-bin stat.* Each jackknife term is its own **profiled** likelihood,
+`L_X,bb(θ) = min_β [ln(n_X β) + lbeta(β)]`, all with the full-sample kstat
+(`Fitter._profiled_half_terms`), and the constraint term of each enters with its
+term's weight. The jackknife removes the `O(1/N_MC)` bias of a smooth function of
+the templates, and the profiled likelihood (its minimum over β included) is that
+function. The kstat stays the full sample's because it is part of the function:
+per-half kstat would make the bin-by-bin stat variance itself a `1/N_MC` "bias"
+that the jackknife removes, leaving the likelihood without bin-by-bin stat.
+For a Gaussian term with normal-additive β, `L_X,bb = (y − n_X)²/(2V)`,
+`V = D + σ²_MC`, and the de-biased curvature `Σ_X c_X J_XᵀJ_X/V` has the noise floor
+removed with weight `1/V`. The earlier design (§9g) instead applied the
+full-sample β to the halves; that gives `e²/(2V) − Σ_hΔ_h²/(4D)` (k = 2), which
+removes the floor with `1/D`, over-subtracting by `1 + ρ`; at `ρ ≈ 1` the bread
+went indefinite for every bin-by-bin stat type (RESULTS.md §9u).
+
+Where the bin-by-bin stat variance moves with the parameters (§1b), the
+jackknife's limit is the profiled likelihood at the *true* templates, whose
+residual has variance `D`, not `V`: its gradient `−r²∂V/(2V²)` then has mean
+`−D∂V/(2V²)`, a bias of its own (anti-attenuation, large along weakly constrained
+directions: +1.4 on a true 0.42 at `ρ = 1`, RESULTS.md §9u). The fold objective
+adds the compensator `½Σ_b D_b (1/V_b,ref − 1/V_b(θ))`, of gradient
+`D∂V/(2V²)`, which cancels it exactly at any `θ`. It centres each profiled term on
+its expectation, `(r² − D)/(2V)`; unlike the continuous-M compensator it is not a
+log-likelihood, but an estimating-equation correction. The meat is the curvature of
+the full-sample marginal likelihood (`½Σ log V`), whose score variance keeps the
+template noise.
+
 k-fold: the objective keeps the single A/B split; the averaging over fold pairs is
 done in the `--covMode fisher` curvature by the complete U-statistic
 `F_ch = k/(k−1)[J_ΣᵀDJ_Σ − Σ_i J_iᵀDJ_i] = k/(k−1)Σ_{i≠j}J_iᵀDJ_j` over the raw folds
@@ -274,14 +338,23 @@ entirely (no residual bias, ~2× lower variance) and is cheaper. Matrix-free `Σ
 via the existing HVP machinery in either mode.
 
 *Implementation of the GN curvature.* `F = ∇²L_obj − ∇²ln_obj + Σ_i c_i J_iᵀDJ_i`,
-where the last two pieces are evaluated together as the Hessian of
-`S(x) − ln_obj(x)`, with the Gauss–Newton surrogate
+where `ln_obj` is the objective's profiled data terms (bin-by-bin stat constraint
+and compensator included, `Fitter._profiled_data_nll`) and the last two pieces
+are evaluated together as the Hessian of `S(x) − ln_obj(x)`, with the
+Gauss–Newton surrogate
 `S(x) = ½Σ_i c_i r_iᵀDr_i`, `r_i = n_i(x) − stop_gradient(n_i(x))`. The residual
 vanishes identically at the evaluation point, so only `JᵀDJ` survives; the Hessian
 goes through the same reverse-over-reverse jacobian as the ordinary one
 (`O(nparams)` backward passes, each linear in nbins), and no `[nbins, nparams]`
-Jacobian is materialized. `D` is constant: `1/V` (chisq), `C⁻¹` (covariance fit),
-`1/n_ref` (Poisson, with the shared full/sum-of-folds prediction for every term).
+Jacobian is materialized. `D` is constant, the curvature of a profiled term:
+`1/(V + σ²_bb)` (chisq), `(C + diag σ²_bb)⁻¹` (covariance fit), `1/(n_ref + σ²_bb)`
+(Poisson, with the shared full/sum-of-folds prediction for every term), with
+`σ²_bb` the variance bin-by-bin stat assigns to the prediction (0 without it). The
+`J_i` are the raw predictions, without β, so the full-minus-self identity of the
+U-statistic stays exact. This drops the residual-dependent curvature of the
+profile (including the `r²` terms of a parameter-dependent variance) together
+with the compensator that cancels them, so `F` matches the expectation of the
+observed bread.
 
 ### 2d. `--covMode` on the *standard* (undebiased) covariance
 `--covMode` applies here too (it's the `mcStatDebias=none` instance of the same
@@ -368,24 +441,26 @@ likelihood). Only its reference distribution differs (`Fitter.mcstat_gof`).
 Per bin, with `e = y − n` the full residual (variance `V(1+ρ)`, data and MC),
 `Δ_{A,B} = n_{A,B} − n` the halves' MC deviations (independent of `e`,
 `E[Δ_AΔ_B] = −σ²_MC`, `Var(Δ_A+Δ_B) = σ²_MC (a−b)²/(ab)`), and `s` the fraction of
-`e` that bin-by-bin stat leaves in the data term (its constraint term restores
-the coefficient of `e²` to `s`), to leading order
+`e` that bin-by-bin stat leaves in the data term (a profiled term's curvature in
+its residual is `s/V`), each jackknife term being separately profiled (§2b), to
+leading order
 
-    q_b·V = s·e² − s·e·(Δ_A + Δ_B) + Δ_A·Δ_B
+    q_b·V = s·[e² − e·(Δ_A + Δ_B) + Δ_A·Δ_B]
 
 - without bin-by-bin stat (`s = 1`) this is the cross-fit χ²
   `Σ_b D_b (y−n_A)(y−n_B)` (exact for chisq, any k): the MC fluctuations cancel in
   its mean, `E[q_b] = 1`;
-- with it (`s ≈ 1/(1+ρ)`), `E[q_b] = s(1+ρ) − ρ = 1 − ρ`: β absorbs the common MC
-  fluctuation, but not the halves' disagreement. A mismodelling shift `d` in the
+- with it (`s ≈ 1/(1+ρ)`), `E[q_b] = s(1+ρ) − sρ = s`: β absorbs part of both the
+  common MC fluctuation and the halves' disagreement. A mismodelling shift `d` in the
   bin still raises `E[q_b]` by `d²/(V+σ²)`, exactly as in the ordinary
   bin-by-bin-stat saturated test.
 
 So `q` is a weighted χ² `Σ_b λ_b z_b²` (`λ_b = s_b(1+ρ_b)`, minus the fitted
 parameters: mean `Σλ_b + n_constrained − tr(A⁻¹H)`, `tr(A⁻¹H)` the effective
 number of fitted parameters from the sandwich bread and meat), moment-matched to
-`c·χ²_ν`, plus an approximately Gaussian `G` with mean `−Σρ_b` and variance
-`Σ[2ρ_b² + s_b²(1+ρ_b)ρ_b(a−b)²/(ab)]`; the p-value is `P(c·χ²_ν + G ≥ q)`. `s_b`
+`c·χ²_ν`, plus an approximately Gaussian `G` with mean `−Σs_bρ_b` and variance
+`Σs_b²[2ρ_b² + (1+ρ_b)ρ_b(a−b)²/(ab)]`; the p-value is `P(c·χ²_ν + G ≥ q)`. `q`
+excludes the bin-by-bin stat compensator (an offset of order `Σρ_b`). `s_b`
 is taken from the fit itself, `s_b = 1 − ∂n̂_b/∂y_b` of the profiled prediction,
 so it holds for any bin-by-bin stat type and mode; `ρ_b` is the MC variance of
 the prediction over the data variance. The fit result stores
