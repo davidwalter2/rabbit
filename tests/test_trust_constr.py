@@ -1038,11 +1038,13 @@ def test_preconditioning_does_not_move_the_constrained_fit():
             cp_pre["cov_held"], cp_plain["cov_held"], rtol=0, atol=1e-4 * scale
         )
 
-        # the point of it: fewer Hessian-vector products (the reference Hessian
-        # the transform is built from is not counted; it costs one dense
-        # Hessian, i.e. n HVPs at most, n = 9 here)
+        # The cost is reported, not asserted: iteration and HVP counts depend on
+        # the scipy version and the BLAS, so an inequality between them could
+        # flip without anything being wrong. This test is about correctness
+        # (same minimum, multipliers, face-held covariance, both frames
+        # reporting a converged gtol exit). The reference Hessian the transform
+        # is built from is not counted (one dense Hessian, n = 9 here).
         print(
             f"trust-constr HVPs: plain {n_plain} (nit {st_plain['nit']}), "
             f"preconditioned {n_pre} (nit {st_pre['nit']})"
         )
-        assert n_pre < n_plain

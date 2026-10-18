@@ -165,6 +165,14 @@ def test_explicit_inverse_and_triangular_fallback_agree():
         slow.hessp_to_internal(v, lambda x: h @ x),
         atol=1e-8,
     )
+    # the constraint Jacobian (trust-constr + --constraints): J T on both
+    # paths, against the dense T built column by column from _apply_T
+    jac = rng.normal(size=(3, n))
+    T = np.stack([fast._apply_T(e) for e in np.eye(n)], axis=1)
+    ref = jac @ T
+    tol = 1e-10 * np.abs(ref).max()
+    np.testing.assert_allclose(fast.jac_to_internal(jac), ref, rtol=0, atol=tol)
+    np.testing.assert_allclose(slow.jac_to_internal(jac), ref, rtol=0, atol=tol)
 
 
 def test_singular_block_falls_back_to_identity():

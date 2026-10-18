@@ -3275,9 +3275,10 @@ class Fitter:
         # Constrained runs: at an active constraint grad f is balanced by the
         # constraint forces, so EDM says nothing. scipy's own test is
         #     optimality < gtol and constr_violation < gtol  ->  status 1
-        # with optimality = ||grad f - J^T v||_inf (KKT residual) and
-        # constr_violation = max(0, lb - c). `v` holds the Lagrange
-        # multipliers (strongly vs weakly active constraints).
+        # with optimality = ||grad f + J^T v||_inf (KKT residual, scipy's
+        # Lagrangian gradient; measured in the coordinates scipy iterated, see
+        # optimality_frame below) and constr_violation = max(0, lb - c). `v`
+        # holds the Lagrange multipliers (strongly vs weakly active constraints).
         for k in ("optimality", "constr_violation", "barrier_parameter", "tr_radius"):
             v = getattr(res, k, None)
             if v is not None:
