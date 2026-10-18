@@ -407,6 +407,8 @@ class Fitter:
                 "(no averaging); pass --covMode fisher to average over all fold "
                 "pairs."
             )
+        for msg in self.mcstat_coverage_warnings():
+            logger.warning(msg)
         if self.mcStatDebias == "continuousM":
             if self.mcstat_M is None:
                 logger.warning(
@@ -1582,6 +1584,55 @@ class Fitter:
     def hess_meat(self):
         """Dense Hessian of _compute_nll_meat (batched under --hvpBatch)."""
         return self._scalar_hessian("meat", self._compute_nll_meat)
+
+    def mcstat_coverage_warnings(self):
+        """Warnings for the de-biasing configurations whose reported covariance
+        is known to under- or over-cover (docs/mcstat/RESULTS.md §9p, §9u);
+        empty otherwise. Logged when the fitter is built."""
+        if not self.mcstat_debias_active:
+            return []
+        out = []
+        folds = self._fold_debias_active()
+        if self.mcStatDebiasCov == "curvature":
+            out.append(
+                "--mcStatDebiasCov curvature reports the inverse de-biased "
+                "curvature, which UNDER-COVERS (it omits the template noise in the "
+                "score variance); use --mcStatDebiasCov sandwich."
+            )
+        elif self.mcStatDebiasCov == "dataPropagated":
+            out.append(
+                "--mcStatDebiasCov dataPropagated is conservative and OVER-COVERS "
+                "(about 0.8 for a 68% interval on the validation toys, "
+                "docs/mcstat/RESULTS.md §9p); --mcStatDebiasCov sandwich covers "
+                "correctly."
+            )
+        elif folds and not self.bbstat.enabled:
+            out.append(
+                f"--mcStatDebias {self.mcStatDebias} without bin-by-bin stat: the "
+                "reported covariance lacks the first-order template-noise variance "
+                "and UNDER-COVERS when the MC statistical variance is comparable to "
+                "the data's (0.54 for a 68% interval at MC/data variance ratio 1 on "
+                "the validation toy, docs/mcstat/RESULTS.md §9u); enable bin-by-bin "
+                "stat."
+            )
+        if (
+            folds
+            and self.covMode == "fisher"
+            and self.mcStatDebiasCov == "sandwich"
+            and self.bbstat.enabled
+            and self.bbstat.binByBinStatType == "gamma"
+            and self._bbstat_variance_moves()
+            and (self.bbstat.dynamic or self.bbstat.binByBinStatMode == "full")
+        ):
+            out.append(
+                "--covMode fisher with --binByBinStatType gamma and a "
+                "parameter-dependent bin-by-bin stat variance (full mode or "
+                "--binByBinStatDynamic): the fold methods' covariance is mildly "
+                "conservative and OVER-COVERS (0.73 against 0.69 in observed mode "
+                "for a 68% interval at MC/data variance ratio 1 on the validation "
+                "toy, docs/mcstat/RESULTS.md §9u); --covMode observed is recommended."
+            )
+        return out
 
     def _check_mcstat_moment_variance(self):
         """Refuse an M whose denominator convention does not match the fit.

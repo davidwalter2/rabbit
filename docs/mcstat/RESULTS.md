@@ -1554,6 +1554,42 @@ Without bin-by-bin stat the reported meat still lacks the first-order
 template-noise variance `Σ_b ρ_b J_bJ_bᵀ/V_b` (defect 3 above; ~250 here), which
 the projection test's meat already adds: not yet fixed.
 
+**`--covMode fisher` with a parameter-dependent bin-by-bin stat variance.**
+Paired runs (2 folds, ρ = 1, observed and fisher sandwich from the same fits)
+showed fisher over-covering for gamma-lite dynamic: 0.743 ± 0.015 against
+0.689 ± 0.016 observed (795 toys; paired difference −0.054 ± 0.011), with a ~7%
+larger σ. Diagnosis on toys (along the degenerate direction, 120–160 toys):
+- the bread is exact at the true θ (observed − Gauss–Newton = +0.01 ± 0.71 for
+  gamma-lite dynamic): the dropped `r²` terms and the centred compensator
+  cancel in expectation, as derived;
+- the meat was not. At the true θ the Gauss–Newton meat exceeded the observed one
+  by +2.9 / +3.0 / +3.7 (gamma-lite dynamic / normal-multiplicative full /
+  normal-additive dynamic), with `⟨r²/V⟩ = 1.00 ± 0.01`. The cause: the Gauss–Newton
+  form drops terms whose expectation is not zero here, the `r²` terms of `V(θ)` and
+  the residual–Jacobian cross term (`E[rJ] = −∂V/2`, the template noise enters
+  both), leaving `−½ Σ ∂V∂Vᵀ/V²` (≈ 4 on this toy). It is now added (design doc
+  §2c);
+- at the fitted point the Gauss–Newton bread is low by 2.7% for gamma-lite
+  dynamic (+1.45 ± 0.44) but not for normal-multiplicative full (−0.27 ± 0.50):
+  the fitted residuals fall short of their expectation, which only the observed
+  bread sees, more so for the non-quadratic gamma profile. Not corrected.
+Both modes' σ track the excursions equally (corr(|res|, 1/√A) = +0.73 / +0.73).
+
+With the correction (2 folds, ρ = 1, 800 toys each, paired):
+
+| config | coverage observed | coverage fisher | paired obs − fisher | Var(score) / meat + split (obs, fisher) |
+|---|---|---|---|---|
+| gamma-lite dynamic | 0.694 ± 0.016 | 0.734 ± 0.016 | −0.040 ± 0.010 | 107.5 ± 5.4 / 122.3, 121.9 |
+| normal-mult. full | 0.705 ± 0.016 | 0.710 ± 0.016 | −0.005 ± 0.010 | 122.1 ± 6.1 / 122.3, 122.1 |
+
+The fisher meat now equals the observed one; for normal-multiplicative full the
+two modes agree (before: −0.033 ± 0.017). Gamma with a parameter-dependent
+variance remains mildly conservative in fisher mode (the bread at the fitted
+point), and the fitter warns for it, recommending `--covMode observed`. Runtime
+warnings (`Fitter.mcstat_coverage_warnings`) also flag the fold methods without
+bin-by-bin stat (under-cover), `--mcStatDebiasCov curvature` (under-covers) and
+`dataPropagated` (over-covers).
+
 **Continuous-M with the compensator** (log form's first-order version; 200 toys
 each, ρ ≈ 1; the bias of the ordinary gamma-lite fit is −0.27):
 

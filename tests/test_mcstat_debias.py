@@ -1762,3 +1762,54 @@ def test_gauss_newton_includes_the_expected_marginal_variance_term(method, tmp_p
         got = np.asarray(f.fisher_curvature(h))[:2, :2]
         ref = ref - arr["M"]
     np.testing.assert_allclose(got, ref, rtol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "args,expect",
+    [
+        (["--mcStatDebias", "twoHalf", "--noBinByBinStat"], "without bin-by-bin stat"),
+        (
+            [
+                "--mcStatDebias",
+                "twoHalf",
+                "--covMode",
+                "fisher",
+                "--binByBinStatType",
+                "gamma",
+                "--binByBinStatDynamic",
+            ],
+            "--covMode fisher with --binByBinStatType gamma",
+        ),
+        (["--mcStatDebias", "twoHalf", "--mcStatDebiasCov", "curvature"], "curvature"),
+        (
+            [
+                "--mcStatDebias",
+                "twoHalf",
+                "--binByBinStatType",
+                "gamma",
+                "--binByBinStatDynamic",
+            ],
+            None,
+        ),
+        (["--mcStatDebias", "twoHalf", "--covMode", "fisher"], None),
+        (["--mcStatDebias", "none", "--noBinByBinStat"], None),
+    ],
+    ids=[
+        "folds-nobbb",
+        "fisher-gamma-dyn",
+        "curvature",
+        "observed-gamma-dyn",
+        "fisher-gamma-lite",
+        "none",
+    ],
+)
+def test_coverage_warnings_for_the_known_mis_covering_cases(args, expect, tmp_path):
+    """The configurations whose reported covariance is known to under- or
+    over-cover (docs/mcstat/RESULTS.md §9p, §9u) warn; the others do not."""
+    fn, _ = make_small_fold_toy(tmp_path, 2)
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", *args)
+    msgs = f.mcstat_coverage_warnings()
+    if expect is None:
+        assert msgs == []
+    else:
+        assert len(msgs) == 1 and expect in msgs[0]
