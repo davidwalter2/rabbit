@@ -1698,3 +1698,34 @@ def test_asimov_recentring_carries_over_to_the_saturated_composite(tmp_path):
 
     assert abs(saturated(True)) < 1e-6
     assert saturated(False) > 1e-3
+
+
+def test_asimov_split_meat_uses_the_data_covariance(tmp_path):
+    """On Asimov the split meat is averaged over y = mu +- sqrt(var), var the
+    fit's per-bin data variance: for --covarianceFit the diagonal of the data
+    covariance, not the yields."""
+    fn, arr = make_small_fold_toy(tmp_path, 2)
+    tw_cov = np.diag(2.5 * arr["data"])  # a data covariance unlike the yields
+    tw = TensorWriter(sparse=False)
+    ax = hist.axis.Regular(SMALL_NBINS, 0.0, 1.0, name="x")
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, arr["data"]), "ch0")
+    tw.add_data_covariance(tw_cov)
+    for name, folds in zip(("flat", "step"), arr["folds"]):
+        tw.add_process(
+            _fold_hist(ax, folds), name, "ch0", signal=True, fold_axis="mcfold"
+        )
+    fn = _write(tw, tmp_path, "covfit_folds.hdf5")
+    args = ["--covarianceFit", "--noBinByBinStat", "--allowNegativeParam"]
+    f = fit_toy(fn, tmp_path, *args, "--mcStatDebias", "twoHalf")
+    f.defaultassign()
+    mu = np.asarray(f.expected_yield())
+    f.set_nobs(tf.constant(mu))
+    f.set_mcstat_asimov(True)
+    B_asimov = np.asarray(f.mcstat_split_meat())
+    f.set_mcstat_asimov(False)
+    Bs = []
+    for sign in (1.0, -1.0):
+        f.set_nobs(tf.constant(mu + sign * np.sqrt(np.diag(tw_cov))))
+        Bs.append(np.asarray(f.mcstat_split_meat()))
+    np.testing.assert_allclose(B_asimov, 0.5 * (Bs[0] + Bs[1]), rtol=1e-8)

@@ -2460,19 +2460,31 @@ class Fitter:
     def _at_data_sigma_points(self, compute):
         """compute() at the current data or, for an Asimov dataset of a
         de-biased fit (set_mcstat_asimov), averaged over the data y = mu +-
-        sqrt(var): the split meat's mixed derivatives depend on the residuals,
-        which vanish at Asimov; its expectation over the data needs them. The
-        two points give it exactly for a per-bin quadratic dependence."""
+        sqrt(var), var the fit's per-bin data variance (the data variance for
+        chisq, the yield for Poisson, diag(C) of the data covariance C for
+        covarianceFit): the split meat's mixed derivatives depend on the
+        residuals, which vanish at Asimov; its expectation over the data needs
+        them. The two points give it exactly for a per-bin quadratic
+        dependence; with a correlated data covariance (covarianceFit) only its
+        diagonal is sampled."""
         if not self._mcstat_asimov_on:
             return compute()
         nobs = tf.identity(self.nobs)
         varnobs = None if self.varnobs is None else tf.identity(self.varnobs)
-        var = nobs if varnobs is None else varnobs
+        if varnobs is not None:
+            var = varnobs
+        elif self.covarianceFit:
+            var = tf.linalg.diag_part(tf.linalg.inv(self.data_cov_inv))
+        else:
+            var = nobs
         out = []
         try:
             for sign in (1.0, -1.0):
                 y = nobs + sign * tf.sqrt(var)
-                y = tf.maximum(y, 1e-3 * nobs) if self.chisqFit else tf.maximum(y, 0.0)
+                if self.chisqFit:
+                    y = tf.maximum(y, 1e-3 * nobs)  # chisq needs y > 0
+                elif not self.covarianceFit:
+                    y = tf.maximum(y, 0.0)  # Poisson
                 self.set_nobs(y, variances=varnobs)
                 out.append(np.asarray(compute()))
         finally:
