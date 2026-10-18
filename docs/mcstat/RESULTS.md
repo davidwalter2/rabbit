@@ -1522,6 +1522,38 @@ the noise floor and matters only where the floor is comparable to the
 information. A cross-half score-variance meat (outlook of the original study)
 would address it; not done.
 
+**Split-contrast meat** (design doc §2c). The remaining ρ = 1 shortfall was the
+variance of the cross-fit score's dependence on the realized split, quadratic in
+the split noise for two folds and absent from the full-sample meat. Same-toy
+comparison before it (2 folds, ρ = 1, 400 toys per mode, observed and fisher
+covariances from the same fit): coverage 0.59–0.62 observed, 0.58–0.66 fisher,
+pooled 0.593 ± 0.012 / 0.619 ± 0.012; fisher equals observed for the lite modes
+and is better (+0.04 to +0.07, paired) for full / dynamic. A first-order
+propagation at the realized split doubles the quadratic part (Isserlis: the
+linearized variance has expectation 4 tr(KCKC) = 2 Var(zᵀKz)); toys confirmed it
+(gamma-lite, 273 toys: Var(score) 145.9 ± 12.5 against meat 107.0, meat + B/2
+136.8, meat + B 166.6). The reflection estimator (realized and reflected split)
+removes the factor generically. Validation of the final version (2 folds,
+`twoHalf`; Var(score) at the true θ against the meat + split term; coverage
+target 0.683, ±0.023 for 400 toys, ±0.033 for 200):
+
+| config | toys | coverage observed (without split) | coverage fisher (without split) | Var(score) / meat + split |
+|---|---|---|---|---|
+| gamma-lite, ρ = 0.3 | 200 | 0.690 (0.670) | 0.690 (0.670) | 117 ± 12 / 116 |
+| normal-mult. full, ρ = 0.3 | 200 | 0.680 (0.660) | 0.690 (0.665) | 116 ± 12 / 113 |
+| gamma-lite, ρ = 1 | 398 | 0.691 (0.601) | 0.691 (0.603) | 146 ± 10 / 137 |
+| normal-additive lite, ρ = 1 | 400 | 0.690 (0.605) | 0.690 (0.605) | 149 ± 10 / 135 |
+| normal-mult. full, ρ = 1 | 400 | 0.672 (0.598) | 0.700 (0.635) | 122.5 ± 9 / 122.5 |
+| gamma-lite dynamic, ρ = 1 | 400 | 0.690 (0.610) | 0.740 (0.645) | 116 ± 8 / 123 |
+| no bin-by-bin stat, ρ = 1 | 200 | 0.535 (0.405) | 0.535 (0.405) | 582 ± 58 / 332 |
+
+With bin-by-bin stat the coverage is on target in every mode and ρ, and the
+score variance matches the meat within about 1σ (the lite modes sit ~1.3σ above,
+consistent with the omitted full-sample second-order term of design doc §2c).
+Without bin-by-bin stat the reported meat still lacks the first-order
+template-noise variance `Σ_b ρ_b J_bJ_bᵀ/V_b` (defect 3 above; ~250 here), which
+the projection test's meat already adds: not yet fixed.
+
 **Continuous-M with the compensator** (log form's first-order version; 200 toys
 each, ρ ≈ 1; the bias of the ordinary gamma-lite fit is −0.27):
 
