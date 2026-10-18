@@ -413,6 +413,23 @@ profile (including the `r²` terms of a parameter-dependent variance) together
 with the compensator that cancels them, so `F` matches the expectation of the
 observed bread.
 
+Dropping a term is its expectation only if it vanishes on average. Where the
+bin-by-bin stat variance moves with the parameters (full mode, dynamic) the
+dropped terms of a **marginal** bin-by-bin stat term (profile + `½ log V`, with
+`E[r²] = V`: the fold methods' meat and the continuous-M objective) do not: the
+`r²` terms of `V(θ)` with the compensator average to `+½ ∂V∂Vᵀ/V²`, and the cross
+term `2r (J∂Vᵀ)_sym/V²` to `−∂V∂Vᵀ/V²`, since the template noise enters both the
+residual and the Jacobian (`E[rJ] = −Σ_c u_c∂u_c = −∂V/2`). The Gauss–Newton form
+therefore adds their expectation, `−½ Σ_b ∂V_b∂V_bᵀ/V_b²`
+(`Fitter._gn_marginal_variance_term`, a zero-residual surrogate in
+`W_b = ½Σ_c u_bc²`). For the fold objective (centred compensator, `E[r²] = D`) they
+cancel exactly and nothing is added. `--covMode observed` uses the actual
+Hessians and is unaffected. One difference remains between the two modes: at the
+fitted point the squared residuals fall short of their expectation, which only
+the observed bread sees (a few percent of the curvature along weak directions,
+largest for the non-Gaussian gamma profile); `observed` is the safer choice for
+full and dynamic bin-by-bin stat.
+
 ### 2d. `--covMode` on the *standard* (undebiased) covariance
 `--covMode` applies here too (it's the `mcStatDebias=none` instance of the same
 axis). rabbit currently inverts the observed Hessian `∇²L_full` (= `observed`).

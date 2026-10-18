@@ -2548,10 +2548,49 @@ class Fitter:
     def _gn_shift(self, debiased):
         """Scalar whose Hessian is F_data - H_ln_obs (see _fisher_core): adding
         it to an objective turns that objective's observed Hessian into the
-        Gauss-Newton one."""
-        return self._gauss_newton_surrogate(
+        Gauss-Newton one, plus, for a marginal bin-by-bin stat term, the
+        expectation of what that drops (_gn_marginal_variance_term)."""
+        val = self._gauss_newton_surrogate(
             self._fisher_data_terms(debiased)
         ) - self._profiled_data_nll(debiased)
+        if self.mcstat_bb_vref is not None and not (
+            debiased and self._fold_debias_active()
+        ):
+            val = val - self._gn_marginal_variance_term()
+        return val
+
+    def _gn_marginal_variance_term(self):
+        """Scalar whose Hessian is 1/2 sum_b dV_b dV_b^T / V_b^2 (dV_b =
+        2 sum_c u_bc du_bc, u from _mcstat_bb_noise_scales), the expectation of
+        the curvature the Gauss-Newton form drops from a marginal bin-by-bin
+        stat term (profile + 1/2 log V: the meat, the continuous-M objective)
+        when the bin-by-bin stat variance moves with the parameters.
+
+        The dropped pieces are the r^2 terms of V(x), whose expectation with
+        the compensator's 1/2 log V is +1/2 dV dV^T / V^2 (E[r^2] = V), and the
+        cross term 2 r (J dV^T)_sym / V^2, whose expectation is -dV dV^T / V^2
+        because the template noise enters both the residual and the Jacobian:
+        E[r J] = -sum_c u_c du_c = -dV / 2. Dropping them (setting them to zero)
+        is the expectation only where they vanish on average; here they leave
+        -1/2 dV dV^T / V^2. For the fold objective (centred compensator,
+        E[r^2] = D) they cancel exactly and nothing is added. Computed with a
+        zero-residual surrogate, W_b = 1/2 sum_c u_bc^2: the Hessian of
+        sum_b (W_b - W_b|current)^2 / V_b^2 is 2 sum_b dW_b dW_b^T / V_b^2.
+        (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §2c)"""
+        u = self._mcstat_bb_noise_scales()
+        W = 0.5 * tf.reduce_sum(tf.square(u), axis=-1)
+        nb = self.indata.nbins
+        if self.chisqFit:
+            var_data = self.varnobs[:nb]
+        elif self.covarianceFit:
+            var_data = tf.linalg.diag_part(tf.linalg.inv(self.data_cov_inv))[:nb]
+        else:
+            var_data = self._compute_yields_noBBB(full=False, compute_norm=False)[0][
+                :nb
+            ]
+        V = tf.stop_gradient(var_data + 2.0 * W)
+        r = W - tf.stop_gradient(W)
+        return tf.reduce_sum(tf.math.divide_no_nan(tf.square(r), tf.square(V)))
 
     def _hvp_function(self, scalar_fn):
         """tf.function p -> (d^2 scalar_fn / dx^2) p, reverse-over-reverse."""

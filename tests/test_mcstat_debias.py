@@ -1729,3 +1729,36 @@ def test_asimov_split_meat_uses_the_data_covariance(tmp_path):
         f.set_nobs(tf.constant(mu + sign * np.sqrt(np.diag(tw_cov))))
         Bs.append(np.asarray(f.mcstat_split_meat()))
     np.testing.assert_allclose(B_asimov, 0.5 * (Bs[0] + Bs[1]), rtol=1e-8)
+
+
+@pytest.mark.parametrize("method", ["twoHalf", "continuousM"])
+def test_gauss_newton_includes_the_expected_marginal_variance_term(method, tmp_path):
+    """Where the bin-by-bin stat variance V(x) moves with the parameters, the
+    Gauss-Newton form of a marginal bin-by-bin stat term (profile + 1/2 log V:
+    the fold methods' meat, the continuous-M objective) adds the expectation of
+    what it drops, -1/2 sum_b dV dV^T / V^2 (E[r^2] = V, E[r J] = -dV / 2). For
+    chisq, normal-multiplicative full mode and unit weights: J_bp = sumw_bp,
+    V_b = y_b + sum_p sumw_bp x_p^2, dV_bp = 2 sumw_bp x_p."""
+    full = ["--binByBinStatType", "normal-multiplicative", "--binByBinStatMode", "full"]
+    args = ["--chisqFit", "--allowNegativeParam", "--covMode", "fisher", *full]
+    if method == "twoHalf":
+        fn, arr = make_small_fold_toy(tmp_path, 2)
+        sumw = np.stack([fp.sum(0) for fp in arr["folds"]])
+    else:
+        fn, arr = make_mcstat_moment_toy(tmp_path, bbb_variance=True)
+        sumw = arr["sumw"]
+    f = fit_toy(fn, tmp_path, *args, "--mcStatDebias", method)
+    y = arr["data"]
+    x = f.x.numpy()[:2]
+    V = y + (x**2) @ sumw
+    dV = 2.0 * sumw * x[:, None]
+    ref = np.einsum("ib,jb->ij", sumw / V, sumw) - 0.5 * np.einsum(
+        "ib,jb->ij", dV / V**2, dV
+    )
+    _, _, h = f.loss_val_grad_hess()
+    if method == "twoHalf":
+        got = np.asarray(f.fisher_curvature_full(f.hess_meat()))[:2, :2]
+    else:
+        got = np.asarray(f.fisher_curvature(h))[:2, :2]
+        ref = ref - arr["M"]
+    np.testing.assert_allclose(got, ref, rtol=1e-8)
