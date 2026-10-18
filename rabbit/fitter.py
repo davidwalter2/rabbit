@@ -328,6 +328,7 @@ class Fitter:
         # the --covMode asked for; set_mcstat_asimov switches self.covMode to
         # fisher for an Asimov dataset of a de-biased fit
         self._covMode_requested = self.covMode
+        self._mcstat_asimov_on = False
         # True while minimize() runs the ordinary-likelihood warm start
         self._mcstat_debias_suspended = False
 
@@ -1744,6 +1745,12 @@ class Fitter:
             return 0.0
         return float(self._compute_mcstat_bb_compensator())
 
+    @property
+    def mcstat_asimov(self):
+        """Whether the current data are marked as an Asimov dataset of a
+        de-biased fit (set_mcstat_asimov)."""
+        return self._mcstat_asimov_on
+
     def set_mcstat_asimov(self, asimov):
         """Mark the current data as an Asimov dataset of the current parameters
         (asimov=True) or as anything else (False). A no-op for a fit without
@@ -1771,12 +1778,14 @@ class Fitter:
             return
         self.mcstat_asimov_g0.assign(tf.zeros_like(self.mcstat_asimov_g0))
         self.covMode = self._covMode_requested
+        self._mcstat_asimov_on = False
         if not asimov:
             return
         _, g = self.loss_val_grad()
         self.mcstat_asimov_x0.assign(self.x)
         self.mcstat_asimov_g0.assign(g)
         self.covMode = "fisher"
+        self._mcstat_asimov_on = True
         logger.info(
             "Asimov dataset with MC-stat de-biasing: the objective is recentred "
             "at the generating point and the covariance uses --covMode fisher."
@@ -1797,6 +1806,9 @@ class Fitter:
         self.n_folds = None
         self.n_half_folds = None
         self.norm_halves = None
+        # fold templates replacing the stored ones while the split meat
+        # differentiates the objective with respect to them (_fold_norm)
+        self._mcstat_fold_override = None
         self.jackknife_weights = None
         # split-logk (systematics written with a fold_axis): per-fold logk,
         # dense [k, nbinsfull, nproc, (2,) nsyst] or, in sparse mode, a per-fold
@@ -1857,6 +1869,25 @@ class Fitter:
         mthetaalpha = tf.stack([theta, thetaalpha], axis=0)  # [2, nsyst]
         return tf.reshape(mthetaalpha, [2 * self.indata.nsyst, 1])
 
+    def _fold_norm(self, halves):
+        """The raw fold templates ([k, ...], halves=False) or the two rescaled
+        halves (halves=True) the fold predictions are built from: the stored
+        ones, or the tensor set in _mcstat_fold_override while the split meat
+        differentiates the objective with respect to them."""
+        F = self._mcstat_fold_override
+        if F is None:
+            return self.norm_halves if halves else self.indata.norm_folds
+        if not halves:
+            return F
+        k = self.n_folds
+        a, b = self.n_half_folds
+        return tf.stack(
+            [
+                (k / a) * tf.reduce_sum(F[:a], axis=0),
+                (k / b) * tf.reduce_sum(F[a:], axis=0),
+            ]
+        )
+
     def _compute_fold_yields(self, halves=False, full=False, return_norm=False):
         """Predicted yields of the MC-stat folds, without bin-by-bin stat.
 
@@ -1898,7 +1929,7 @@ class Fitter:
             if return_norm:
                 return halve(out[0]), halve(out[1])
             return halve(out)
-        norm = self.norm_halves if halves else self.indata.norm_folds
+        norm = self._fold_norm(halves)
         # scale of a SHARED additive variation in each template of `norm`
         add_scale = 1.0 if halves else 1.0 / k
 
@@ -2349,14 +2380,156 @@ class Fitter:
         mu = np.linalg.eigvalsh(T.T @ (0.5 * (B_t + B_t.T)) @ T)
         return weighted_chi2_sf(dq, mu), np.sort(mu)
 
+    def _mcstat_split_meat_hvp_batch(self, P):
+        """B_split p for the rows p of P [m, npar] (mcstat_split_meat).
+
+        With F the fold templates, X(F) = d^2 L_cf / dx dF and C the covariance
+        of F given the full sample: X^T p is the gradient with respect to F of
+        p . grad_x L, and X w the gradient with respect to x of w . grad_F L, two
+        mixed second derivatives of the actual objective, so any likelihood,
+        bin-by-bin stat profile and parameter is covered.
+
+        Given the full sample, the score depends on the split noise z (the
+        deviation of F from its fold mean) linearly and quadratically: g(z) =
+        g_0 + G z + z^T K z. Propagating X(z) C X(z)^T would double the
+        quadratic part (for Gaussian z, E[(2Kz)^T C (2Kz)] = 4 tr(KCKC) =
+        2 Var(z^T K z); for two folds the dependence is purely quadratic). The
+        reflected split z -> -z (F_i -> 2 mean(F) - F_i, same fold sum) separates
+        them: L = (X(z) + X(-z)) / 2 = G, Q = (X(z) - X(-z)) / 2 = 2Kz, and
+
+            B_split = L C L^T + 1/2 Q C Q^T
+
+        has the exact expectation Var(g | full sample) for any mix of the two.
+        Per row: B_split p = X(z) (wl / 2 + wq / 4) + X(-z) (wl / 2 - wq / 4),
+        wl = C L^T p, wq = C Q^T p; four mixed second derivatives."""
+        v = self.indata.sumw2_folds
+        vsum = tf.reduce_sum(v, axis=0, keepdims=True)
+
+        def cov(u):
+            # the fold covariance given their sum: diag(v) - v v^T / sum(v)
+            vu = tf.reduce_sum(v * u, axis=0, keepdims=True)
+            return v * u - v * tf.math.divide_no_nan(vu, vsum)
+
+        def loss(F):
+            self._mcstat_fold_override = F
+            try:
+                return self._compute_loss()
+            finally:
+                self._mcstat_fold_override = None
+
+        def x_transpose(F, p):
+            with tf.GradientTape() as tF:
+                tF.watch(F)
+                with tf.GradientTape() as tx:
+                    L = loss(F)
+                gx = tx.gradient(L, self.x)
+                s = tf.reduce_sum(gx * p)
+            return tF.gradient(s, F, unconnected_gradients="zero")
+
+        def x_times(F, w):
+            with tf.GradientTape() as tx:
+                with tf.GradientTape() as tF:
+                    tF.watch(F)
+                    L = loss(F)
+                gF = tF.gradient(L, F, unconnected_gradients="zero")
+                s = tf.reduce_sum(gF * w)
+            return tx.gradient(s, self.x, unconnected_gradients="zero")
+
+        F0 = self.indata.norm_folds
+        Fr = 2.0 * tf.reduce_mean(F0, axis=0, keepdims=True) - F0
+
+        def one(p):
+            p = tf.stop_gradient(p)
+            F = tf.identity(F0)
+            Fm = tf.identity(Fr)
+            u_p = x_transpose(F, p)
+            u_m = x_transpose(Fm, p)
+            wl = tf.stop_gradient(cov(0.5 * (u_p + u_m)))
+            wq = tf.stop_gradient(cov(0.5 * (u_p - u_m)))
+            return x_times(F, 0.5 * wl + 0.25 * wq) + x_times(Fm, 0.5 * wl - 0.25 * wq)
+
+        return tf.vectorized_map(one, P)
+
+    def _mcstat_split_meat_fn(self):
+        fn = self._scalar_hessian_fns.get("split_meat")
+        if fn is None:
+            fn = tf.function(self._mcstat_split_meat_hvp_batch)
+            self._scalar_hessian_fns["split_meat"] = fn
+        return fn
+
+    def _at_data_sigma_points(self, compute):
+        """compute() at the current data or, for an Asimov dataset of a
+        de-biased fit (set_mcstat_asimov), averaged over the data y = mu +-
+        sqrt(var): the split meat's mixed derivatives depend on the residuals,
+        which vanish at Asimov; its expectation over the data needs them. The
+        two points give it exactly for a per-bin quadratic dependence."""
+        if not self._mcstat_asimov_on:
+            return compute()
+        nobs = tf.identity(self.nobs)
+        varnobs = None if self.varnobs is None else tf.identity(self.varnobs)
+        var = nobs if varnobs is None else varnobs
+        out = []
+        try:
+            for sign in (1.0, -1.0):
+                y = nobs + sign * tf.sqrt(var)
+                y = tf.maximum(y, 1e-3 * nobs) if self.chisqFit else tf.maximum(y, 0.0)
+                self.set_nobs(y, variances=varnobs)
+                out.append(np.asarray(compute()))
+        finally:
+            self.set_nobs(nobs, variances=varnobs)
+        return 0.5 * (out[0] + out[1])
+
+    def mcstat_split_meat(self):
+        """Dense split-contrast meat B_split of a fold de-biasing (zero matrix
+        otherwise): the score variance from how the events divide between the
+        folds, given the full sample.
+
+        The cross-fit score depends on the realized split, through a product
+        of the halves' deviations in the templates and in their derivatives
+        (delta_h Delta_h). Its variance is not in the full-sample meat; it is
+        second order in the template-noise floor, so it matters where that floor
+        is comparable to the information (large rho along weakly constrained
+        directions). It is propagated from the fold templates through the
+        objective, with X = d^2 L_cf / dx dF evaluated at the realized and the
+        reflected split (_mcstat_split_meat_hvp_batch: B_split = L C L^T +
+        1/2 Q C Q^T, exact for the linear and quadratic dependence on the split
+        noise), C = diag(v) - v v^T / sum(v) the covariance of the fold
+        templates F given their sum (v the per-fold MC-stat variances; zero for
+        processes without folds). The fold sum, the full sample, is held fixed:
+        its noise is the full-sample meat's.
+        Systematics with per-fold variations (split logk) contribute only
+        through the nominal fold templates. Assembled from batched columns
+        (--hvpBatch, default 256). (docs/mcstat/RABBIT_MCSTAT_DESIGN.md §2c)"""
+        n = int(self.x.shape[0])
+        if not self._fold_debias_active():
+            return tf.zeros([n, n], dtype=self.indata.dtype)
+        fn = self._mcstat_split_meat_fn()
+
+        def compute():
+            return self._hessian_from_hvp_batches(
+                fn, np.arange(n), max(1, self.hvp_batch)
+            )
+
+        B = self._at_data_sigma_points(compute)
+        return tf.constant(0.5 * (B + B.T), dtype=self.indata.dtype)
+
+    def mcstat_split_meat_rows(self, rows):
+        """B_split c for the rows c of `rows` [m, npar] (Hessian-free path)."""
+        fn = self._mcstat_split_meat_fn()
+        return self._at_data_sigma_points(
+            lambda: fn(tf.constant(rows, dtype=self.indata.dtype))
+        )
+
     def mcstat_meat(self, covMode="observed"):
         """Dense sandwich meat H: the curvature of the ordinary (full-sample)
-        likelihood at the current point, in the given --covMode. Continuous-M
+        likelihood at the current point, in the given --covMode, plus for the
+        fold methods the split-contrast meat (mcstat_split_meat). Continuous-M
         uses the analytic H = A + M instead (cov_mcstat_sandwich)."""
         H_obs = self.hess_meat()
-        if covMode == "fisher":
-            return self.fisher_curvature_full(H_obs)
-        return H_obs
+        H = self.fisher_curvature_full(H_obs) if covMode == "fisher" else H_obs
+        if self._fold_debias_active():
+            H = H + tf.cast(self.mcstat_split_meat(), H.dtype)
+        return H
 
     # --- Hessian-free (--noHessian) counterparts --------------------------
 
@@ -2434,6 +2607,7 @@ class Fitter:
         Hc = np.stack(
             [np.asarray(meat(tf.constant(c, dtype=self.indata.dtype))) for c in rows]
         )
+        Hc = Hc + np.asarray(self.mcstat_split_meat_rows(rows))
         sand = rows @ Hc.T
         return edmval, curv, 0.5 * (sand + sand.T)
 

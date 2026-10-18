@@ -186,13 +186,22 @@ class FitInputData:
             # process was written with a fold_axis), used by the two-half /
             # k-fold de-biasing in the fitter: [k, nbinsfull, nproc] dense, or in
             # sparse mode [k, nnz] values on the sparsity pattern of self.norm.
+            # hsumw2_folds: the per-fold MC-stat variances, same layout.
             if "hnorm_folds" in f.keys():
                 self.norm_folds = maketensor(f["hnorm_folds"])
                 self.mcstat_fold_k = int(
                     f.attrs.get("mcstat_fold_k", self.norm_folds.shape[0])
                 )
+                if "hsumw2_folds" not in f.keys():
+                    raise RuntimeError(
+                        "The input has MC-stat fold templates but no per-fold "
+                        "variances (hsumw2_folds); rewrite it with the current "
+                        "TensorWriter."
+                    )
+                self.sumw2_folds = maketensor(f["hsumw2_folds"])
             else:
                 self.norm_folds = None
+                self.sumw2_folds = None
                 self.mcstat_fold_k = None
 
             # Split-logk fold tensor [k, nbinsfull, nproc, nsyst] (optional;

@@ -211,6 +211,18 @@ fold, identical across folds, so it drops out of the de-bias (correct — no MC
 noise). All folded processes must share a common `k` (any `k ≥ 2`). The writer
 never asks for, nor checks, a separately-supplied full against the folds.
 
+The folds always sum to the stored full template, and no fold is negative (so no
+half prediction is):
+- as for any process, the full template is clipped at zero unless
+  `allow_negative_expectation`; bins with a negative fold (negative weights) are
+  written without fold structure, each fold the clipped full / `k` with no split
+  variance, and a warning counts them. The de-biasing does not act on those bins;
+- a folded process without any MC-stat variance (for example excluded from
+  bin-by-bin stat by zeroing its variances) is written as MC-stat-exempt, folds =
+  full / `k`, so the de-biasing does not remove noise declared absent;
+- with `variances=`, the per-fold variances are multiplied by the factor the given
+  variances apply to the full template's own variances.
+
 **`add_systematic(..., fold_axis=None)` — same convention; split only if it shares
 the MC.** Pass `up_hist`/`down_hist` carrying the (named) `fold_axis` to split the
 variation per fold (full up/down derived by projecting it out). Omit `fold_axis`
@@ -228,6 +240,10 @@ nominal MC sample.
   fold values on the sparsity pattern of the sparse `hnorm_sparse` (so the folds
   keep the sparsity of the nominal templates; a fold entry where the full template
   is exactly zero is dropped with a warning);
+- `hsumw2_folds`: the per-fold MC-stat variances (the fold histograms'
+  variances, `Σ w²` per fold; fold histograms need weight storage) in the same
+  layout, zero for MC-stat-exempt processes; required by the split-contrast meat
+  (§2c). Inputs written before it was added are refused;
 - split logk (systematics added *with* a `fold_axis`; else logk is shared): dense
   `hlogk_folds` `[k, nbinsfull, nproc, (2,) nsyst]`, where shared entries replicate
   the full logk — unchanged for `log_normal`, `1/k` of it for the additive `normal`
@@ -235,7 +251,7 @@ nominal MC sample.
   `[k, nnz, nfolded]`, the per-fold delta against the full logk over the folded
   systematics only (`log_normal`, symmetric), plus `hmcstat_folded_syst_idx`;
 - the existing full `hsumw`/`hnorm`/`hlogk` unchanged (`= Σ_f folds`).
-`inputdata.py` loads `indata.norm_folds`, `indata.logk_folds`,
+`inputdata.py` loads `indata.norm_folds`, `indata.sumw2_folds`, `indata.logk_folds`,
 `indata.logk_folds_delta` (`None` ⇒ unavailable). Storage: `k×` the nominal
 templates (`k×nnz` in sparse mode); logk only ×k for the systematics actually
 folded.
@@ -326,6 +342,47 @@ curvature, **both in the selected `--covMode`** (don't mix):
   `H = Σ_b J_b J_b{}^T/V_b` (`J=∂nexp/∂θ` JVPs) → `H−A=M` exactly;
 - `observed`: `A = ∇²L_cf` (naive jackknife Hessian), `H = ∇²L_full` → consistent
   (matching residual·∂²μ in both).
+
+**Split-contrast meat** (`Fitter.mcstat_split_meat`, added to the meat in both
+modes, dense and Hessian-free). The cross-fit score depends on the realized split
+of the events between the folds, through a product of the halves' deviations in
+the templates and in their derivatives (`k = 2`, Gaussian: `g_b = −(J_b e_b +
+δ_b Δ_b)/V_b`). Its variance is not in the full-sample meat; it is second order
+in the noise floor (`~ M ρ/(1+ρ)`), so it matters only where the floor is
+comparable to the information, and there it made the fold methods under-cover
+(RESULTS.md §9u: 0.59 pooled at `ρ = 1`). It is propagated from the fold
+templates `F` through the objective itself:
+
+    B_split = X C Xᵀ,   X = ∂²L_cf/∂x∂F,   C = diag(v) − v vᵀ / Σv
+
+with `v` the stored per-fold variances, per (bin, process): `C` is the covariance
+of the fold templates given their sum, so the full sample, whose noise is the
+full-sample meat's, is held fixed. Given the full sample the score depends on
+the split noise `z` linearly and quadratically, `g = g₀ + Gz + zᵀKz` (for two
+folds purely quadratically: `δΔ`). Propagating `X(z) C X(z)ᵀ` at the realized
+split would double the quadratic part: for Gaussian `z`,
+`E[(2Kz)ᵀC(2Kz)] = 4 tr(KCKC) = 2 Var(zᵀKz)` (Isserlis). So `X` is evaluated at the
+realized split and at the reflected one (`F_i → 2F̄ − F_i`: `z → −z`, same fold
+sum), and with `L = (X₊ + X₋)/2 = G`, `Q = (X₊ − X₋)/2 = 2Kz`
+
+    B_split = L C Lᵀ + ½ Q C Qᵀ,
+
+whose expectation is exactly `Var(g | full sample)` for any mix of linear and
+quadratic dependence. `X` is never formed: `Xᵀp` is the gradient with respect to
+`F` of `p·∇ₓL`, and `Xw` the gradient with respect to `x` of `w·∇_F L`, mixed second
+derivatives of the actual objective (four per column). So every likelihood,
+bin-by-bin stat profile, systematic type and parameter is covered without a
+Gaussian derivation.
+
+The full-sample meat (`JᵀJ/V` with the noisy `J`) also omits a second-order term:
+the Jacobian and the residual share the template noise, and Isserlis adds
+`(Σ_c u_c∂u_c)(Σ_c u_c∂u_c)ᵀ/V² = ¼∂V∂Vᵀ/V²` per bin to the score variance (`u` the
+template-noise scales of §1b), for every method including continuous-M. It is
+not included: on the validation toy it is about 2% of σ along the degenerate
+direction, below what the toys resolve. Systematics with per-fold variations (split logk) contribute
+through the nominal fold templates only. On an Asimov dataset the residual-
+dependent `X` is averaged over the data points `y = μ ± √var` (exact for a
+per-bin quadratic dependence), as the expected meat requires.
 
 Both modes are valid robust covariances; they differ as in §2d (nonlinear toy,
 curvature bias / RMS vs `F_true`):

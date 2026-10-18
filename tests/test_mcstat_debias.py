@@ -368,10 +368,45 @@ def twohalf_toy(tmp_path_factory):
     return dict(fn=fn, arrays=arr, out=path)
 
 
+def split_meat_reference(F, y, V, th):
+    """Closed-form split-contrast meat of a linear chisq fold fit whose terms
+    are (y - n_h)^2 / (2V) (no bin-by-bin stat: V = data variance; static
+    normal-additive: V = data + sigma^2), F the fold templates [k, nbins,
+    nproc] (unit weights: variances = values), at the point th. X(F) =
+    d^2 L_cf / dx dF at the realized and the reflected split, L = (X+ + X-)/2,
+    Q = (X+ - X-)/2, B = L C L^T + 1/2 Q C Q^T, C = diag(v) - v v^T / sum(v)."""
+    k, nb, nproc = F.shape
+    a, b = k // 2, k - k // 2
+    w_A, w_B = a / (2.0 * b), b / (2.0 * a)
+
+    def mixed(F):
+        X = np.zeros((nproc, k, nb, nproc))
+        for folds, size, c in ((range(a), a, -w_A), (range(a, k), b, -w_B)):
+            J = (k / size) * F[list(folds)].sum(0)  # [nb, nproc]
+            r = y - J @ th
+            for i in folds:
+                for q in range(nproc):
+                    X[q, i, :, q] -= c * (k / size) * r / V
+                    for p in range(nproc):
+                        X[q, i, :, p] += c * J[:, q] * (k / size) * th[p] / V
+        return X
+
+    v = F
+
+    def quad(X):
+        return np.einsum("qibp,ibp,ribp->qr", X, v, X) - np.einsum(
+            "qibp,ibp,jbp,rjbp->qr", X, v, v / v.sum(0, keepdims=True), X
+        )
+
+    Xp, Xm = mixed(F), mixed(2 * F.mean(0, keepdims=True) - F)
+    return quad(0.5 * (Xp + Xm)) + 0.5 * quad(0.5 * (Xp - Xm))
+
+
 def twohalf_numpy_reference(arr):
     """Closed-form standard and jackknife (two-half) fit of the linear 2-POI toy:
     A = 2 H_full - (H_A + H_B)/2 with half templates scaled x2, sandwich
-    A^-1 H_full A^-1. Returns (r_std, C_std, r_cf, C_curv, C_sand)."""
+    A^-1 (H_full + B_split) A^-1 (split_meat_reference). Returns (r_std,
+    C_std, r_cf, C_curv, C_sand)."""
     data = arr["data"]
     V = data
     Tf = arr["sumw"].T
@@ -385,12 +420,14 @@ def twohalf_numpy_reference(arr):
     A_cf = 2.0 * Hf - 0.5 * _fisher(TA, V) - 0.5 * _fisher(TB, V)
     b_cf = 2.0 * b(Tf) - 0.5 * b(TA) - 0.5 * b(TB)
     Ccurv = np.linalg.inv(A_cf)
+    r_cf = np.linalg.solve(A_cf, b_cf)
+    B = split_meat_reference(np.stack(arr["folds"], -1), data, V, r_cf)
     return (
         np.linalg.solve(Hf, b(Tf)),
         np.linalg.inv(Hf),
-        np.linalg.solve(A_cf, b_cf),
+        r_cf,
         Ccurv,
-        Ccurv @ Hf @ Ccurv,
+        Ccurv @ (Hf + B) @ Ccurv,
     )
 
 
@@ -739,8 +776,9 @@ def test_any_k_matches_numpy(k, sparse, tmp_path):
     np.testing.assert_allclose(f.x.numpy(), x_ref, rtol=1e-6)
     np.testing.assert_allclose(np.asarray(h), cross, rtol=1e-8)
     Ci = np.linalg.inv(cross)
+    B = split_meat_reference(np.stack(arr["folds"], -1), y, y, f.x.numpy())
     np.testing.assert_allclose(
-        np.asarray(f.cov_twohalf_sandwich(h)), Ci @ Hfull @ Ci, rtol=1e-6
+        np.asarray(f.cov_twohalf_sandwich(h)), Ci @ (Hfull + B) @ Ci, rtol=1e-6
     )
 
     f = fit_toy(
@@ -751,9 +789,10 @@ def test_any_k_matches_numpy(k, sparse, tmp_path):
     A = np.asarray(f.fisher_curvature(h))
     np.testing.assert_allclose(A, U, rtol=1e-8)
     Ui = np.linalg.inv(U)
+    B = split_meat_reference(np.stack(arr["folds"], -1), y, y, f.x.numpy())
     np.testing.assert_allclose(
         np.asarray(f.cov_twohalf_sandwich(A, covMode="fisher")),
-        Ui @ Hfull @ Ui,
+        Ui @ (Hfull + B) @ Ui,
         rtol=1e-6,
     )
 
@@ -1198,7 +1237,8 @@ def test_meat_includes_every_term_of_the_ordinary_objective(tmp_path):
     objective at the de-biased point, regularization included: with a
     regularizer it must equal the Hessian of that objective, plus that of the
     bin-by-bin stat compensator (marginal instead of profiled beta; here the
-    small total-yield term of a lite multiplicative beta)."""
+    small total-yield term of a lite multiplicative beta), plus the
+    split-contrast meat (tested against its closed form separately)."""
     from rabbit.regularization.regularizer import Regularizer
 
     class Penalty(Regularizer):
@@ -1225,8 +1265,9 @@ def test_meat_includes_every_term_of_the_ordinary_objective(tmp_path):
         "test", lambda: f._compute_mcstat_bb_compensator(meat=True)
     )
     assert np.abs(np.asarray(h_comp)).max() > 0
+    B_split = np.asarray(f.mcstat_split_meat())
     np.testing.assert_allclose(
-        meat, np.asarray(h_ordinary) + np.asarray(h_comp), rtol=1e-8
+        meat, np.asarray(h_ordinary) + np.asarray(h_comp) + B_split, rtol=1e-8
     )
 
 
@@ -1446,8 +1487,10 @@ def test_asimov_is_recentred_with_the_expected_covariance(toy, args, tmp_path):
     no attenuation and the de-biased objective is not stationary at the
     generating point. set_mcstat_asimov recentres it there with a linear term
     (Hessian unchanged) and uses the Gauss-Newton covariance, which does not
-    depend on the data: the Asimov sandwich equals that of real data at the
-    same point. A fit without de-biasing is left untouched."""
+    depend on the data: it equals that of real data at the same point. The
+    fold methods' split meat depends on the residuals; at Asimov it is its
+    expectation over the data, the average over y = mu +- sqrt(var). A fit
+    without de-biasing is left untouched."""
     if toy == "moment":
         fn, _ = make_mcstat_moment_toy(tmp_path, bbb_variance=True)
     else:
@@ -1471,16 +1514,187 @@ def test_asimov_is_recentred_with_the_expected_covariance(toy, args, tmp_path):
     assert f.covMode == "fisher"
     f.minimize()
     np.testing.assert_allclose(f.x.numpy(), x0, atol=1e-6)
+    f.x.assign(x0)
     S_asimov = np.asarray(f.mcstat_postfit_covariances(g, h)[3])
+    folds = f._fold_debias_active()
 
-    # real data at the same point, same data variance: same fisher sandwich
+    def gauss_newton_part():
+        # the data-independent part of the sandwich: Gauss-Newton bread and
+        # meat (continuous-M: A^-1 + A^-1 M A^-1), without the split meat
+        _, g_, h_ = f.loss_val_grad_hess()
+        A = np.asarray(f.fisher_curvature(h_))
+        if not folds:
+            return np.asarray(f.mcstat_postfit_covariances(g_, h_)[3])
+        Ai = np.linalg.inv(A)
+        return Ai @ np.asarray(f.fisher_curvature_full(f.hess_meat())) @ Ai
+
+    S_gn_asimov = gauss_newton_part()
+    B_asimov = np.asarray(f.mcstat_split_meat())
+
     f.set_mcstat_asimov(False)
     assert f.covMode == "observed"
+    f.covMode = "fisher"
+    if folds:
+        # the split meat depends on the residuals: at Asimov it is its
+        # expectation over the data, the average over y = mu +- sqrt(var)
+        Ai = np.linalg.inv(np.asarray(f.fisher_curvature(h)))
+        np.testing.assert_allclose(S_asimov, S_gn_asimov + Ai @ B_asimov @ Ai)
+        Bs = []
+        for sign in (1.0, -1.0):
+            y = np.asarray(asimov) + sign * np.sqrt(np.asarray(asimov))
+            f.set_nobs(tf.constant(y), variances=asimov)
+            Bs.append(np.asarray(f.mcstat_split_meat()))
+        np.testing.assert_allclose(B_asimov, 0.5 * (Bs[0] + Bs[1]), rtol=1e-8)
+
+    # real data at the same point, same data variance: same Gauss-Newton part
     rng = np.random.default_rng(1)
     y = rng.normal(np.asarray(asimov), np.sqrt(np.asarray(asimov)))
     f.set_nobs(tf.constant(y), variances=asimov)
-    f.x.assign(x0)
-    f.covMode = "fisher"
-    _, g_d, h_d = f.loss_val_grad_hess()
-    S_data = np.asarray(f.mcstat_postfit_covariances(g_d, h_d)[3])
-    np.testing.assert_allclose(S_asimov, S_data, rtol=1e-6)
+    np.testing.assert_allclose(S_gn_asimov, gauss_newton_part(), rtol=1e-6)
+
+
+def test_writer_stores_per_fold_variances(tmp_path):
+    """The per-fold MC-stat variances are stored next to the fold templates
+    (the fold histograms' variances); processes without folds get zero."""
+    fn, arr = make_small_fold_toy(tmp_path, 3, exempt=True)
+    ind = inputdata.FitInputData(fn, None)
+    v = np.asarray(ind.sumw2_folds)
+    nb = SMALL_NBINS
+    for p in range(2):
+        np.testing.assert_allclose(v[:, :nb, p], arr["folds"][p])  # unit weights
+    np.testing.assert_array_equal(v[:, :nb, 2], 0.0)
+
+
+@pytest.mark.parametrize("sparse", [False, True], ids=["dense", "sparse"])
+@pytest.mark.parametrize("k", [2, 4])
+def test_split_meat_matches_the_closed_form(k, sparse, tmp_path):
+    """The split-contrast meat: X(F) = d^2 L_cf / dx dF, the mixed derivative
+    with respect to the fold templates F, at the realized split and at the
+    reflected one (F_i -> 2 mean(F) - F_i), L = (X+ + X-)/2, Q = (X+ - X-)/2,
+    B_split = L C L^T + 1/2 Q C Q^T with C = diag(v) - v v^T / sum(v) the
+    covariance of F given the full sample. For chisq with normal-additive
+    bin-by-bin stat each separately profiled term is exactly
+    (y - n_h)^2 / (2V), so X is analytic. The Hessian-free rows agree."""
+    fn, arr = make_small_fold_toy(tmp_path, k, sparse=sparse)
+    args = ["--chisqFit", "--allowNegativeParam", "--mcStatDebias", "kfold"]
+    f = fit_toy(fn, tmp_path, *args, "--binByBinStatType", "normal-additive")
+    y = arr["data"]
+    F = np.stack(arr["folds"], -1)  # [k, nb, 2]
+    V = y + F.sum((0, 2))
+    B_ref = split_meat_reference(F, y, V, f.x.numpy()[:2])
+    B = np.asarray(f.mcstat_split_meat())[:2, :2]
+    np.testing.assert_allclose(B, B_ref, rtol=1e-8)
+    rows = np.eye(int(f.x.shape[0]))[:2]
+    np.testing.assert_allclose(
+        np.asarray(f.mcstat_split_meat_rows(rows))[:, :2], B_ref, rtol=1e-8
+    )
+
+
+@pytest.mark.parametrize("sparse", [False, True], ids=["dense", "sparse"])
+def test_writer_keeps_the_folds_consistent_with_the_clipped_template(sparse, tmp_path):
+    """add_process clips a template at zero (unless allow_negative_expectation);
+    the folds must keep summing to the stored full template, and no fold (so no
+    half prediction) may be negative: bins with a negative fold are written
+    without fold structure (folds = clipped full / k, no split variance), the
+    same in dense and sparse mode. A folded process without any MC-stat variance
+    is MC-stat-exempt, and `variances=` scales the per-fold variances by the
+    factor it applies to the full template's own variances."""
+    nb, k = 6, 2
+    ax = hist.axis.Regular(nb, 0.0, 1.0, name="x")
+    axf = hist.axis.IntCategory(list(range(k)), name="mcfold")
+    vals = np.array(
+        [[5.0, 4.0], [-1.0, 3.0], [-2.0, 1.0], [2.0, 2.0], [0.0, 0.0], [3.0, 1.0]]
+    )
+    tw = TensorWriter(sparse=sparse)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, np.full(nb, 10.0)), "ch0")
+    h = hist.Hist(ax, axf, storage=hist.storage.Weight())
+    h.view()["value"] = vals
+    h.view()["variance"] = np.abs(vals)
+    tw.add_process(h, "sig", "ch0", signal=True, fold_axis="mcfold")
+    hz = h.copy()
+    hz.view()["variance"] = 0.0
+    tw.add_process(hz, "nostat", "ch0", fold_axis="mcfold")
+    hv = h.copy()
+    tw.add_process(
+        hv,
+        "scaled",
+        "ch0",
+        fold_axis="mcfold",
+        variances=_hist1d(ax, np.full(nb, 6.0)),
+    )
+    fn = _write(tw, tmp_path, f"clip_{int(sparse)}.hdf5")
+    ind = inputdata.FitInputData(fn, None)
+    if sparse:
+        full = np.zeros((nb, 3))
+        idx = np.asarray(ind.norm.indices)
+        full[idx[:, 0], idx[:, 1]] = np.asarray(ind.norm.values)
+        F = np.zeros((k, nb, 3))
+        V = np.zeros((k, nb, 3))
+        for i in range(k):
+            F[i][idx[:, 0], idx[:, 1]] = np.asarray(ind.norm_folds)[i]
+            V[i][idx[:, 0], idx[:, 1]] = np.asarray(ind.sumw2_folds)[i]
+    else:
+        full = np.asarray(ind.norm)[:nb]
+        F = np.asarray(ind.norm_folds)[:, :nb]
+        V = np.asarray(ind.sumw2_folds)[:, :nb]
+    np.testing.assert_allclose(F.sum(0), full, atol=1e-12)
+    assert np.all(F >= 0.0)
+    sig = 0
+    np.testing.assert_allclose(full[:, sig], [9, 2, 0, 4, 0, 4])
+    for b in (1, 2):  # a negative fold: no fold structure, no split variance
+        np.testing.assert_allclose(F[:, b, sig], full[b, sig] / k)
+        np.testing.assert_array_equal(V[:, b, sig], 0.0)
+    np.testing.assert_allclose(F[:, 0, sig], [5.0, 4.0])
+    np.testing.assert_allclose(V[:, 0, sig], [5.0, 4.0])
+    nostat = 1
+    np.testing.assert_allclose(F[:, :, nostat], np.tile(full[:, nostat] / k, (k, 1)))
+    np.testing.assert_array_equal(V[:, :, nostat], 0.0)
+    scaled = 2
+    np.testing.assert_allclose(V[:, 0, scaled], 6.0 * np.array([5.0, 4.0]) / 9.0)
+
+
+def test_asimov_recentring_carries_over_to_the_saturated_composite(tmp_path):
+    """On an Asimov dataset the main de-biased objective is recentred at the
+    generating point; the saturated projection test re-inits a copy with the
+    composite model, which rebuilds the recentring at zero. Recentred again at
+    its null point (as rabbit_fit.py does), the saturated fit stays there and
+    the projection statistic vanishes, as for any Asimov dataset; without it the
+    composite would drift to the raw de-biased minimum."""
+    import copy
+
+    from rabbit.param_models.param_model import (
+        CompositeParamModel,
+        SaturatedProjectModel,
+    )
+
+    ngroup = 6
+    groups = np.repeat(np.arange(ngroup), SMALL_NBINS // ngroup)
+    chinfo = {"ch0": {"axes": [hist.axis.Regular(ngroup, 0, 1, name="g")]}}
+    fn, _ = make_small_fold_toy(tmp_path, 2)
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    f.defaultassign()
+    f.set_nobs(f.expected_yield())
+    f.set_mcstat_asimov(True)
+    assert f.mcstat_asimov
+    nll_main = float(f.reduced_nll().numpy())
+
+    def saturated(recentre):
+        orig = f.param_model
+        comp = CompositeParamModel(
+            [orig, SaturatedProjectModel(f.indata, chinfo, {"ch0": groups})]
+        )
+        fs = copy.deepcopy(f)
+        fs.init_fit_parms(comp, [], unblind=[], blinding_group=[], freeze_parameters=[])
+        fs.xdefaultassign()
+        xm = f.x.numpy()
+        fs.x[: orig.nparams].assign(xm[: orig.nparams])
+        fs.x[comp.nparams :].assign(xm[orig.nparams :])
+        fs.arm_regularizers()
+        if recentre:
+            fs.set_mcstat_asimov(True)
+        fs.minimize(mcstat_warm_start=False)
+        return 2 * (nll_main - float(fs.reduced_nll().numpy()))
+
+    assert abs(saturated(True)) < 1e-6
+    assert saturated(False) > 1e-3

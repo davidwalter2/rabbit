@@ -1510,8 +1510,9 @@ def get_chi2(result, no_chi2=True, fittype="postfit", chi2type="automatic"):
                 result.get("postfit_profile", False)
                 and "nllvalreduced" in result.keys()
             ):
-                # use saturated likelihood test from actual fit
-                chi2 = 2.0 * result["nllvalreduced"]
+                # use saturated likelihood test from actual fit; for an MC-stat
+                # de-biased fit the statistic its p-value refers to
+                chi2 = result.get("mcstat_gof_q", 2.0 * result["nllvalreduced"])
                 ndf = result["ndfsat"]
                 # an MC-stat de-biased fit's statistic is not chi2(ndf): use the
                 # p-value from its own reference (Fitter.mcstat_gof)

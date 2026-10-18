@@ -555,6 +555,12 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False, blind=Fal
                 # they read the wrong entries. xdefaultassign() above is deliberate but does not
                 # arm them.
                 fitter_saturated.arm_regularizers()
+                if fitter.mcstat_asimov:
+                    # the main objective is recentred at the Asimov generating
+                    # point (Fitter.set_mcstat_asimov); the composite's re-init
+                    # dropped that, so recentre it at its own null point, the
+                    # point just assigned
+                    fitter_saturated.set_mcstat_asimov(True)
                 saturated_ok = True
                 if fitter_saturated.mcstat_debias_active:
                     # bread and meat of the composite at the null point (the
@@ -1274,6 +1280,9 @@ def fit(args, fitter, ws, dofit=True):
         ws.results.update(
             {
                 "mcstat_gof_pvalue": mcstat_gof["pvalue"],
+                # the statistic the p-value refers to (2*nllvalreduced less the
+                # bin-by-bin stat compensator)
+                "mcstat_gof_q": mcstat_gof["q"],
                 "mcstat_gof_mean": mcstat_gof["mean"],
                 "mcstat_gof_var": mcstat_gof["var"],
             }
