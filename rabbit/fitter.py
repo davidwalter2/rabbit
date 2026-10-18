@@ -1066,6 +1066,7 @@ class Fitter:
                 )
             self.varnobs.assign(values if variances is None else variances)
 
+        self._check_mcstat_empty_halves(values)
         self.nobs.assign(values)
         # compute offset for poisson nll improved numerical precision in minimizatoin
         # the offset is chosen to give the saturated likelihood
@@ -1842,6 +1843,33 @@ class Fitter:
             "at the generating point and the covariance uses --covMode fisher."
         )
 
+    def _check_mcstat_empty_halves(self, values):
+        """Refuse data a Poisson fold de-biasing cannot fit: a bin with
+        observed events where one fold half has no template for any process
+        (all of the bin's MC events fell into the other half). That half's
+        prediction is zero at any parameter values, so its Poisson term, and the
+        de-biased objective, is infinite. The folds depend only on the
+        simulation, so this is not handled by changing them."""
+        mask = getattr(self, "_mcstat_empty_half_bins", None)
+        if (
+            mask is None
+            or self.chisqFit
+            or self.covarianceFit
+            or self.mcStatDebias not in ("twoHalf", "kfold")
+        ):
+            return
+        bad = mask & (np.asarray(values)[: mask.shape[0]] > 0.0)
+        if np.any(bad):
+            idx = np.flatnonzero(bad)
+            raise RuntimeError(
+                f"--mcStatDebias {self.mcStatDebias}: {idx.size} bins with observed "
+                "events have no MC-stat template in one fold half for any process "
+                f"(first bins: {idx[:10].tolist()}), so that half predicts zero "
+                "events at any parameter values and its Poisson likelihood is "
+                "infinite. Use more MC statistics or fewer folds for these bins, "
+                "or a coarser binning."
+            )
+
     def _init_mcstat_folds(self):
         """Prepare the cross-fit (two-half / k-fold) fold templates.
 
@@ -1892,6 +1920,27 @@ class Fitter:
                 tf.constant(k / b, dtype) * tf.reduce_sum(norm_folds[a:], axis=0),
             ]
         )
+        # bins where a half's nominal template is zero for every process: with
+        # multiplicative systematics its prediction is zero at any parameter
+        # values, which a Poisson fit cannot accommodate if the bin has data
+        # (checked in set_nobs). Additive systematics could fill it: no check.
+        self._mcstat_empty_half_bins = None
+        if self.indata.systematic_type == "log_normal":
+            nb = self.indata.nbins
+            if self.indata.sparse:
+                rows = self.indata.norm.indices[:, 0]
+                tot = tf.transpose(
+                    tf.math.unsorted_segment_sum(
+                        tf.transpose(self.norm_halves),
+                        rows,
+                        num_segments=self.indata.nbinsfull,
+                    )
+                )
+            else:
+                tot = tf.reduce_sum(self.norm_halves, axis=-1)
+            self._mcstat_empty_half_bins = np.asarray(
+                tf.reduce_any(tot[:, :nb] == 0.0, axis=0)
+            )
         # L_cf = w_full L_full - w_A L_A - w_B L_B. With raw half sums S_A, S_B
         # (J_full = S_A + S_B, J_A = k/a S_A, J_B = k/b S_B) these are the unique
         # weights whose Gauss-Newton Hessian is the pure cross term

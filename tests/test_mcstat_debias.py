@@ -1813,3 +1813,96 @@ def test_coverage_warnings_for_the_known_mis_covering_cases(args, expect, tmp_pa
         assert msgs == []
     else:
         assert len(msgs) == 1 and expect in msgs[0]
+
+
+@pytest.mark.parametrize("poisson", [False, True], ids=["chisq", "poisson"])
+def test_empty_half_template_keeps_the_gradient_finite(poisson, tmp_path):
+    """A process with MC events in a bin can have none in one fold half, so the
+    separately profiled half sees a zero template that is not masked (the
+    masks come from the full sample). The gamma full-mode profile divides kstat
+    by the template for its threshold; that must not turn the gradient NaN (WMass
+    rabbit#141 review). Bin 2: the background's folds are [4, 0]. For chisq also
+    a bin where the half is empty for every process."""
+    nb = 6
+    ax = hist.axis.Regular(nb, 0.0, 1.0, name="x")
+    sig = np.array([[200, 150, 100, 75, 50, 40], [200, 150, 100, 75, 50, 40]], float)
+    bkg = np.array([[30, 20, 4, 15, 10, 5], [30, 20, 0, 15, 10, 5]], float)
+    if not poisson:
+        sig[1, 4] = 0.0  # bin 4: half B empty for every process
+        bkg[1, 4] = 0.0
+    tw = TensorWriter(sparse=False)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, sig.sum(0) + bkg.sum(0)), "ch0")
+    tw.add_process(_fold_hist(ax, sig), "sig", "ch0", signal=True, fold_axis="mcfold")
+    tw.add_process(_fold_hist(ax, bkg), "bkg", "ch0", fold_axis="mcfold")
+    tw.add_norm_systematic("bkg_norm", "bkg", "ch0", 1.1)
+    fn = _write(tw, tmp_path, f"empty_half_{int(poisson)}.hdf5")
+    for bbb in (
+        ["--binByBinStatType", "gamma", "--binByBinStatMode", "full"],
+        ["--binByBinStatType", "gamma"],
+        ["--binByBinStatType", "normal-multiplicative", "--binByBinStatMode", "full"],
+    ):
+        args = ["--mcStatDebias", "twoHalf", *bbb] + ([] if poisson else ["--chisqFit"])
+        options = (
+            _driver()
+            .make_parser()
+            .parse_args([str(fn), "-o", str(tmp_path), "-t", "0", *args])
+        )
+        indata = inputdata.FitInputData(str(fn), None)
+        pm = ph.load_models([["Mu"]], indata, **vars(options))
+        f = fitter.Fitter(indata, pm, options, do_blinding=False)
+        f.defaultassign()
+        f.set_nobs(indata.data_obs)
+        val, grad = f.loss_val_grad()
+        assert np.isfinite(float(val)), bbb
+        assert np.all(np.isfinite(np.asarray(grad))), bbb
+
+
+def test_poisson_fold_fit_refuses_data_in_an_empty_half(tmp_path):
+    """A bin where one fold half has no template for any process predicts zero
+    events in that half at any parameter values: a Poisson fold fit cannot
+    accommodate data there and refuses it explicitly (the folds depend only on
+    the simulation). No data in the bin, or a chisq fit, is fine."""
+    nb = 4
+    ax = hist.axis.Regular(nb, 0.0, 1.0, name="x")
+    sig = np.array([[100, 80, 5, 40], [100, 80, 0, 40]], float)
+    bkg = np.array([[20, 10, 3, 5], [20, 10, 0, 5]], float)
+    tw = TensorWriter(sparse=False)
+    tw.add_channel([ax], "ch0")
+    data = sig.sum(0) + bkg.sum(0)
+    tw.add_data(_hist1d(ax, data), "ch0")
+    tw.add_process(_fold_hist(ax, sig), "sig", "ch0", signal=True, fold_axis="mcfold")
+    tw.add_process(_fold_hist(ax, bkg), "bkg", "ch0", fold_axis="mcfold")
+    fn = _write(tw, tmp_path, "empty_half_data.hdf5")
+
+    def make(*extra):
+        options = (
+            _driver()
+            .make_parser()
+            .parse_args(
+                [
+                    str(fn),
+                    "-o",
+                    str(tmp_path),
+                    "-t",
+                    "0",
+                    "--mcStatDebias",
+                    "twoHalf",
+                    *extra,
+                ]
+            )
+        )
+        indata = inputdata.FitInputData(str(fn), None)
+        pm = ph.load_models([["Mu"]], indata, **vars(options))
+        f = fitter.Fitter(indata, pm, options, do_blinding=False)
+        f.defaultassign()
+        return f, indata
+
+    f, indata = make()
+    with pytest.raises(RuntimeError, match="no MC-stat template in one fold half"):
+        f.set_nobs(indata.data_obs)
+    empty = data.copy()
+    empty[2] = 0.0
+    f.set_nobs(tf.constant(empty))  # no data in that bin: fine
+    f, indata = make("--chisqFit")
+    f.set_nobs(indata.data_obs)  # chisq: the half term stays finite

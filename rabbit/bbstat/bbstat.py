@@ -611,19 +611,29 @@ class BinByBinStat:
                         # gradient gives 0*(-inf) = NaN. Use a dummy norm=1
                         # for betamask bins so the division is finite, then
                         # set those entries to +inf to exclude them from the
-                        # min.
+                        # min. The same for an entry whose template is zero
+                        # although it is not masked: an MC-stat fold half with
+                        # no events of the process (its beta is beta0 anyway).
+                        zero_norm = betamask | (norm_profile == 0.0)
                         norm_thresh = tf.where(
-                            betamask, tf.ones_like(norm_profile), norm_profile
+                            zero_norm, tf.ones_like(norm_profile), norm_profile
                         )
                         f_thresh = tf.where(
-                            betamask,
+                            zero_norm,
                             tf.fill(
                                 tf.shape(kstat),
                                 tf.cast(float("inf"), kstat.dtype),
                             ),
                             kstat / norm_thresh,
                         )
-                        threshold = nobs - varnobs * tf.reduce_min(f_thresh, axis=1)
+                        # a bin with no unmasked non-zero template (e.g. an
+                        # MC-stat half empty for every process) has no
+                        # constraint: every beta is beta0, any finite threshold
+                        min_f = tf.reduce_min(f_thresh, axis=1)
+                        min_f = tf.where(
+                            tf.math.is_inf(min_f), tf.zeros_like(min_f), min_f
+                        )
+                        threshold = nobs - varnobs * min_f
 
                         # solving nbeta numerically using newtons method
                         def fnll_nbeta(u, t):
@@ -829,12 +839,15 @@ class BinByBinStat:
                         # so that x = threshold + exp(u) > threshold for any
                         # real u, guaranteeing den > 0 and beta > 0 without any
                         # clipping. Protect against zero norm_profile for
-                        # masked processes (see chisqFit branch above).
+                        # masked processes (see chisqFit branch above), and
+                        # for an unmasked entry with a zero template (an MC-stat
+                        # fold half with no events of the process).
+                        zero_norm = betamask | (norm_profile == 0.0)
                         norm_thresh = tf.where(
-                            betamask, tf.ones_like(norm_profile), norm_profile
+                            zero_norm, tf.ones_like(norm_profile), norm_profile
                         )
                         f_thresh = tf.where(
-                            betamask,
+                            zero_norm,
                             tf.fill(
                                 tf.shape(kstat),
                                 tf.cast(float("inf"), kstat.dtype),
