@@ -583,8 +583,11 @@ def common_parser():
         "first tolerance) on the start's central path (max multiplier*slack over "
         "the rows near a bound; --minimizerInitialBarrier/"
         "--minimizerInitialBarrierTol override it), then checks the multipliers' "
-        "signs and, if a face should have been left, continues from scipy's own "
-        "start. 'auto' (default): warm for the starts rabbit knows are minima "
+        "signs. If a face should have been left, it takes a release step (a Newton "
+        "step off the releasing face(s), holding the binding ones) and starts a "
+        "new centred warm leg from there, up to 3 rounds; scipy's own "
+        "interior-point start is only the last resort. "
+        "'auto' (default): warm for the starts rabbit knows are minima "
         "(the saturated sub-fit, a fit after --externalPostfit, likelihood-scan "
         "points, global asymmetric impact refits), cold otherwise; 'on': every "
         "fit; 'off': never (the behaviour before this option).",
