@@ -362,13 +362,16 @@ the split noise `z` linearly and quadratically, `g = g₀ + Gz + zᵀKz` (for tw
 folds purely quadratically: `δΔ`). Propagating `X(z) C X(z)ᵀ` at the realized
 split would double the quadratic part: for Gaussian `z`,
 `E[(2Kz)ᵀC(2Kz)] = 4 tr(KCKC) = 2 Var(zᵀKz)` (Isserlis). So `X` is evaluated at the
-realized split and at the reflected one (`F_i → 2F̄ − F_i`: `z → −z`, same fold
-sum), and with `L = (X₊ + X₋)/2 = G`, `Q = (X₊ − X₋)/2 = 2Kz`
+realized split and at the mean split `z = 0` (every fold the fold mean `F̄`, so
+every half prediction is the full one, valid for any `k`), and with
+`L = X(0) = G`, `Q = X(z) − X(0) = 2Kz`
 
     B_split = L C Lᵀ + ½ Q C Qᵀ,
 
 whose expectation is exactly `Var(g | full sample)` for any mix of linear and
-quadratic dependence. `X` is never formed: `Xᵀp` is the gradient with respect to
+quadratic dependence. (The reflected split `z → −z`, `F_i → 2F̄ − F_i`, would
+separate them too, but for odd `k` its half predictions can be negative.) `X` is
+never formed: `Xᵀp` is the gradient with respect to
 `F` of `p·∇ₓL`, and `Xw` the gradient with respect to `x` of `w·∇_F L`, mixed second
 derivatives of the actual objective (four per column). So every likelihood,
 bin-by-bin stat profile, systematic type and parameter is covered without a

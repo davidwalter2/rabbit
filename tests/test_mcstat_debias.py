@@ -373,8 +373,8 @@ def split_meat_reference(F, y, V, th):
     are (y - n_h)^2 / (2V) (no bin-by-bin stat: V = data variance; static
     normal-additive: V = data + sigma^2), F the fold templates [k, nbins,
     nproc] (unit weights: variances = values), at the point th. X(F) =
-    d^2 L_cf / dx dF at the realized and the reflected split, L = (X+ + X-)/2,
-    Q = (X+ - X-)/2, B = L C L^T + 1/2 Q C Q^T, C = diag(v) - v v^T / sum(v)."""
+    d^2 L_cf / dx dF at the realized split z and at the mean split 0, L = X(0),
+    Q = X(z) - X(0), B = L C L^T + 1/2 Q C Q^T, C = diag(v) - v v^T / sum(v)."""
     k, nb, nproc = F.shape
     a, b = k // 2, k - k // 2
     w_A, w_B = a / (2.0 * b), b / (2.0 * a)
@@ -398,8 +398,9 @@ def split_meat_reference(F, y, V, th):
             "qibp,ibp,jbp,rjbp->qr", X, v, v / v.sum(0, keepdims=True), X
         )
 
-    Xp, Xm = mixed(F), mixed(2 * F.mean(0, keepdims=True) - F)
-    return quad(0.5 * (Xp + Xm)) + 0.5 * quad(0.5 * (Xp - Xm))
+    Xz = mixed(F)
+    X0 = mixed(np.broadcast_to(F.mean(0, keepdims=True), F.shape))
+    return quad(X0) + 0.5 * quad(Xz - X0)
 
 
 def twohalf_numpy_reference(arr):
@@ -1569,8 +1570,8 @@ def test_writer_stores_per_fold_variances(tmp_path):
 @pytest.mark.parametrize("k", [2, 4])
 def test_split_meat_matches_the_closed_form(k, sparse, tmp_path):
     """The split-contrast meat: X(F) = d^2 L_cf / dx dF, the mixed derivative
-    with respect to the fold templates F, at the realized split and at the
-    reflected one (F_i -> 2 mean(F) - F_i), L = (X+ + X-)/2, Q = (X+ - X-)/2,
+    with respect to the fold templates F, at the realized split z and at the
+    mean split 0 (every fold the fold mean), L = X(0), Q = X(z) - X(0),
     B_split = L C L^T + 1/2 Q C Q^T with C = diag(v) - v v^T / sum(v) the
     covariance of F given the full sample. For chisq with normal-additive
     bin-by-bin stat each separately profiled term is exactly
@@ -1906,3 +1907,34 @@ def test_poisson_fold_fit_refuses_data_in_an_empty_half(tmp_path):
     f.set_nobs(tf.constant(empty))  # no data in that bin: fine
     f, indata = make("--chisqFit")
     f.set_nobs(indata.data_obs)  # chisq: the half term stays finite
+
+
+@pytest.mark.parametrize(
+    "bbb",
+    [
+        ["--binByBinStatType", "gamma", "--binByBinStatMode", "full"],
+        ["--binByBinStatType", "gamma"],
+    ],
+    ids=["gamma-full", "gamma-lite"],
+)
+def test_split_meat_stays_finite_for_odd_k_unbalanced_folds(bbb, tmp_path):
+    """With odd k the reflected split (F_i -> 2 mean(F) - F_i) can make a half
+    prediction negative, e.g. folds [5, 1, 0]: half A = 2 * 6 - 3 * 5 = -3, which
+    a Poisson fit cannot evaluate. The split meat's second point is the mean
+    split, whose halves are the full prediction: finite for any k."""
+    nb, k = 4, 3
+    ax = hist.axis.Regular(nb, 0.0, 1.0, name="x")
+    sig = np.array([[50, 40, 30, 20], [50, 40, 30, 20], [50, 40, 30, 20]], float)
+    bkg = np.array([[10, 8, 5, 4], [10, 8, 1, 4], [10, 8, 0, 4]], float)
+    tw = TensorWriter(sparse=False)
+    tw.add_channel([ax], "ch0")
+    tw.add_data(_hist1d(ax, sig.sum(0) + bkg.sum(0)), "ch0")
+    tw.add_process(_fold_hist(ax, sig), "sig", "ch0", signal=True, fold_axis="mcfold")
+    tw.add_process(_fold_hist(ax, bkg), "bkg", "ch0", fold_axis="mcfold")
+    tw.add_norm_systematic("bkg_norm", "bkg", "ch0", 1.1)
+    fn = _write(tw, tmp_path, "odd_k_unbalanced.hdf5")
+    f = fit_toy(fn, tmp_path, "--mcStatDebias", "kfold", *bbb)
+    B = np.asarray(f.mcstat_split_meat())
+    assert np.all(np.isfinite(B))
+    S = np.asarray(f.mcstat_postfit_covariances(*f.loss_val_grad_hess()[1:])[3])
+    assert np.all(np.isfinite(S))

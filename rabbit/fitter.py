@@ -2494,14 +2494,17 @@ class Fitter:
         g_0 + G z + z^T K z. Propagating X(z) C X(z)^T would double the
         quadratic part (for Gaussian z, E[(2Kz)^T C (2Kz)] = 4 tr(KCKC) =
         2 Var(z^T K z); for two folds the dependence is purely quadratic). The
-        reflected split z -> -z (F_i -> 2 mean(F) - F_i, same fold sum) separates
-        them: L = (X(z) + X(-z)) / 2 = G, Q = (X(z) - X(-z)) / 2 = 2Kz, and
+        mean split z = 0 (every fold the fold mean, so every half prediction the
+        full one, valid for any k) separates them: L = X(0) = G,
+        Q = X(z) - X(0) = 2Kz, and
 
             B_split = L C L^T + 1/2 Q C Q^T
 
         has the exact expectation Var(g | full sample) for any mix of the two.
-        Per row: B_split p = X(z) (wl / 2 + wq / 4) + X(-z) (wl / 2 - wq / 4),
-        wl = C L^T p, wq = C Q^T p; four mixed second derivatives."""
+        (The reflected split z -> -z would do the same, but for odd k its half
+        predictions can be negative.) Per row: B_split p = X(0) (wl - wq / 2) +
+        X(z) (wq / 2), wl = C L^T p, wq = C Q^T p; four mixed second
+        derivatives."""
         v = self.indata.sumw2_folds
         vsum = tf.reduce_sum(v, axis=0, keepdims=True)
 
@@ -2536,17 +2539,17 @@ class Fitter:
             return tx.gradient(s, self.x, unconnected_gradients="zero")
 
         F0 = self.indata.norm_folds
-        Fr = 2.0 * tf.reduce_mean(F0, axis=0, keepdims=True) - F0
+        Fmean = tf.broadcast_to(tf.reduce_mean(F0, axis=0, keepdims=True), F0.shape)
 
         def one(p):
             p = tf.stop_gradient(p)
             F = tf.identity(F0)
-            Fm = tf.identity(Fr)
-            u_p = x_transpose(F, p)
-            u_m = x_transpose(Fm, p)
-            wl = tf.stop_gradient(cov(0.5 * (u_p + u_m)))
-            wq = tf.stop_gradient(cov(0.5 * (u_p - u_m)))
-            return x_times(F, 0.5 * wl + 0.25 * wq) + x_times(Fm, 0.5 * wl - 0.25 * wq)
+            F_0 = tf.identity(Fmean)
+            u_z = x_transpose(F, p)
+            u_0 = x_transpose(F_0, p)
+            wl = tf.stop_gradient(cov(u_0))
+            wq = tf.stop_gradient(cov(u_z - u_0))
+            return x_times(F_0, wl - 0.5 * wq) + x_times(F, 0.5 * wq)
 
         return tf.vectorized_map(one, P)
 
@@ -2603,7 +2606,7 @@ class Fitter:
         is comparable to the information (large rho along weakly constrained
         directions). It is propagated from the fold templates through the
         objective, with X = d^2 L_cf / dx dF evaluated at the realized and the
-        reflected split (_mcstat_split_meat_hvp_batch: B_split = L C L^T +
+        mean split (_mcstat_split_meat_hvp_batch: B_split = L C L^T +
         1/2 Q C Q^T, exact for the linear and quadratic dependence on the split
         noise), C = diag(v) - v v^T / sum(v) the covariance of the fold
         templates F given their sum (v the per-fold MC-stat variances; zero for

@@ -1532,7 +1532,8 @@ and is better (+0.04 to +0.07, paired) for full / dynamic. A first-order
 propagation at the realized split doubles the quadratic part (Isserlis: the
 linearized variance has expectation 4 tr(KCKC) = 2 Var(zᵀKz)); toys confirmed it
 (gamma-lite, 273 toys: Var(score) 145.9 ± 12.5 against meat 107.0, meat + B/2
-136.8, meat + B 166.6). The reflection estimator (realized and reflected split)
+136.8, meat + B 166.6). The two-point estimator (realized and mean split; the validation below used the
+reflected split, identical for two folds to the order considered)
 removes the factor generically. Validation of the final version (2 folds,
 `twoHalf`; Var(score) at the true θ against the meat + split term; coverage
 target 0.683, ±0.023 for 400 toys, ±0.033 for 200):
