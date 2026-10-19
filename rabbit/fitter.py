@@ -379,10 +379,7 @@ class Fitter:
                 name="mcstat_half_beta",
             )
 
-        if (
-            self.mcStatDebias in ("twoHalf", "kfold")
-            and self.mcStatDebiasCov == "dataPropagated"
-        ):
+        if self.mcStatDebias == "kfold" and self.mcStatDebiasCov == "dataPropagated":
             # cov_dataprop_sandwich differentiates the full templates only; the
             # fold objectives depend on the separately stored fold templates,
             # whose own MC variances are not stored
@@ -392,7 +389,7 @@ class Fitter:
                 "templates, not of the fold templates a two-half / k-fold fit "
                 "depends on."
             )
-        if self.mcStatDebias in ("twoHalf", "kfold") and self.n_folds is None:
+        if self.mcStatDebias == "kfold" and self.n_folds is None:
             logger.warning(
                 f"--mcStatDebias {self.mcStatDebias} requested but no fold "
                 "templates (hnorm_folds) found in the input; two-half de-biasing "
@@ -434,8 +431,8 @@ class Fitter:
                     "cancelled by Fisher growth at the shifted minimum and will NOT "
                     "de-bias the point or covariance for those parameters "
                     "(docs/mcstat/RESULTS.md §9a). Use a linear parametrization for "
-                    "the de-biased parameters, or the two-half method "
-                    "(--mcStatDebias twoHalf)."
+                    "the de-biased parameters, or the cross-fit method "
+                    "(--mcStatDebias kfold)."
                 )
 
     def init_fit_parms(
@@ -1855,7 +1852,7 @@ class Fitter:
             mask is None
             or self.chisqFit
             or self.covarianceFit
-            or self.mcStatDebias not in ("twoHalf", "kfold")
+            or self.mcStatDebias != "kfold"
         ):
             return
         bad = mask & (np.asarray(values)[: mask.shape[0]] > 0.0)
@@ -1951,7 +1948,7 @@ class Fitter:
 
     def _fold_debias_active(self):
         return (
-            self.mcStatDebias in ("twoHalf", "kfold")
+            self.mcStatDebias == "kfold"
             and self.n_folds is not None
             and not self._mcstat_debias_suspended
         )
@@ -2851,7 +2848,7 @@ class Fitter:
         Returns a dict with q, mean, var, c, nu, g_mean, g_sigma, pvalue.
         """
         if not self._fold_debias_active():
-            raise RuntimeError("mcstat_gof needs a fold (twoHalf/kfold) de-biasing.")
+            raise RuntimeError("mcstat_gof needs the fold (kfold) de-biasing.")
         from scipy.stats import chi2 as _chi2
         from scipy.stats import norm as _norm
 

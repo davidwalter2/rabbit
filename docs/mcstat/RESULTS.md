@@ -15,6 +15,10 @@ Self-contained reproduction of `slides/statissues-Aug17-2023` using jax + numpy
 minimisation is needed.  Solutions from `MC_STAT_METHODS.md` are tested and
 shown to restore a correct central value, uncertainty estimate, and coverage.
 
+> Note: `--mcStatDebias twoHalf`, used in earlier entries below, was the same
+> method as `kfold` (the number of folds comes from the input) and has been
+> removed; read it as `kfold` with two folds.
+
 ## Files
 - `mcstat_toy.py`   — toy templates, infinite-MC Fisher, all estimators, the
   JAX profiled full-mc-stat objective + trust-krylov fitters.

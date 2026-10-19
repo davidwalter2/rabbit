@@ -437,7 +437,7 @@ def _twohalf_fit(filename, outdir, debias):
     _, grad, hess = f.loss_val_grad_hess()
     _, cov = f.edmval_cov(grad, hess)
     sand = None
-    if debias in ("twoHalf", "kfold"):
+    if debias == "kfold":
         sand = np.asarray(f.cov_twohalf_sandwich(hess))
     return f.x.numpy(), np.asarray(cov), sand
 
@@ -448,7 +448,7 @@ def test_twohalf_matches_numpy_reference(twohalf_toy):
     r_std, C_std, r_cf, C_curv, C_sand = twohalf_numpy_reference(twohalf_toy["arrays"])
     x_std, Cr_std, _ = _twohalf_fit(twohalf_toy["fn"], twohalf_toy["out"], "none")
     x_cf, Cr_curv, Cr_sand = _twohalf_fit(
-        twohalf_toy["fn"], twohalf_toy["out"], "twoHalf"
+        twohalf_toy["fn"], twohalf_toy["out"], "kfold"
     )
 
     np.testing.assert_allclose(x_std, r_std, atol=1e-3)
@@ -555,7 +555,7 @@ def test_twohalf_with_bblite_inflates_tilt(tmp_path):
     _, cov0 = f0.edmval_cov(g0, h0)
     sig0 = np.sqrt(np.diag(np.asarray(cov0)))
 
-    f1 = fit_toy(fn, tmp_path, *common, "twoHalf")
+    f1 = fit_toy(fn, tmp_path, *common, "kfold")
     _, g1, h1 = f1.loss_val_grad_hess()
     eig = np.linalg.eigvalsh(h1.numpy())
     gmax = float(np.max(np.abs(g1.numpy())))
@@ -691,11 +691,11 @@ def test_coverage_continuous_m_corrects_naive(coverage_harness, tmp_path):
 @pytest.mark.parametrize(
     "config",
     [
-        dict(debias="twoHalf"),
+        dict(debias="kfold"),
         dict(debias="kfold", covMode="fisher", k=4),
         dict(debias="continuousM", bbb=True),
     ],
-    ids=["twoHalf", "kfold4-fisher", "continuousM-bblite"],
+    ids=["kfold", "kfold4-fisher", "continuousM-bblite"],
 )
 def test_coverage_harness_smoke(coverage_harness, tmp_path, config):
     """The harness runs the fold / BB-lite configurations end to end and returns
@@ -925,7 +925,7 @@ def test_debiased_fit_from_far_start_uses_ordinary_warm_start(bbb, tmp_path):
     minimum. minimize() first minimizes the ordinary likelihood, whose minimum
     lies in the convex basin of the de-biased one."""
     fn, _ = make_small_fold_toy(tmp_path, 4)
-    args = ("--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    args = ("--allowNegativeParam", "--mcStatDebias", "kfold")
     if not bbb:
         args = ("--noBinByBinStat",) + args
     f = fit_toy(fn, tmp_path, *args)
@@ -945,13 +945,13 @@ def test_debiased_fit_from_far_start_uses_ordinary_warm_start(bbb, tmp_path):
 @pytest.mark.parametrize(
     "toy,extra",
     [
-        ("folds", ("--mcStatDebias", "twoHalf")),
+        ("folds", ("--mcStatDebias", "kfold")),
         ("folds", ("--mcStatDebias", "kfold", "--covMode", "fisher")),
         ("folds", ("--mcStatDebias", "none", "--covMode", "fisher")),
         ("moment", ("--mcStatDebias", "continuousM")),
         ("moment", ("--mcStatDebias", "continuousM", "--covMode", "fisher")),
     ],
-    ids=["twoHalf", "kfold-fisher", "none-fisher", "continuousM", "continuousM-fisher"],
+    ids=["kfold", "kfold-fisher", "none-fisher", "continuousM", "continuousM-fisher"],
 )
 def test_hessfree_covariance_matches_dense(toy, extra, tmp_path):
     """cov_block_hessfree (conjugate gradient on Hessian-vector products) gives
@@ -988,7 +988,7 @@ def test_adjusted_scans_follow_the_sandwich(tmp_path):
     sandwich Wald form d^T Sigma^-1 d, in 1D and 2D, and the adjusted contour
     interval must be +-sigma_sandwich."""
     fn, _ = make_small_fold_toy(tmp_path, 2)
-    f = fit_toy(fn, tmp_path, *LINEAR_CHISQ, "--mcStatDebias", "twoHalf")
+    f = fit_toy(fn, tmp_path, *LINEAR_CHISQ, "--mcStatDebias", "kfold")
     _, _, h = f.loss_val_grad_hess()
     C = np.linalg.inv(np.asarray(h))
     S = np.asarray(f.cov_twohalf_sandwich(h))
@@ -1063,9 +1063,7 @@ def test_gof_statistic_and_reference(k, tmp_path):
 
 def _debiased_postfit(tmp_path, *extra):
     fn, _ = make_small_fold_toy(tmp_path, 4)
-    f = fit_toy(
-        fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf", *extra
-    )
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "kfold", *extra)
     _, g, h = f.loss_val_grad_hess()
     _, bread, C, S = f.mcstat_postfit_covariances(g, h)
     f.cov.assign(S)
@@ -1139,7 +1137,7 @@ def test_projection_test_reference(tmp_path):
     groups = np.repeat(np.arange(ngroup), SMALL_NBINS // ngroup)
     chinfo = {"ch0": {"axes": [hist.axis.Regular(ngroup, 0, 1, name="g")]}}
     fn, _ = make_small_fold_toy(tmp_path, 2)
-    for debias, n_mu in (("none", ngroup - 1), ("twoHalf", ngroup - 1)):
+    for debias, n_mu in (("none", ngroup - 1), ("kfold", ngroup - 1)):
         f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", debias)
         orig = f.param_model
         comp = CompositeParamModel(
@@ -1183,7 +1181,7 @@ def test_rabbit_limit_uses_the_sandwich_and_adjusted_contours(tmp_path):
     rl = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rl)
     fn, _ = make_small_fold_toy(tmp_path, 4)
-    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "kfold")
     rl._postfit_cov(f)
     _, g, h = f.loss_val_grad_hess()
     C = np.linalg.inv(np.asarray(h))
@@ -1208,7 +1206,7 @@ def test_projection_test_refuses_an_ill_posed_projection(tmp_path):
     )
 
     fn, _ = make_small_fold_toy(tmp_path, 2)
-    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "kfold")
     chinfo = {"ch0": {"axes": [hist.axis.Regular(SMALL_NBINS, 0, 1, name="x")]}}
     orig = f.param_model
     comp = CompositeParamModel(
@@ -1255,7 +1253,7 @@ def test_meat_includes_every_term_of_the_ordinary_objective(tmp_path):
             return 50.0 * tf.square(params[self._idx] - 1.0)
 
     fn, _ = make_small_fold_toy(tmp_path, 2)
-    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "kfold")
     f.tau.assign(1.0)
     f.regularizers = [Penalty()]
     f.arm_regularizers()
@@ -1282,7 +1280,7 @@ def test_data_propagated_sandwich_refused_for_fold_methods(tmp_path):
             tmp_path,
             "--allowNegativeParam",
             "--mcStatDebias",
-            "twoHalf",
+            "kfold",
             "--mcStatDebiasCov",
             "dataPropagated",
         )
@@ -1357,7 +1355,7 @@ def test_fold_compensator_unbiases_the_jackknife_limit(bbb, tmp_path):
     quadratic and separable in the data, so its mean over y ~ N(mu, D) is the
     average over y = mu +- sqrt(D): it must vanish at the truth."""
     fn, n = make_exact_fold_toy(tmp_path)
-    args = ["--chisqFit", "--allowNegativeParam", "--mcStatDebias", "twoHalf"]
+    args = ["--chisqFit", "--allowNegativeParam", "--mcStatDebias", "kfold"]
     f = fit_toy(fn, tmp_path, *args, *bbb)
     theta0 = np.array([1.3, 0.7])
     mu = theta0 @ n
@@ -1477,11 +1475,11 @@ def test_continuous_m_removes_only_what_bin_by_bin_stat_does_not(bbb, models, tm
     "toy,args",
     [
         ("moment", ["--mcStatDebias", "continuousM", "--binByBinStatMode", "full"]),
-        ("folds", ["--mcStatDebias", "twoHalf"]),
-        ("folds", ["--mcStatDebias", "twoHalf", "--binByBinStatMode", "full"]),
+        ("folds", ["--mcStatDebias", "kfold"]),
+        ("folds", ["--mcStatDebias", "kfold", "--binByBinStatMode", "full"]),
         ("folds", ["--mcStatDebias", "none"]),
     ],
-    ids=["continuousM-full", "twoHalf-gammalite", "twoHalf-full", "none"],
+    ids=["continuousM-full", "kfold-gammalite", "kfold-full", "none"],
 )
 def test_asimov_is_recentred_with_the_expected_covariance(toy, args, tmp_path):
     """Asimov data are the expected yields of the noisy templates, so they carry
@@ -1673,7 +1671,7 @@ def test_asimov_recentring_carries_over_to_the_saturated_composite(tmp_path):
     groups = np.repeat(np.arange(ngroup), SMALL_NBINS // ngroup)
     chinfo = {"ch0": {"axes": [hist.axis.Regular(ngroup, 0, 1, name="g")]}}
     fn, _ = make_small_fold_toy(tmp_path, 2)
-    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "twoHalf")
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "kfold")
     f.defaultassign()
     f.set_nobs(f.expected_yield())
     f.set_mcstat_asimov(True)
@@ -1718,7 +1716,7 @@ def test_asimov_split_meat_uses_the_data_covariance(tmp_path):
         )
     fn = _write(tw, tmp_path, "covfit_folds.hdf5")
     args = ["--covarianceFit", "--noBinByBinStat", "--allowNegativeParam"]
-    f = fit_toy(fn, tmp_path, *args, "--mcStatDebias", "twoHalf")
+    f = fit_toy(fn, tmp_path, *args, "--mcStatDebias", "kfold")
     f.defaultassign()
     mu = np.asarray(f.expected_yield())
     f.set_nobs(tf.constant(mu))
@@ -1732,7 +1730,7 @@ def test_asimov_split_meat_uses_the_data_covariance(tmp_path):
     np.testing.assert_allclose(B_asimov, 0.5 * (Bs[0] + Bs[1]), rtol=1e-8)
 
 
-@pytest.mark.parametrize("method", ["twoHalf", "continuousM"])
+@pytest.mark.parametrize("method", ["kfold", "continuousM"])
 def test_gauss_newton_includes_the_expected_marginal_variance_term(method, tmp_path):
     """Where the bin-by-bin stat variance V(x) moves with the parameters, the
     Gauss-Newton form of a marginal bin-by-bin stat term (profile + 1/2 log V:
@@ -1742,7 +1740,7 @@ def test_gauss_newton_includes_the_expected_marginal_variance_term(method, tmp_p
     V_b = y_b + sum_p sumw_bp x_p^2, dV_bp = 2 sumw_bp x_p."""
     full = ["--binByBinStatType", "normal-multiplicative", "--binByBinStatMode", "full"]
     args = ["--chisqFit", "--allowNegativeParam", "--covMode", "fisher", *full]
-    if method == "twoHalf":
+    if method == "kfold":
         fn, arr = make_small_fold_toy(tmp_path, 2)
         sumw = np.stack([fp.sum(0) for fp in arr["folds"]])
     else:
@@ -1757,7 +1755,7 @@ def test_gauss_newton_includes_the_expected_marginal_variance_term(method, tmp_p
         "ib,jb->ij", dV / V**2, dV
     )
     _, _, h = f.loss_val_grad_hess()
-    if method == "twoHalf":
+    if method == "kfold":
         got = np.asarray(f.fisher_curvature_full(f.hess_meat()))[:2, :2]
     else:
         got = np.asarray(f.fisher_curvature(h))[:2, :2]
@@ -1768,11 +1766,11 @@ def test_gauss_newton_includes_the_expected_marginal_variance_term(method, tmp_p
 @pytest.mark.parametrize(
     "args,expect",
     [
-        (["--mcStatDebias", "twoHalf", "--noBinByBinStat"], "without bin-by-bin stat"),
+        (["--mcStatDebias", "kfold", "--noBinByBinStat"], "without bin-by-bin stat"),
         (
             [
                 "--mcStatDebias",
-                "twoHalf",
+                "kfold",
                 "--covMode",
                 "fisher",
                 "--binByBinStatType",
@@ -1781,18 +1779,18 @@ def test_gauss_newton_includes_the_expected_marginal_variance_term(method, tmp_p
             ],
             "--covMode fisher with --binByBinStatType gamma",
         ),
-        (["--mcStatDebias", "twoHalf", "--mcStatDebiasCov", "curvature"], "curvature"),
+        (["--mcStatDebias", "kfold", "--mcStatDebiasCov", "curvature"], "curvature"),
         (
             [
                 "--mcStatDebias",
-                "twoHalf",
+                "kfold",
                 "--binByBinStatType",
                 "gamma",
                 "--binByBinStatDynamic",
             ],
             None,
         ),
-        (["--mcStatDebias", "twoHalf", "--covMode", "fisher"], None),
+        (["--mcStatDebias", "kfold", "--covMode", "fisher"], None),
         (["--mcStatDebias", "none", "--noBinByBinStat"], None),
     ],
     ids=[
@@ -1843,7 +1841,7 @@ def test_empty_half_template_keeps_the_gradient_finite(poisson, tmp_path):
         ["--binByBinStatType", "gamma"],
         ["--binByBinStatType", "normal-multiplicative", "--binByBinStatMode", "full"],
     ):
-        args = ["--mcStatDebias", "twoHalf", *bbb] + ([] if poisson else ["--chisqFit"])
+        args = ["--mcStatDebias", "kfold", *bbb] + ([] if poisson else ["--chisqFit"])
         options = (
             _driver()
             .make_parser()
@@ -1888,7 +1886,7 @@ def test_poisson_fold_fit_refuses_data_in_an_empty_half(tmp_path):
                     "-t",
                     "0",
                     "--mcStatDebias",
-                    "twoHalf",
+                    "kfold",
                     *extra,
                 ]
             )

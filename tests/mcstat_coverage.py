@@ -83,7 +83,7 @@ def _build(fn, T0, T1, folds0, folds1, data, debias, bbb, poisson):
     tw = TensorWriter(sparse=False)
     tw.add_channel([AX], "ch0")
     tw.add_data(_whist(data, data), "ch0")
-    if debias in ("twoHalf", "kfold"):
+    if debias == "kfold":
         tw.add_process(_fhist(folds0), "p0", "ch0", signal=True, fold_axis="mcfold")
         tw.add_process(_fhist(folds1), "p1", "ch0", signal=True, fold_axis="mcfold")
     else:
@@ -131,7 +131,7 @@ def _fit(fn, debias, covMode, debiasCov, bbb, poisson, outdir=None, bbargs=()):
         C = np.asarray(f.cov_dataprop_sandwich(cov_curv))
     elif debiasCov == "sandwich" and debias == "continuousM":
         C = np.asarray(f.cov_mcstat_sandwich(bread))
-    elif debiasCov == "sandwich" and debias in ("twoHalf", "kfold"):
+    elif debiasCov == "sandwich" and debias == "kfold":
         C = np.asarray(f.cov_twohalf_sandwich(bread, covMode))
     else:
         C = np.asarray(cov_curv)
@@ -228,10 +228,10 @@ if __name__ == "__main__":
             "continuousM fisher  sandwich  chisq",
             dict(debias="continuousM", covMode="fisher"),
         ),
-        ("twoHalf    observed sandwich  chisq", dict(debias="twoHalf")),
+        ("kfold(2)   observed sandwich  chisq", dict(debias="kfold")),
         (
-            "twoHalf    fisher   sandwich  chisq",
-            dict(debias="twoHalf", covMode="fisher"),
+            "kfold(2)   fisher   sandwich  chisq",
+            dict(debias="kfold", covMode="fisher"),
         ),
         (
             "kfold(8)   fisher   sandwich  chisq",
@@ -242,9 +242,9 @@ if __name__ == "__main__":
             "continuousM observed sandwich chisq BBB",
             dict(debias="continuousM", bbb=True),
         ),
-        ("twoHalf    observed sandwich  chisq BBB", dict(debias="twoHalf", bbb=True)),
+        ("kfold(2)   observed sandwich  chisq BBB", dict(debias="kfold", bbb=True)),
         ("none       observed sandwich  POISSON", dict(debias="none", poisson=True)),
-        ("twoHalf    observed sandwich  POISSON", dict(debias="twoHalf", poisson=True)),
+        ("kfold(2)   observed sandwich  POISSON", dict(debias="kfold", poisson=True)),
     ]
     print(f"MC-stat coverage ensemble (ntoy={ntoy}, target cov(dif)=0.683)\n")
     print(

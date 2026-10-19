@@ -29,12 +29,14 @@ at the **objective** level and let autodiff produce the de-biased gradient/Hessi
 
 Fit options (in `Fitter.__init__` / CLI), **three orthogonal axes**:
 ```
---mcStatDebias {none, continuousM, twoHalf, kfold}   # de-bias the point/curvature; default none
+--mcStatDebias {none, continuousM, kfold}            # de-bias the point/curvature; default none
 --mcStatDebiasCov {curvature, sandwich, dataPropagated}  # default sandwich; dataPropagated: continuousM only
 --covMode {observed, fisher}                         # curvature primitive; applies EVERYWHERE
 ```
-`twoHalf` and `kfold` are the same method: the number of folds `k` is inferred from
-the fold axis of the input (§2a), so there is no fold-count option.
+`kfold` is the cross-fit method for any number of folds: `k` is inferred from the
+fold axis of the input (§2a), so there is no fold-count option; `k = 2` is the
+two-half jackknife. (An earlier `twoHalf` value was the same method and is
+removed.)
 `--covMode` is orthogonal and applies uniformly to **all** curvatures — the
 standard inverse-Hessian covariance *and* both the bread and meat of the de-biased
 sandwich. `observed` = the autograd Hessian `∇²L` (data-conditional; Efron–Hinkley);
@@ -288,7 +290,7 @@ A ~10-line change to `_compute_nll_components`:
 ```python
 def _compute_ln_debiased(self, full_nll=False):
     nexp_full, _ = self._compute_yields_noBBB()                 # full templates
-    if self.mcStatDebias in ("twoHalf", "kfold"):
+    if self.mcStatDebias == "kfold":
         nexp_A = self._compute_yields_noBBB(templates="A")[0]    # half-A (×2-rescaled)
         nexp_B = self._compute_yields_noBBB(templates="B")[0]
         ln = (2.0 * self._compute_ln(nexp_full[:nbins])

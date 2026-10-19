@@ -722,7 +722,7 @@ def common_parser():
     parser.add_argument(
         "--mcStatDebias",
         default="none",
-        choices=["none", "continuousM", "twoHalf", "kfold"],
+        choices=["none", "continuousM", "kfold"],
         help="Limited-MC-statistics de-biasing of the POI point/curvature "
         "(docs/mcstat/RABBIT_MCSTAT_DESIGN.md). 'continuousM' subtracts the frozen "
         "noise-floor matrix M (supplied via TensorWriter.add_mc_stat_moment, whose "
@@ -730,11 +730,11 @@ def common_parser():
         "-1/2 theta^T M theta in the objective; M is ignored for any other choice. "
         "NOTE: only de-biases parameters that enter the prediction LINEARLY (use "
         "--allowNegativeParam for POIs; rabbit's default x^2 transform cancels the "
-        "correction). 'twoHalf' and 'kfold' are the same cross-fit method "
+        "correction). 'kfold' is the cross-fit (jackknife) method "
         "(general / nonlinear-safe) on MC-stat fold templates, written with "
         "TensorWriter.add_process(..., fold_axis=...): the number of folds k (any "
-        "k >= 2) is inferred from the size of that axis, so there is nothing to "
-        "choose here; the k-fold averaging over all fold pairs is realized in "
+        "k >= 2; k = 2 is the two-half jackknife) is inferred from the size of "
+        "that axis, so there is nothing to choose here; the k-fold averaging over all fold pairs is realized in "
         "--covMode fisher. The fold axis must assign each GENERATED event (with all "
         "of its oversampled copies) to one fold, independently of the fitted "
         "observables; the writer cannot check this. Fold templates cost k times "

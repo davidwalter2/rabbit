@@ -593,7 +593,7 @@ class MultiDeviceFitter(Fitter):
         self._unsharded("The Gauss-Newton covariance", "--covMode fisher")
 
     def cov_twohalf_sandwich(self, *args, **kwargs):
-        self._unsharded("MC-stat de-biasing", "--mcStatDebias twoHalf/kfold")
+        self._unsharded("MC-stat de-biasing", "--mcStatDebias kfold")
 
     def cov_mcstat_sandwich(self, *args, **kwargs):
         self._unsharded("MC-stat de-biasing", "--mcStatDebias continuousM")
