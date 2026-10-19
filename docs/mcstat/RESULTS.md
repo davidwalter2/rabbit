@@ -8,7 +8,8 @@
 > subsections may describe behaviour that a later one supersedes (e.g. the
 > `--mcStatKfold` option, removed in §9q). For the current interfaces see
 > `RABBIT_MCSTAT_DESIGN.md` in this directory; the rabbit-level checks quoted in §9
-> live in `tests/test_mcstat_debias.py`.
+> live in `tests/test_mcstat_*.py` (one file, `tests/test_mcstat_debias.py`, when
+> the earlier entries were written).
 
 Self-contained reproduction of `slides/statissues-Aug17-2023` using jax + numpy
 + scipy, with the `scipy` **trust-krylov** minimiser wherever an explicit

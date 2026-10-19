@@ -10,7 +10,7 @@ linear POIs (rnorm_true = 1). Coverage is measured for the degenerate direction
 (rnorm0 - rnorm1, truth 0) and the well-constrained sum.
 
 This is a long ensemble study (~1 s per toy fit), so it is a standalone tool rather
-than a test; tests/test_mcstat_debias.py runs a small fixed-seed ensemble of it as a
+than a test; tests/test_mcstat_continuous_m.py runs a small fixed-seed ensemble of it as a
 CI smoke test of the de-bias direction (bias removed, sigma inflated, coverage up).
 
 Usage:

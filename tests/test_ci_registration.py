@@ -2,7 +2,10 @@
 
 CI runs the unit tests one way: an `all-unit-tests` job invoking
 `pytest tests/`, which discovers test files rather than being told about them.
-That is the whole point. It replaced a hand-maintained matrix of filenames in
+That is the whole point. (The job collects with `pytest tests/ --collect-only`
+and then runs each collected file in its own process, because XLA's compiled
+code stays mapped for the life of a process and the whole suite in one would
+exceed vm.max_map_count; pytest's collection still decides what runs.) It replaced a hand-maintained matrix of filenames in
 which an unlisted file ran nowhere and nothing reported the omission -- the
 default was "don't run", a PR adding tests went green either way, and 137 tests
 across eight files had accumulated unrun before anyone measured it (issue #173).

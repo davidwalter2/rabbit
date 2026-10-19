@@ -178,13 +178,31 @@ jobs:
           echo "PYTHONPATH=$GITHUB_WORKSPACE:$PYTHONPATH" >> $GITHUB_ENV
           echo "PATH=$GITHUB_WORKSPACE/bin:$PATH" >> $GITHUB_ENV
 
+      # pytest collects tests/ (so discovery, not a list, decides what runs;
+      # see tests/test_ci_registration.py), then runs every collected file in
+      # its own process. XLA keeps the code it compiles for every fitter
+      # mapped until the process exits (TensorFlow has no API that releases
+      # it), and the whole suite in one process exceeds vm.max_map_count
+      # (65530): LLVM then aborts with "Unable to allocate section memory".
+      # --capture=sys lets such C++ messages reach the log.
       # --continue-on-collection-errors because an import failure in one file
-      # otherwise aborts collection for the whole run and nothing executes --
-      # which is exactly what a missing PyYAML on this runner did the first
-      # time this job ran. The error is still reported and the job still
-      # fails; the other ~290 tests just get to run first.
+      # (e.g. a missing PyYAML on this runner) would otherwise hide every
+      # other file; the error is still reported and fails the job. Every file
+      # runs even if an earlier one fails; the job fails if any did.
       - name: run the whole test suite
-        run: python -m pytest tests/ -q --continue-on-collection-errors
+        run: |
+          set -o pipefail  # a collection error must survive the tee
+          failed=""
+          python -m pytest tests/ --collect-only -qq --continue-on-collection-errors | tee collected.txt || failed="collection"
+          for f in $(grep -o '^tests/[^:]*\.py' collected.txt | sort -u); do
+            echo "::group::$f"
+            python -m pytest "$f" -q --capture=sys || failed="$failed $f"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "failed: $failed"
+            exit 1
+          fi
 
   make-tensor:
     runs-on: [self-hosted, linux, x64]

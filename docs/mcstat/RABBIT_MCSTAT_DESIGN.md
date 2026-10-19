@@ -8,7 +8,7 @@ TF-NLL + SciPy design and its matrix-free HVP.
 This started as the design proposal; it has been updated to describe what is
 implemented (`rabbit/fitter.py`, `rabbit/tensorwriter.py`, `rabbit/inputdata.py`,
 `bin/rabbit_fit.py`). The validation history is in `RESULTS.md` §9; the checks are
-`tests/test_mcstat_debias.py`.
+`tests/test_mcstat_*.py` (shared toys in `tests/mcstat_helpers.py`).
 
 ## 0. How rabbit maps onto the math
 
@@ -652,7 +652,9 @@ along each ray (exactly `dᵀΣ⁻¹d` for a quadratic objective). `--scan` and
 impacts are requested (the curvature covariance is not stored).
 
 ## 5. Validation hooks (port the toy)
-- `tests/test_mcstat_debias.py`: the 2-process / 200-bin near-degenerate toy (and
+- `tests/test_mcstat_{continuous_m,kfold,fit,outputs}.py` (toy builders in
+  `tests/mcstat_helpers.py`; one file per topic, so CI can run each in its own
+  process): the 2-process / 200-bin near-degenerate toy (and
   smaller ones) as rabbit input tensors; rabbit vs closed-form numpy references for
   continuous-M, two-half, any-k jackknife and the k-fold U-statistic (dense and
   sparse), BB-lite composition, and a small coverage ensemble. The long coverage
