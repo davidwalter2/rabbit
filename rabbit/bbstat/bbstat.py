@@ -513,12 +513,19 @@ class BinByBinStat:
         profile=True,
         compute_norm=False,
         full=True,
+        fixed_beta=None,
+        add_ubeta=True,
     ):
         """Profile β (when ``profile=True``) and apply it to ``nexp`` / ``norm``.
 
         Returns ``(nexp, norm, beta)`` where ``beta`` is the (possibly
         profiled) β tensor. When BBB is disabled, returns the inputs
         untouched and ``beta=None``.
+
+        ``fixed_beta``: the β applied when not profiling (default the stored
+        ``self.beta``). ``add_ubeta``: add the dummy ``ubeta`` through which
+        callers differentiate by β; off for predictions whose β is not the
+        fit's (the MC-stat de-biasing's half terms).
         """
         if not self.enabled:
             return nexp, norm, None
@@ -604,19 +611,29 @@ class BinByBinStat:
                         # gradient gives 0*(-inf) = NaN. Use a dummy norm=1
                         # for betamask bins so the division is finite, then
                         # set those entries to +inf to exclude them from the
-                        # min.
+                        # min. The same for an entry whose template is zero
+                        # although it is not masked: an MC-stat fold half with
+                        # no events of the process (its beta is beta0 anyway).
+                        zero_norm = betamask | (norm_profile == 0.0)
                         norm_thresh = tf.where(
-                            betamask, tf.ones_like(norm_profile), norm_profile
+                            zero_norm, tf.ones_like(norm_profile), norm_profile
                         )
                         f_thresh = tf.where(
-                            betamask,
+                            zero_norm,
                             tf.fill(
                                 tf.shape(kstat),
                                 tf.cast(float("inf"), kstat.dtype),
                             ),
                             kstat / norm_thresh,
                         )
-                        threshold = nobs - varnobs * tf.reduce_min(f_thresh, axis=1)
+                        # a bin with no unmasked non-zero template (e.g. an
+                        # MC-stat half empty for every process) has no
+                        # constraint: every beta is beta0, any finite threshold
+                        min_f = tf.reduce_min(f_thresh, axis=1)
+                        min_f = tf.where(
+                            tf.math.is_inf(min_f), tf.zeros_like(min_f), min_f
+                        )
+                        threshold = nobs - varnobs * min_f
 
                         # solving nbeta numerically using newtons method
                         def fnll_nbeta(u, t):
@@ -822,12 +839,15 @@ class BinByBinStat:
                         # so that x = threshold + exp(u) > threshold for any
                         # real u, guaranteeing den > 0 and beta > 0 without any
                         # clipping. Protect against zero norm_profile for
-                        # masked processes (see chisqFit branch above).
+                        # masked processes (see chisqFit branch above), and
+                        # for an unmasked entry with a zero template (an MC-stat
+                        # fold half with no events of the process).
+                        zero_norm = betamask | (norm_profile == 0.0)
                         norm_thresh = tf.where(
-                            betamask, tf.ones_like(norm_profile), norm_profile
+                            zero_norm, tf.ones_like(norm_profile), norm_profile
                         )
                         f_thresh = tf.where(
-                            betamask,
+                            zero_norm,
                             tf.fill(
                                 tf.shape(kstat),
                                 tf.cast(float("inf"), kstat.dtype),
@@ -941,11 +961,12 @@ class BinByBinStat:
             if self.indata.nbinsmasked:
                 beta = tf.concat([beta, self.beta0[self.indata.nbins :]], axis=0)
         else:
-            beta = self.beta
+            beta = self.beta if fixed_beta is None else fixed_beta
 
         # Add dummy tensor to allow convenient differentiation by beta even
         # when profiling
-        beta = beta + self.ubeta
+        if add_ubeta:
+            beta = beta + self.ubeta
 
         betasel = beta[: nexp.shape[0]]
         if self.dynamic and self.binByBinStatType != "normal-additive":
