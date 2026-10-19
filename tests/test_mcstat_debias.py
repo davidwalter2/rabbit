@@ -937,6 +937,48 @@ def test_debiased_fit_from_far_start_uses_ordinary_warm_start(bbb, tmp_path):
     assert np.linalg.eigvalsh(np.asarray(h)).min() > 0
 
 
+def test_warm_start_reuses_traced_functions(tmp_path):
+    """The warm start switches between the ordinary and the de-biased
+    objective without retracing: each keeps its own traced functions, so a
+    run of toys compiles them once (XLA keeps compiled code mapped for the
+    life of the process). The kept set must still be the right objective,
+    and any rebuild must drop it."""
+    fn, _ = make_small_fold_toy(tmp_path, 4)
+    f = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "kfold")
+    debiased = f.loss_val_grad
+    ordinary_flag, ordinary = f._mcstat_tf_standby
+    assert ordinary_flag is True
+    traces = (
+        debiased.experimental_get_tracing_count(),
+        ordinary["loss_val_grad"].experimental_get_tracing_count(),
+    )
+    x_ref = f.x.numpy().copy()
+    for _ in range(2):
+        f.x.assign([3.143434, 13.06379379])
+        f.minimize()
+        np.testing.assert_allclose(f.x.numpy(), x_ref, atol=1e-5)
+    assert f.loss_val_grad is debiased
+    assert f._mcstat_tf_standby[1]["loss_val_grad"] is ordinary["loss_val_grad"]
+    assert (
+        debiased.experimental_get_tracing_count(),
+        ordinary["loss_val_grad"].experimental_get_tracing_count(),
+    ) == traces
+
+    # the kept set is the ordinary likelihood, the live one the de-biased
+    f0 = fit_toy(fn, tmp_path, "--allowNegativeParam", "--mcStatDebias", "none")
+    f0.x.assign(f.x)
+    with f._ordinary_likelihood():
+        assert f.loss_val_grad is ordinary["loss_val_grad"]
+        np.testing.assert_allclose(
+            f.loss_val().numpy(), f0.loss_val().numpy(), rtol=1e-12
+        )
+    assert f.loss_val_grad is debiased
+    assert not np.isclose(f.loss_val().numpy(), f0.loss_val().numpy())
+
+    f._make_tf_functions()
+    assert f._mcstat_tf_standby is None
+
+
 # ---------------------------------------------------------------------------
 # --noHessian: Hessian-free curvature and sandwich
 # ---------------------------------------------------------------------------

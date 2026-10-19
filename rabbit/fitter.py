@@ -141,6 +141,9 @@ class Fitter:
             "loss_val_grad_hessp_revrev",
             "_hessp_batch_graph",
             "_scalar_hessian_fns",
+            # the traced functions of the other de-biasing setting
+            # (_set_mcstat_debias_suspended)
+            "_mcstat_tf_standby",
         }
     )
     valid_systematic_types = ["log_normal", "normal"]
@@ -725,16 +728,44 @@ class Fitter:
         --mcStatDebias none minimizes: the data term on the full templates
         only, and no continuous-M penalty. Every other term (constraints,
         bin-by-bin stat, regularization, external terms, blinding) is shared.
-        The traced loss functions read the switch at trace time, so they are
-        rebuilt on entry and on exit.
+        The traced loss functions read the switch at trace time, so each
+        setting has its own set of them (_set_mcstat_debias_suspended).
         """
-        self._mcstat_debias_suspended = True
-        self._retrace_tf_functions()
+        self._set_mcstat_debias_suspended(True)
         try:
             yield
         finally:
-            self._mcstat_debias_suspended = False
+            self._set_mcstat_debias_suspended(False)
+
+    def _tf_function_attrs(self):
+        """The instance attributes holding traced functions: the per-instance
+        re-wraps of the @tf.function methods and the dynamic wrappers."""
+        names = {
+            name
+            for name in dir(type(self))
+            if hasattr(getattr(type(self), name, None), "python_function")
+        }
+        names |= set(self._DYNAMIC_TF_FUNCS) | {"loss_val_grad_hessp"}
+        names.discard("_mcstat_tf_standby")
+        return {name: self.__dict__[name] for name in names if name in self.__dict__}
+
+    def _set_mcstat_debias_suspended(self, suspended):
+        """Switch the de-biasing off (the warm start's ordinary likelihood) or
+        back on. The set of traced functions of the other setting is kept, so
+        each is traced once per fitter rather than twice per minimize(): XLA
+        keeps compiled code mapped for the life of the process, and a retrace
+        per fit exhausts the memory mappings over a run of toys. Any rebuild
+        (_make_tf_functions) drops the kept set."""
+        if suspended == self._mcstat_debias_suspended:
+            return
+        current = (self._mcstat_debias_suspended, self._tf_function_attrs())
+        standby = self.__dict__.get("_mcstat_tf_standby")
+        self._mcstat_debias_suspended = suspended
+        if standby is not None and standby[0] == suspended:
+            self.__dict__.update(standby[1])
+        else:
             self._retrace_tf_functions()
+        self._mcstat_tf_standby = current
 
     def __deepcopy__(self, memo):
         import copy
@@ -4432,6 +4463,8 @@ class Fitter:
         # "auto"/"on"/"off" collapsed against self.indata.sparse), so
         # this body just reads it.
         jit = self.jit_compile
+        # the kept set of the other de-biasing setting is now stale
+        self._mcstat_tf_standby = None
 
         def _loss_val(self):
             return self._compute_loss()
