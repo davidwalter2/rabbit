@@ -25,6 +25,7 @@ def build_nonlinear_constraints(
     to_physical=None,
     jac_to_internal=None,
     hessp_to_internal=None,
+    hold_feasible=True,
 ):
     """Build the scipy constraint for the rows ``lower <= c(x) <= upper``.
 
@@ -58,6 +59,9 @@ def build_nonlinear_constraints(
         T^T (grad f + J^T v) = 0 has the same multipliers v. What does depend
         on it is every NORM scipy takes over the variables: its trust radius,
         xtol and the KKT residual ``optimality`` compared with gtol are in y.
+    hold_feasible : bool
+        False: no row is held feasible (``keep_feasible`` all False), the
+        warm-start rule, see :mod:`rabbit.constraints.warm_start`.
 
     Returns
     -------
@@ -125,7 +129,13 @@ def build_nonlinear_constraints(
     )
     atol = 64.0 * np.finfo(np.float64).eps * np.maximum(1.0, finite_abs)
     viol = np.maximum(lb - c0, c0 - ub)
-    if np.any(viol > atol):
+    if not hold_feasible:
+        keep = np.zeros(len(lb), dtype=bool)
+        logger.info(
+            "[minimize] warm start: no constraint is held feasible, so a slack "
+            "pinned at ~0 on a face of the previous minimum cannot freeze the fit"
+        )
+    elif np.any(viol > atol):
         keep = np.zeros(len(lb), dtype=bool)
         logger.warning(
             f"[minimize] starting point violates {int(np.sum(viol > atol))}/"
