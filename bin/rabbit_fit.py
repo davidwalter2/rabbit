@@ -592,9 +592,12 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False, blind=Fal
                         )
                         saturated_ok = False
                 if saturated_ok:
-                    # mcstat_warm_start=False: the start above is already the main
-                    # (de-biased) fit's minimum, which q >= 0 relies on
-                    cb = fitter_saturated.minimize(mcstat_warm_start=False)
+                    # the start above is already the main (de-biased) fit's
+                    # minimum, which q >= 0 relies on: warm (trust-constr only),
+                    # no MC-stat ordinary-likelihood leg
+                    cb = fitter_saturated.minimize(
+                        warm_start=True, mcstat_warm_start=False
+                    )
                     cov_saturated = None
                     edmval = None
                     if not args.noHessian:
@@ -829,8 +832,9 @@ def external_postfit_variances(args, fitter):
 def fit(args, fitter, ws, dofit=True):
 
     edmval = None
-    # set when the post-fit sits on an active --constraints face; see there
-    skip_hessian_impacts = False
+    # the faces held by the impacts: set below by the constrained post-fit,
+    # never carried over from a previous fit (toys)
+    fitter.postfit_faces = None
 
     if args.externalPostfit is not None:
         fitter.load_fitresult(
@@ -851,7 +855,9 @@ def fit(args, fitter, ws, dofit=True):
 
     if dofit:
         _t_min = time.perf_counter()
-        cb = fitter.minimize()
+        # an --externalPostfit start is a previous fit's minimum: warm
+        # (trust-constr with --constraints only, see --minimizerWarmStart)
+        cb = fitter.minimize(warm_start=args.externalPostfit is not None)
         logger.debug(
             f"[timing] fitter.minimize(): {time.perf_counter() - _t_min:.1f} s"
         )
@@ -953,13 +959,9 @@ def fit(args, fitter, ws, dofit=True):
                 cpf = fitter.constrained_postfit(
                     grad, bread, active_tol=args.constraintActiveTol
                 )
-                skip_hessian_impacts = cpostfit.report_constrained_postfit(
-                    cpf,
-                    ws,
-                    args.constraintActiveTol,
-                    global_impacts=args.globalImpacts,
-                    hessian_impacts=args.doImpacts or args.gaussianGlobalImpacts,
-                )
+                # also records the active faces on the fitter, so the
+                # impacts below are taken with them held
+                cpostfit.report_constrained_postfit(cpf, ws, args.constraintActiveTol)
                 edmval = cpf["edm_tangent"]
                 cov = tf.constant(cpf["cov_held"], dtype=fitter.indata.dtype)
                 del cpf
@@ -1029,7 +1031,7 @@ def fit(args, fitter, ws, dofit=True):
                 edmvalbeta = edmval_cov(gradbeta, hessbeta)
                 logger.info(f"edmvalbeta: {edmvalbeta}")
 
-            if args.doImpacts and not skip_hessian_impacts:
+            if args.doImpacts:
                 _t_imp = time.perf_counter()
                 # Decompose the de-biased CURVATURE (cov_curv) with the matching
                 # curvature `bread`, so total/syst/stat are consistent, and append
@@ -1189,7 +1191,7 @@ def fit(args, fitter, ws, dofit=True):
                 f"[timing] global_impacts_parms(): "
                 f"{time.perf_counter() - _t_gimp:.1f} s"
             )
-        if args.gaussianGlobalImpacts and not skip_hessian_impacts:
+        if args.gaussianGlobalImpacts:
             ws.add_impacts_hists(
                 *fitter.gaussian_global_impacts_parms(),
                 base_name="gaussian_global_impacts",
