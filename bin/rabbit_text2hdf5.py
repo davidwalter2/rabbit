@@ -48,6 +48,14 @@ def make_parser():
         action="store_true",
         help="Use root to load histograms, otherwise uproot",
     )
+    parser.add_argument(
+        "--rateParamKappa",
+        type=float,
+        default=1.01,
+        help="Each rateParam becomes an unconstrained lnN nuisance theta with rate = kappa**theta. "
+        "The default 1.01 is badly scaled for rates that move by O(10%%) or more; "
+        "use e (2.718281828) for rate = exp(theta)",
+    )
     return parser
 
 
@@ -58,7 +66,11 @@ def main():
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
     converter = DatacardConverter(
-        args.datacard, use_root=args.root, mass=args.mass, symmetrize=args.symmetrize
+        args.datacard,
+        use_root=args.root,
+        mass=args.mass,
+        symmetrize=args.symmetrize,
+        rate_param_kappa=args.rateParamKappa,
     )
     writer = converter.convert_to_hdf5(sparse=args.sparse)
 

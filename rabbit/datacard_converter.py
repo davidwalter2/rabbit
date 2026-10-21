@@ -16,17 +16,27 @@ class DatacardConverter:
     Convert data from Combine datacards and ROOT files to hdf5 tensor format
     """
 
-    def __init__(self, datacard_file, symmetrize=None, use_root=False, mass="125.38"):
+    def __init__(
+        self,
+        datacard_file,
+        symmetrize=None,
+        use_root=False,
+        mass="125.38",
+        rate_param_kappa=1.01,
+    ):
         """
         Initialize the converter with a datacard file
 
         Args:
             datacard_file: Path to the datacard file
+            rate_param_kappa: kappa of the unconstrained lnN nuisance that replaces each rateParam,
+                so that the rate scales as kappa**theta
         """
         self.datacard_file = datacard_file
         self.parser = DatacardParser()
         self.mass = mass
         self.symmetrize = symmetrize
+        self.rate_param_kappa = rate_param_kappa
 
         # For counting experiments
         self.yield_axis = hist.axis.Integer(
@@ -263,8 +273,10 @@ class DatacardConverter:
                         signal=self.parser.process_indices.get(process_name, 0) <= 0,
                     )
 
-        # Add rate parameters as unconstrained lnN uncertainties with 1% variation.
-        #   To compare with combine use 'r = exp(100 * r)'
+        # Add rate parameters as unconstrained lnN uncertainties, rate = kappa**theta.
+        #   With the default kappa = 1.01, compare with combine using 'r = 1.01**theta' (~ exp(theta / 100)).
+        #   kappa = e gives r = exp(theta), which keeps theta O(1) for rates that move by O(10%) or more;
+        #   with 1.01 such rates need |theta| ~ 10-100 and fits with frozen parameters can overflow.
         for parts in self.parser.rate_params:
             name = parts[0]
             channels = [parts[1]] if parts[1] != "*" else self.parser.bins
@@ -277,7 +289,9 @@ class DatacardConverter:
                 prange = (float(lo), float(hi))
 
             for c in channels:
-                writer.add_norm_systematic(name, processes, c, 1.01, constrained=False)
+                writer.add_norm_systematic(
+                    name, processes, c, self.rate_param_kappa, constrained=False
+                )
 
         def add_norm_syst(writer, name, process, channel, effect):
             # Parse the effect (could be asymmetric like 0.9/1.1)
