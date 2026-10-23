@@ -315,3 +315,20 @@ def test_a_forced_frame_overrides_the_card():
 def test_an_unknown_frame_is_refused():
     with pytest.raises(ValueError):
         Blinding(FakeIndata(), FakeModel(), enabled=True, frame="unblinded")
+
+
+def test_a_forced_frame_against_the_card_is_flagged():
+    """Forcing the frame the card would pick anyway is harmless; forcing the
+    other one removes the auto safeguard and is flagged (and warned about)."""
+    same = Blinding(
+        FakeIndata(integer_data=True), FakeModel(), enabled=True, frame="data"
+    )
+    data_on_mc = Blinding(
+        FakeIndata(integer_data=False), FakeModel(), enabled=True, frame="data"
+    )
+    mc_on_data = Blinding(
+        FakeIndata(integer_data=True), FakeModel(), enabled=True, frame="mc"
+    )
+    assert not same.frame_overrides_card
+    assert data_on_mc.frame_overrides_card
+    assert mc_on_data.frame_overrides_card

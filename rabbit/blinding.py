@@ -321,14 +321,35 @@ class Blinding(_OffsetApplication):
         # card that holds real data but is not integral (an unfolded cross
         # section), so its fit shares the reco data fit's offsets and the
         # blinded values of the two can be subtracted.
-        if self.frame == "auto":
-            is_dataobs_int = np.all(
-                np.equal(self.indata.data_obs, np.floor(self.indata.data_obs))
-            )
-        else:
-            is_dataobs_int = self.frame == "data"
+        # A forced frame that disagrees with the card's verdict removes the
+        # safeguard: a fit to known truth in the "data" frame reveals the
+        # real-data offsets, and a data fit in the "mc" frame uses offsets that
+        # any MC closure fit reveals. Allowed, but warned about.
+        auto_is_int = bool(
+            np.all(np.equal(self.indata.data_obs, np.floor(self.indata.data_obs)))
+        )
+        is_dataobs_int = auto_is_int if self.frame == "auto" else self.frame == "data"
         if self.frame != "auto":
-            logger.info(f"Blinding frame forced to '{self.frame}' (--blindingFrame)")
+            if is_dataobs_int == auto_is_int:
+                logger.info(
+                    f"Blinding frame forced to '{self.frame}' (--blindingFrame), "
+                    "same as the card's own verdict"
+                )
+            elif is_dataobs_int:
+                logger.warning(
+                    "Blinding frame forced to 'data' on a card whose data_obs is "
+                    "not integral: a fit to known truth in this frame reveals the "
+                    "real-data offsets. Use it only for real data (e.g. an "
+                    "unfolded cross section)."
+                )
+            else:
+                logger.warning(
+                    "Blinding frame forced to 'mc' on a card whose data_obs is "
+                    "integral: the blinded values use the MC-frame offsets, which "
+                    "any MC closure fit reveals. Use it only for pseudo-data "
+                    "stored with integer counts."
+                )
+        self.frame_overrides_card = is_dataobs_int != auto_is_int
 
         def deterministic_random_from_string(s, mean=0.0, std=BLINDING_DRAW_STD):
             # random value with seed taken based on string of parameter name
