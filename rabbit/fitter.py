@@ -4270,11 +4270,11 @@ class Fitter:
         res_cov = pred_cov + data_cov
         return residuals, res_cov
 
-    def _chi2(self, res, res_cov, ndf_reduction=0):
+    def _chi2(self, res, res_cov, ndf_reduction=0, pseudo_inverse=False):
         res = tf.reshape(res, (-1, 1))
         ndf = tf.size(res) - ndf_reduction
 
-        if ndf_reduction > 0:
+        if ndf_reduction > 0 or pseudo_inverse:
             # covariance matrix is in general non invertible with ndf < n
             # compute chi2 using pseudo inverse
             chi_square_value = tf.transpose(res) @ tf.linalg.pinv(res_cov) @ res
@@ -4284,12 +4284,14 @@ class Fitter:
         return tf.squeeze(chi_square_value), ndf
 
     @tf.function
-    def chi2(self, fun, fun_data=None, ndf_reduction=0, profile=False):
+    def chi2(
+        self, fun, fun_data=None, ndf_reduction=0, profile=False, pseudo_inverse=False
+    ):
         if profile:
             residuals, res_cov = self._residuals_profiled(fun)
         else:
             residuals, res_cov = self._residuals(fun, fun_data)
-        return self._chi2(residuals, res_cov, ndf_reduction)
+        return self._chi2(residuals, res_cov, ndf_reduction, pseudo_inverse)
 
     def expected_events(
         self,
@@ -4349,12 +4351,16 @@ class Fitter:
             )
 
         if compute_chi2:
-            chi2val, ndf = self.chi2(
-                mapping.compute_flat,
-                mapping._get_data,
-                mapping.ndf_reduction,
-                profile=profile,
-            )
+            chi2_args = (mapping.compute_flat, mapping._get_data, mapping.ndf_reduction)
+            try:
+                chi2val, ndf = self.chi2(*chi2_args, profile=profile)
+            except tf.errors.InvalidArgumentError:
+                # The residual covariance is exactly singular when the mapped bins obey
+                # an exact linear relation (e.g. two projections of one channel), and
+                # the solve can then fail depending on rounding: use the pseudo inverse.
+                chi2val, ndf = self.chi2(
+                    *chi2_args, profile=profile, pseudo_inverse=True
+                )
             aux.append(chi2val)
             aux.append(ndf)
         else:
