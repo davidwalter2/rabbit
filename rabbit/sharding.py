@@ -49,6 +49,7 @@ from rabbit import external_likelihood
 from rabbit.bbstat.bbstat import BinByBinStat
 from rabbit.blinding import BlindingView
 from rabbit.fitter import Fitter
+from rabbit.param_models.param_model import compute_batched
 
 logger = logging.child_logger(__name__)
 
@@ -252,7 +253,12 @@ class ShardParamModel:
         self._stop = int(stop)
 
     def compute(self, param, full=False):
-        rnorm = self._inner.compute(param, full)
+        return self._shard_rows(self._inner.compute(param, full))
+
+    def compute_batched(self, params, full=False):
+        return self._shard_rows(compute_batched(self._inner, params, full))
+
+    def _shard_rows(self, rnorm):
         nlead = rnorm.shape[0]
         if nlead is not None and nlead > 1:
             rnorm = rnorm[self._start : self._stop]
@@ -352,11 +358,18 @@ class MultiDeviceFitter(Fitter):
         "get_model_nui",
         "get_theta",
         "get_x",
+        "_mthetaalpha",
+        "_observed_data",
         "_compute_yields_noBBB",
+        "_compute_yields_noBBB_batched",
         "_compute_yields_with_beta",
+        "_compute_yields_with_beta_batched",
         "_compute_ln",
+        "_compute_ln_batched",
         "_compute_lbeta",
+        "_compute_lbeta_batched",
         "_compute_lc",
+        "_compute_lc_batched",
     )
 
     def _build_shards(self):
@@ -518,7 +531,14 @@ class MultiDeviceFitter(Fitter):
         gview.blinding = self.blinding
         gview.cw = self.cw
         gview.x0 = self.x0
-        for name in ("get_poi", "get_model_nui", "get_theta", "get_x", "_compute_lc"):
+        for name in (
+            "get_poi",
+            "get_model_nui",
+            "get_theta",
+            "get_x",
+            "_compute_lc",
+            "_compute_lc_batched",
+        ):
             setattr(gview, name, getattr(Fitter, name).__get__(gview))
         self._global_view = gview
 

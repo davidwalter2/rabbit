@@ -25,6 +25,7 @@ import numpy as np
 import tensorflow as tf
 from wums import logging
 
+from rabbit import tfhelpers as tfh
 from rabbit.common import match_regexp_params
 
 logger = logging.child_logger(__name__)
@@ -54,13 +55,13 @@ class _OffsetApplication:
         """Offset the POI coordinate (additive, in the POI's own fit units)."""
         if not self.enabled:
             return xpoi
-        return xpoi + self.offsets_poi_add
+        return xpoi + tfh.per_parameter(self.offsets_poi_add, xpoi)
 
     def apply_theta(self, theta):
         """Offset the nuisance coordinate; only NOIs have a non-zero entry."""
         if not self.enabled:
             return theta
-        return theta + self.offsets_theta
+        return theta + tfh.per_parameter(self.offsets_theta, theta)
 
 
 class BlindingView(_OffsetApplication):

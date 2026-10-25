@@ -5,7 +5,19 @@ import numpy as np
 import tensorflow as tf
 from wums import logging
 
+from rabbit import tfhelpers as tfh
+
 logger = logging.child_logger(__name__)
+
+
+def compute_batched(model, params, full=False):
+    """model.compute_batched(params, full), or compute() vectorized over the
+    columns of params [nparams, B] for a model that only defines compute()
+    (duck-typed models need not subclass ParamModel)."""
+    batched = getattr(model, "compute_batched", None)
+    if batched is not None:
+        return batched(params, full)
+    return tfh.map_batch(lambda param: model.compute(param, full), (params,))
 
 
 class ParamModel:
@@ -85,6 +97,15 @@ class ParamModel:
         :param param: 1D tensor of explicit parameters in the fit (length nparams)
         :return 2D tensor to be multiplied with [proc,bin] tensor
         """
+
+    def compute_batched(self, params, full=False):
+        """
+        compute() at the B columns of params [nparams, B]: the rates with the
+        batch axis last, [nbins or 1, nproc, B]. For B == 1 this is one call of
+        compute(); otherwise compute() is vectorized over the columns. Models
+        can override it with a natively batched form.
+        """
+        return tfh.map_batch(lambda param: self.compute(param, full), (params,))
 
     def set_param_default(self, expectSignal, allowNegativeParam=False):
         """
