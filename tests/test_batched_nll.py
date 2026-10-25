@@ -363,3 +363,28 @@ def test_map_batch_shares_size_one_arguments_and_keeps_none():
     plus1, _, total1 = tfh.map_batch(fn, (a[:, :1], shared, None))
     np.testing.assert_array_equal(plus1.numpy(), (a[:, :1] + shared).numpy())
     assert total1.shape == (1,)
+
+
+@pytest.mark.parametrize("case", ["dense", "sparse", "sparse_bbb_full_gamma"])
+def test_traced_loss_keeps_the_static_batch_width(case, monkeypatch):
+    # at B = 1, map_batch makes the direct call and the sparse yields use to_dense
+    # only if the traced graphs know the batch width statically
+    widths = []
+    map_batch = tfh.map_batch
+
+    def spy(fn, args):
+        widths.extend(tf.convert_to_tensor(a).shape[-1] for a in args if a is not None)
+        return map_batch(fn, args)
+
+    monkeypatch.setattr(tfh, "map_batch", spy)
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _fitter(tmp, case)
+        f.loss_val_grad()
+        yields = tf.function(
+            lambda: f._compute_yields_noBBB_batched(
+                f.x[:, None], full=True, compute_norm=True
+            )
+        )
+        outputs = yields.get_concrete_function().structured_outputs
+    assert widths and set(widths) == {1}
+    assert [t.shape[-1] for t in outputs] == [1, 1]
