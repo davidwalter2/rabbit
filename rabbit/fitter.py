@@ -1113,21 +1113,42 @@ class Fitter:
 
         return val, jac
 
-    def set_nobs(self, values, variances=None):
+    def _observations(self, nobs, variances=None):
+        """(nobs, varnobs, lognobs) of the observed counts nobs, as the data
+        term reads them; any shape, e.g. [nbins] or [nbins, B] for B toys.
+
+        lognobs is log(nobs) with log 1 = 0 in empty bins: the offset that
+        gives the saturated Poisson likelihood, for numerical precision in the
+        minimizer (a plain log(nobs) makes -nobs (log nexp - log nobs) NaN
+        there). varnobs is the chi2 data variance, `variances` or else nobs,
+        and None for the other fits; a chi2 fit needs nobs > 0.
+        """
+        nobs = tf.convert_to_tensor(nobs, dtype=self.indata.dtype)
+        varnobs = None
         if self.chisqFit:
             # covariance from data stat
-            if tf.math.reduce_any(values <= 0).numpy():
-                raise RuntimeError(
-                    "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
-                )
-            self.varnobs.assign(values if variances is None else variances)
+            message = "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
+            if tf.executing_eagerly():
+                if tf.math.reduce_any(nobs <= 0).numpy():
+                    raise RuntimeError(message)
+            else:
+                tf.debugging.assert_positive(nobs, message=message)
+            varnobs = (
+                nobs
+                if variances is None
+                else tf.convert_to_tensor(variances, dtype=self.indata.dtype)
+            )
+        nobssafe = tf.where(nobs == 0.0, tf.constant(1.0, dtype=nobs.dtype), nobs)
+        return nobs, varnobs, tf.math.log(nobssafe)
+
+    def set_nobs(self, values, variances=None):
+        values, varnobs, lognobs = self._observations(values, variances)
+        if self.chisqFit:
+            self.varnobs.assign(varnobs)
 
         self._check_mcstat_empty_halves(values)
         self.nobs.assign(values)
-        # compute offset for poisson nll improved numerical precision in minimizatoin
-        # the offset is chosen to give the saturated likelihood
-        nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
-        self.lognobs.assign(tf.math.log(nobssafe))
+        self.lognobs.assign(lognobs)
         if self.chisqFit and getattr(self, "mcstat_bb_vref", None) is not None:
             # its per-bin variance is the data variance
             self._update_mcstat_bb_vref()
@@ -4172,15 +4193,17 @@ class Fitter:
         )
 
     def _compute_yields_with_beta_batched(
-        self, x, data=None, profile=True, compute_norm=False, full=True
+        self, x, data=None, profile=True, compute_norm=False, full=True, beta0=None
     ):
         """_compute_yields_with_beta at the B columns of x [npar, B]: nexp
         [nbins, B], norm [nbins, nproc, B] or None, beta [.., B] or None.
 
-        data: (nobs, varnobs, lognobs), each [nbins, 1] (shared) or [nbins, B];
-        default the fitter's observations. Bin-by-bin stat is element-wise in
-        the bins: B = 1 calls profile_and_apply directly, larger batches
-        vectorize the same call (tfh.map_batch)."""
+        data: (nobs, varnobs, lognobs), each [nbins, 1] (shared) or [nbins, B]
+        (see _observations); default the fitter's observations. beta0: the
+        bin-by-bin stat constraint centres, of bbstat.beta_shape (masked
+        channels included) plus the batch axis (default the stored ones). Bin-by-bin stat is element-wise in the bins:
+        B = 1 calls profile_and_apply directly, larger batches vectorize the
+        same call (tfh.map_batch)."""
         # Only materialize the dense [nbins, nproc] normcentral when an
         # external caller requested it, when BBB "full" mode needs per-process
         # yields for the analytic β solution, or when "lite" mode needs to
@@ -4193,8 +4216,9 @@ class Fitter:
         if not self.bbstat.enabled:
             return nexp, norm, None
         nobs, varnobs, lognobs = self._observed_data() if data is None else data
+        logbeta0 = None if beta0 is None else self.bbstat.log_beta0(beta0)
 
-        def profile_and_apply(nexp, norm, nobs, varnobs, lognobs):
+        def profile_and_apply(nexp, norm, nobs, varnobs, lognobs, beta0, logbeta0):
             return self.bbstat.profile_and_apply(
                 nexp,
                 norm,
@@ -4204,9 +4228,13 @@ class Fitter:
                 profile=profile,
                 compute_norm=compute_norm,
                 full=full,
+                beta0=beta0,
+                logbeta0=logbeta0,
             )
 
-        return tfh.map_batch(profile_and_apply, (nexp, norm, nobs, varnobs, lognobs))
+        return tfh.map_batch(
+            profile_and_apply, (nexp, norm, nobs, varnobs, lognobs, beta0, logbeta0)
+        )
 
     @tf.function
     def _profile_beta(self):
@@ -4498,12 +4526,18 @@ class Fitter:
         )
         return None if lbeta is None else lbeta[0]
 
-    def _compute_lbeta_batched(self, beta, full_nll=False):
-        """Bin-by-bin stat constraint [B] of beta [.., B] (None when disabled)."""
+    def _compute_lbeta_batched(self, beta, full_nll=False, beta0=None):
+        """Bin-by-bin stat constraint [B] of beta [.., B] (None when disabled);
+        beta0 [.., B] or [.., 1]: the constraint centres (default the stored
+        ones)."""
         if not self.bbstat.enabled:
             return None
+        logbeta0 = None if beta0 is None else self.bbstat.log_beta0(beta0)
         return tfh.map_batch(
-            lambda beta: self.bbstat.lbeta(beta, full_nll=full_nll), (beta,)
+            lambda beta, beta0, logbeta0: self.bbstat.lbeta(
+                beta, full_nll=full_nll, beta0=beta0, logbeta0=logbeta0
+            ),
+            (beta, beta0, logbeta0),
         )
 
     def _compute_ln(self, nexp, full_nll=False):
@@ -4625,15 +4659,24 @@ class Fitter:
             or bool(self.mcstat_debias_active)
         )
 
-    def _compute_nll_batched(self, x, data=None, x0=None, profile=True, full_nll=False):
+    def _compute_nll_batched(
+        self, x, data=None, x0=None, beta0=None, profile=True, full_nll=False
+    ):
         """Negative log-likelihood [B] at the B columns of x [npar, B].
 
         The core of the likelihood: _compute_nll is this at self.x[:, None].
         Per-element inputs, each with the batch axis last and of size 1 when
-        all elements share it: data = (nobs, varnobs, lognobs) [nbins, .]
-        (default the fitter's observations) and x0 [npar, .] (default
-        self.x0). The batch axis goes last throughout, so B = 1 runs the same
-        operations as an unbatched evaluation.
+        all elements share it (default: the fitter's own, as for a fit):
+        - data: the observed counts nobs [nbins, .], or (nobs, variances) with
+          the chi2 data variances; the data term is derived from them as
+          set_nobs does (_observations);
+        - x0 [npar, .]: the constraint centres;
+        - beta0 [.., .]: the bin-by-bin stat constraint centres, of the β shape
+          (bbstat.beta_shape: [nbinsfull] in lite mode, [nbinsfull, nproc] in
+          full mode, masked channels included).
+        A frequentist toy changes all three, a Bayesian toy only data. The
+        batch axis goes last throughout, so B = 1 runs the same operations as
+        an unbatched evaluation.
 
         Not batched yet: the regularization penalties (B = 1 only) and the
         MC-stat de-biasing terms (none; _compute_nll keeps them).
@@ -4646,6 +4689,10 @@ class Fitter:
         if len(self.regularizers) and x.shape[-1] != 1:
             raise NotImplementedError("Regularizers support a batch of 1 only.")
 
+        if data is not None:
+            data = self._observations(
+                *(data if isinstance(data, (tuple, list)) else (data,))
+            )
         nexpfullcentral, _, beta = self._compute_yields_with_beta_batched(
             x,
             data,
@@ -4654,6 +4701,7 @@ class Fitter:
             # only build the full (masked-channel-inclusive) yields if some
             # regularizer actually reads them
             full=self._regularizers_need_observables(),
+            beta0=beta0,
         )
         nexp = nexpfullcentral[: self.indata.nbins]
 
@@ -4661,7 +4709,7 @@ class Fitter:
             x, x0, full_nll
         )
 
-        lbeta = self._compute_lbeta_batched(beta, full_nll)
+        lbeta = self._compute_lbeta_batched(beta, full_nll, beta0=beta0)
         if lbeta is not None:
             l = l + lbeta
 

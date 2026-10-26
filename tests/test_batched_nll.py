@@ -11,7 +11,8 @@ self.x[:, None]. What these tests pin down:
   chi2, frozen parameters, blinding, external terms);
 - the gradient of their sum is the per-point gradient, column by column, which
   is what a batched minimizer differentiates;
-- per-element observations (toys) give the fits to those observations;
+- per-element observations, constraint centres and bin-by-bin stat
+  centres (toys) give the fits to them, empty bins included;
 - the terms that are not batched refuse B > 1 rather than disagree.
 """
 
@@ -114,10 +115,23 @@ CASES = {
         options=dict(binByBinStatMode="full", binByBinStatType="gamma"),
     ),
     "bbb_normal_additive": dict(options=dict(binByBinStatType="normal-additive")),
+    "bbb_full_additive": dict(
+        options=dict(binByBinStatMode="full", binByBinStatType="normal-additive")
+    ),
+    "bbb_full_masked": dict(
+        tensor=dict(masked=True), options=dict(binByBinStatMode="full")
+    ),
+    "bbb_dynamic_normal": dict(
+        options=dict(binByBinStatDynamic=True, binByBinStatType="normal-multiplicative")
+    ),
     "bbb_normal_multiplicative": dict(
         options=dict(binByBinStatType="normal-multiplicative")
     ),
     "chisq": dict(options=dict(chisqFit=True)),
+    "chisq_bbb_full": dict(options=dict(chisqFit=True, binByBinStatMode="full")),
+    "chisq_bbb_additive": dict(
+        options=dict(chisqFit=True, binByBinStatType="normal-additive")
+    ),
     "covariance": dict(
         tensor=dict(data_covariance=True), options=dict(covarianceFit=True)
     ),
@@ -172,11 +186,11 @@ def _single(f, X, fn):
 @pytest.mark.parametrize("case", sorted(CASES))
 @pytest.mark.parametrize("full_nll", [False, True])
 def test_batch_equals_single_evaluations(case, full_nll):
-    if full_nll and case in ("bbb_normal_multiplicative", "bbb_full"):
-        # full mode picks normal-multiplicative for "automatic" on data
-        pytest.skip("BinByBinStat.lbeta has no full_nll for normal-multiplicative")
     with tempfile.TemporaryDirectory() as tmp:
         f = _fitter(tmp, case)
+        if full_nll and f.bbstat.binByBinStatType == "normal-multiplicative":
+            # also what "automatic" picks in full mode and for chi2
+            pytest.skip("BinByBinStat.lbeta has no full_nll for normal-multiplicative")
         X = _points(f)
         batched = f._compute_nll_batched(tf.constant(X), full_nll=full_nll).numpy()
         single = _single(f, X, lambda: float(f._compute_nll(full_nll=full_nll).numpy()))
@@ -205,30 +219,198 @@ def test_gradient_of_the_sum_is_the_per_point_gradient(case):
             np.testing.assert_allclose(grads[:, b], single[b], rtol=1e-9, atol=1e-10)
 
 
-@pytest.mark.parametrize("case", ["dense", "sparse", "bbb_full_gamma", "chisq"])
+def _toy_counts(f, seed=7, zeros=True):
+    """NBATCH Poisson toys [nbins, B] of the observations; with zeros, every
+    third bin of half the toys is empty, as low-count toys are."""
+    nobs0 = f.nobs.numpy()
+    rng = np.random.default_rng(seed)
+    nobs = np.stack([rng.poisson(nobs0).astype(float) for _ in range(NBATCH)], axis=-1)
+    if zeros:
+        nobs[::3, ::2] = 0.0
+    return nobs
+
+
+def _fits_to(f, X, assign, restore):
+    """f._compute_nll at column b of X after assign(b); restore() afterwards."""
+    single = []
+    try:
+        for b in range(X.shape[-1]):
+            assign(b)
+            single.append(_single(f, X[:, b : b + 1], f._compute_nll)[0].numpy())
+    finally:
+        restore()
+    return np.array(single)
+
+
+@pytest.mark.parametrize(
+    "case", ["dense", "sparse", "bbb_full_gamma", "no_bbb", "dense_masked"]
+)
 def test_per_element_observations_are_the_fits_to_them(case):
-    """data with one column per element: B toys at B points in one call."""
+    """data = nobs with one column per element: B toys at B points in one call,
+    the data term derived from the counts as set_nobs derives it, empty bins
+    included."""
     with tempfile.TemporaryDirectory() as tmp:
         f = _fitter(tmp, case)
         X = _points(f)
         nobs0 = f.nobs.numpy()
-        rng = np.random.default_rng(7)
-        nobs = np.stack(
-            [np.maximum(rng.poisson(nobs0), 1.0) for _ in range(NBATCH)], axis=-1
+        nobs = _toy_counts(f)
+        assert (nobs == 0).any()
+        batched = f._compute_nll_batched(tf.constant(X), data=tf.constant(nobs))
+        batched = batched.numpy()
+        assert np.isfinite(batched).all()
+        single = _fits_to(
+            f,
+            X,
+            lambda b: f.set_nobs(tf.constant(nobs[:, b])),
+            lambda: f.set_nobs(tf.constant(nobs0)),
         )
-        lognobs = np.log(nobs)
-        varnobs = nobs if f.chisqFit else None
-        batched = f._compute_nll_batched(
-            tf.constant(X), data=(tf.constant(nobs), varnobs, tf.constant(lognobs))
-        ).numpy()
+        np.testing.assert_allclose(batched, single, rtol=RTOL, atol=0)
 
-        single = []
-        try:
-            for b in range(NBATCH):
-                f.set_nobs(tf.constant(nobs[:, b]))
-                single.append(_single(f, X[:, b : b + 1], f._compute_nll)[0].numpy())
-        finally:
-            f.set_nobs(tf.constant(nobs0))
+
+@pytest.mark.parametrize("with_variances", [False, True])
+def test_per_element_chisq_observations(with_variances):
+    """chi2: varnobs defaults to nobs, or comes with the counts as (nobs,
+    variances), as in set_nobs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _fitter(tmp, "chisq")
+        X = _points(f)
+        nobs0 = f.nobs.numpy()
+        nobs = np.maximum(_toy_counts(f, zeros=False), 1.0)
+        var = 1.5 * nobs if with_variances else None
+        data = (tf.constant(nobs), tf.constant(var)) if with_variances else nobs
+        batched = f._compute_nll_batched(tf.constant(X), data=data).numpy()
+        single = _fits_to(
+            f,
+            X,
+            lambda b: f.set_nobs(
+                tf.constant(nobs[:, b]),
+                None if var is None else tf.constant(var[:, b]),
+            ),
+            lambda: f.set_nobs(tf.constant(nobs0)),
+        )
+        np.testing.assert_allclose(batched, single, rtol=RTOL, atol=0)
+
+
+def test_per_element_chisq_observations_refuse_empty_bins():
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _fitter(tmp, "chisq")
+        nobs = _toy_counts(f)
+        with pytest.raises(RuntimeError, match="nobs <= 0"):
+            f._compute_nll_batched(tf.constant(_points(f)), data=tf.constant(nobs))
+
+
+BBB_CASES = [
+    "dense",
+    "sparse",
+    "dense_masked",
+    "bbb_full",
+    "bbb_full_gamma",
+    "sparse_bbb_full_gamma",
+    "bbb_dynamic",
+    "bbb_normal_additive",
+    "bbb_normal_multiplicative",
+    "bbb_full_additive",
+    "bbb_full_masked",
+    "bbb_dynamic_normal",
+    "chisq",
+    "chisq_bbb_full",
+    "chisq_bbb_additive",
+]
+
+
+def _toy_beta0(f, seed=13):
+    """NBATCH bin-by-bin stat constraint centres [.., B] around the stored
+    ones, of the β shape; additive centres shift, multiplicative ones scale
+    (gamma lite: some centres 0, which log_beta0 maps to log 1; for gamma
+    full mode see test_full_gamma_zero_centres_are_nan_unbatched_too)."""
+    beta00 = f.bbstat.beta0.numpy()
+    rng = np.random.default_rng(seed)
+    noise = rng.standard_normal(beta00.shape + (NBATCH,))
+    if f.bbstat.binByBinStatType == "normal-additive":
+        beta0 = beta00[..., None] + 0.3 * noise
+    else:
+        beta0 = beta00[..., None] * np.exp(0.2 * noise)
+    if f.bbstat.binByBinStatType == "gamma" and f.bbstat.binByBinStatMode == "lite":
+        beta0[::5, 1] = 0.0
+    return beta0
+
+
+@pytest.mark.parametrize("case", BBB_CASES)
+def test_per_element_bin_by_bin_constraint_centres(case):
+    """beta0 with one column per element, as frequentist toys draw it: the
+    profiled β and its constraint both follow each element's centres."""
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _fitter(tmp, case)
+        X = _points(f)
+        beta00 = f.bbstat.beta0.numpy()
+        beta0 = _toy_beta0(f)
+        batched = f._compute_nll_batched(tf.constant(X), beta0=tf.constant(beta0))
+        batched = batched.numpy()
+        assert np.isfinite(batched).all()
+        single = _fits_to(
+            f,
+            X,
+            lambda b: f.bbstat.set_beta0(tf.constant(beta0[..., b])),
+            lambda: f.bbstat.set_beta0(tf.constant(beta00)),
+        )
+        np.testing.assert_allclose(batched, single, rtol=RTOL, atol=0)
+        # a shared column is the stored centres for every element
+        shared = f._compute_nll_batched(
+            tf.constant(X), beta0=tf.constant(beta00[..., None])
+        )
+        np.testing.assert_allclose(
+            shared.numpy(),
+            f._compute_nll_batched(tf.constant(X)).numpy(),
+            rtol=RTOL,
+            atol=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "case", ["dense", "bbb_full_gamma", "sparse", "chisq", "bbb_full_additive"]
+)
+def test_frequentist_toys_in_one_batch(case):
+    """B frequentist toys drawn by toyassign (observations, x0 and β0 all
+    randomized) evaluated in one call equal the B fits to them."""
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _fitter(tmp, case)
+        X = _points(f)
+        state0 = (f.nobs.numpy(), f.x0.numpy(), f.bbstat.beta0.numpy(), f.x.numpy())
+        toys = []
+        tf.random.set_seed(3)
+        for _ in range(NBATCH):
+            f.toyassign(
+                syst_randomize="frequentist",
+                data_randomize="normal" if f.chisqFit else "poisson",
+            )
+            nobs = f.nobs.numpy()
+            if f.chisqFit:
+                nobs = np.maximum(nobs, 1.0)
+            toys.append((nobs, f.x0.numpy(), f.bbstat.beta0.numpy()))
+
+        def restore():
+            f.set_nobs(tf.constant(state0[0]))
+            f.x0.assign(state0[1])
+            f.bbstat.set_beta0(tf.constant(state0[2]))
+            f.x.assign(state0[3])
+
+        restore()
+        nobs, x0, beta0 = (np.stack(t, axis=-1) for t in zip(*toys))
+        assert not np.allclose(beta0[..., 0], beta0[..., 1])
+        batched = f._compute_nll_batched(
+            tf.constant(X),
+            data=tf.constant(nobs),
+            x0=tf.constant(x0),
+            beta0=tf.constant(beta0),
+        ).numpy()
+        assert np.isfinite(batched).all()
+
+        def assign(b):
+            f.set_nobs(tf.constant(nobs[:, b]))
+            f.x0.assign(x0[:, b])
+            f.bbstat.set_beta0(tf.constant(beta0[..., b]))
+
+        single = _fits_to(f, X, assign, restore)
         np.testing.assert_allclose(batched, single, rtol=RTOL, atol=0)
 
 
@@ -388,3 +570,73 @@ def test_traced_loss_keeps_the_static_batch_width(case, monkeypatch):
         outputs = yields.get_concrete_function().structured_outputs
     assert widths and set(widths) == {1}
     assert [t.shape[-1] for t in outputs] == [1, 1]
+
+
+def test_full_gamma_zero_centres_are_nan_unbatched_too():
+    """Not batching specific: gamma full mode gives a NaN likelihood where a
+    constraint centre is 0, which a frequentist toy draws for low kstat
+    (Poisson(kstat beta) / kstat). Batched and unbatched agree on it; this
+    pins the behaviour until it is fixed on its own."""
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _fitter(tmp, "bbb_full_gamma")
+        X = _points(f)[:, :1]
+        beta00 = f.bbstat.beta0.numpy()
+        beta0 = beta00.copy()
+        beta0[::5] = 0.0
+        batched = f._compute_nll_batched(
+            tf.constant(X), beta0=tf.constant(beta0[..., None])
+        ).numpy()
+        single = _fits_to(
+            f,
+            X,
+            lambda b: f.bbstat.set_beta0(tf.constant(beta0)),
+            lambda: f.bbstat.set_beta0(tf.constant(beta00)),
+        )
+        assert np.isnan(batched).all() and np.isnan(single).all()
+
+
+@pytest.mark.parametrize("case", ["dense", "bbb_full_gamma", "chisq"])
+def test_explicit_inputs_of_one_element(case):
+    """B = 1 with every per-element input given explicitly is the fit to it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _fitter(tmp, case)
+        X = _points(f)[:, 1:2]
+        state0 = (f.nobs.numpy(), f.x0.numpy(), f.bbstat.beta0.numpy())
+        nobs = np.maximum(_toy_counts(f, zeros=False)[:, :1], 1.0)
+        x0 = state0[1][:, None] + 0.3
+        beta0 = _toy_beta0(f)[..., :1]
+        batched = f._compute_nll_batched(
+            tf.constant(X),
+            data=tf.constant(nobs),
+            x0=tf.constant(x0),
+            beta0=tf.constant(beta0),
+        ).numpy()
+
+        def assign(b):
+            f.set_nobs(tf.constant(nobs[:, 0]))
+            f.x0.assign(x0[:, 0])
+            f.bbstat.set_beta0(tf.constant(beta0[..., 0]))
+
+        def restore():
+            f.set_nobs(tf.constant(state0[0]))
+            f.x0.assign(state0[1])
+            f.bbstat.set_beta0(tf.constant(state0[2]))
+
+        np.testing.assert_allclose(
+            batched, _fits_to(f, X, assign, restore), rtol=RTOL, atol=0
+        )
+
+
+def test_chisq_observations_are_checked_in_a_traced_function():
+    """Under tf.function the chi2 nobs > 0 check is an assertion op."""
+    with tempfile.TemporaryDirectory() as tmp:
+        f = _fitter(tmp, "chisq")
+        X = tf.constant(_points(f))
+        nll = tf.function(lambda X, nobs: f._compute_nll_batched(X, data=nobs))
+        good = np.maximum(_toy_counts(f, zeros=False), 1.0)
+        eager = f._compute_nll_batched(X, data=tf.constant(good)).numpy()
+        np.testing.assert_allclose(
+            nll(X, tf.constant(good)).numpy(), eager, rtol=1e-11, atol=0
+        )
+        with pytest.raises(tf.errors.InvalidArgumentError, match="nobs <= 0"):
+            nll(X, tf.constant(_toy_counts(f)))
