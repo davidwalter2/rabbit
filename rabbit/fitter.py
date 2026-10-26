@@ -4851,11 +4851,23 @@ class Fitter:
         self._scalar_hessian_fns = {}
         # tf.autodiff.ForwardAccumulator does not support tangent
         # propagation through SparseMatrixMatMul (no JVP rule for the
-        # CSR variant), so the fwdrev HVP cannot be used in sparse mode.
-        # Fall back to revrev with a warning.
-        if self.hvp_method == "fwdrev" and self.indata.sparse:
+        # CSR variant), so the fwdrev HVP cannot be used in sparse mode,
+        # nor with an external term whose Hessian is stored sparse (also
+        # contracted with it). Fall back to revrev with a warning.
+        csr_terms = [
+            t["name"]
+            for t in self.external_terms + self.mcstat_terms
+            if t["hess_csr"] is not None
+        ]
+        if self.hvp_method == "fwdrev" and (self.indata.sparse or csr_terms):
+            where = (
+                "in sparse mode"
+                if self.indata.sparse
+                else f"with external likelihood term(s) {csr_terms}, whose "
+                "Hessian is stored sparse"
+            )
             logger.warning(
-                "fwdrev HVP is not supported in sparse mode "
+                f"fwdrev HVP is not supported {where} "
                 "(tf.autodiff.ForwardAccumulator cannot trace through "
                 "tf.linalg.sparse's CSR matmul); falling back to revrev."
             )

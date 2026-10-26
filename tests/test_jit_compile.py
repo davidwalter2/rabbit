@@ -7,6 +7,9 @@ tensor with a sparse external Hessian got jit-compiled loss/grad/HVP functions
 that failed to compile on their first call. minimize() logs a minimizer
 exception as a warning, so the fit stopped at its starting point and the job
 wrote that point out as its result.
+
+The forward-mode HVP (--hvpMethod fwdrev) cannot go through the CSR matmul
+either, and failed the same way for a sparse external Hessian.
 """
 
 import logging
@@ -141,6 +144,24 @@ def test_sparse_external_hessian_fits_like_dense(reference, caplog, mode, ndevic
     msgs = jit_messages(caplog)
     assert len(msgs) == 1 and "['ext']" in msgs[0][1], msgs
     assert msgs[0][0] == (logging.WARNING if mode == "on" else logging.INFO)
+
+
+def test_fwdrev_falls_back_for_sparse_external_hessian(reference, caplog):
+    """ForwardAccumulator has no JVP rule for the CSR matmul: --hvpMethod
+    fwdrev must fall back to revrev for a sparse external Hessian, as it does
+    in sparse mode, rather than raise inside the minimizer. A dense one keeps
+    fwdrev."""
+    tmpdir, ref = reference
+    dense = build_fitter(write_tensor(tmpdir, "dense"), hvpMethod="fwdrev")
+    assert dense.loss_val_grad_hessp is dense.loss_val_grad_hessp_fwdrev
+
+    with caplog.at_level(logging.WARNING, logger="wums"):
+        f = build_fitter(write_tensor(tmpdir, "sparse"), hvpMethod="fwdrev")
+    warned = [r.getMessage() for r in caplog.records if "fwdrev" in r.getMessage()]
+    res = fit(f)
+    np.testing.assert_allclose(res["x"], ref["x"], rtol=0, atol=1e-6)
+    assert f.loss_val_grad_hessp is f.loss_val_grad_hessp_revrev
+    assert len(warned) == 1 and "['ext']" in warned[0], warned
 
 
 if __name__ == "__main__":
