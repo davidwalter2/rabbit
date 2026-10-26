@@ -4274,6 +4274,12 @@ class Fitter:
         res = tf.reshape(res, (-1, 1))
         ndf = tf.size(res) - ndf_reduction
 
+        if pseudo_inverse:
+            # the fallback is for an exactly singular covariance only: a
+            # non-finite one (e.g. NaN) still fails loudly, as the solve did
+            res_cov = tf.debugging.assert_all_finite(
+                res_cov, "chi2: the residual covariance is not finite"
+            )
         if ndf_reduction > 0 or pseudo_inverse:
             # covariance matrix is in general non invertible with ndf < n
             # compute chi2 using pseudo inverse

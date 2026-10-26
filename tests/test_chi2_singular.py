@@ -76,3 +76,15 @@ def test_singular_covariance_uses_the_pseudo_inverse(postfit):
     np.testing.assert_allclose(chi2_twice, chi2_single, rtol=1e-8)
     assert int(ndf_single) == 20
     assert int(ndf_twice) == 40  # the ndf is not changed by the fallback
+
+
+def test_pseudo_inverse_fallback_still_fails_on_a_non_finite_covariance(postfit):
+    """The fallback covers an exactly singular covariance, not a NaN one."""
+    res = tf.ones([2], dtype=postfit.indata.dtype)
+    singular = tf.ones([2, 2], dtype=postfit.indata.dtype)
+    chi2, ndf = postfit._chi2(res, singular, pseudo_inverse=True)
+    np.testing.assert_allclose(chi2, 1.0)  # [1, 1] pinv([[1, 1], [1, 1]]) [1, 1]
+    assert int(ndf) == 2
+    nan = tf.constant([[1.0, float("nan")], [float("nan"), 1.0]], dtype=res.dtype)
+    with pytest.raises(tf.errors.InvalidArgumentError, match="not finite"):
+        postfit._chi2(res, nan, pseudo_inverse=True)
