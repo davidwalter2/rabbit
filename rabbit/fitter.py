@@ -5939,6 +5939,15 @@ class Fitter:
                 # no need to do a minimization, simple matrix solve is sufficient
                 val, grad, hess = self.loss_val_grad_hess()
 
+                # A frozen parameter's Hessian row and column are exactly zero
+                # (tf.stop_gradient), so no Cholesky of the full matrix exists:
+                # solve on the floating block (see FloatingCoordinates).
+                floating = FloatingCoordinates(
+                    self.floating_indices if len(self.frozen_params) else None
+                )
+                grad = floating.restrict(grad)
+                hess = floating.restrict_hess(hess)
+
                 # use a Cholesky decomposition to easily detect the non-positive-definite case
                 chol = tf.linalg.cholesky(hess)
 
@@ -5953,6 +5962,10 @@ class Fitter:
                 dx = tf.linalg.cholesky_solve(chol, -gradv)[:, 0]
                 del chol
 
+                if floating.idx is not None:
+                    dx = tf.scatter_nd(
+                        floating.idx[:, None], dx, tf.shape(self.x, out_type=tf.int64)
+                    )
                 self.x.assign_add(dx)
             else:
                 # --noHessian: we must not allocate the dense [npar, npar]

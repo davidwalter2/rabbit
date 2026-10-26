@@ -9,19 +9,21 @@ down. A likelihood scan then came out flat (2dNLL ~ 0 where the profile is up
 to 10) with every point at maxiter; dogleg's Cholesky failed on the same
 Hessian and its scan points were not minimised at all. These tests pin down
 that the scanned parameter stays exactly at the scan value and that the
-profile is trust-krylov's, which never moved it.
+profile is trust-krylov's, which never moved it. The closed-form solve of a
+quadratic likelihood factorises the same Hessian and failed outright.
 """
 
+import os
 import tempfile
 
 import numpy as np
 import pytest
 
-from rabbit import fitter, inputdata
+from rabbit import fitter, inputdata, tensorwriter
 from rabbit.param_models.helpers import load_model
 from rabbit.tfhelpers import edmval_cov
 
-from .test_sparse_fit import make_options, make_test_tensor
+from .test_sparse_fit import make_histograms, make_options, make_test_tensor
 
 SCAN_POINTS = 7
 SCAN_RANGE = 2.0
@@ -114,3 +116,49 @@ def test_freeze_parameters_option(tensor, method):
     # and the floating parameters are at their profile minimum
     _, grad = f.loss_val_grad()
     assert np.max(np.abs(grad.numpy()[f.floating_indices])) < 1e-4
+
+
+def _linear_tensor(outdir):
+    """Normal (additive) symmetric systematics: with chisqFit and a linear POI
+    the likelihood is quadratic and minimize() solves it in closed form."""
+    h = make_histograms()
+    writer = tensorwriter.TensorWriter(systematic_type="normal")
+    writer.add_channel(h["data"].axes, "ch0")
+    writer.add_data(h["data"], "ch0")
+    writer.add_process(h["sig"], "sig", "ch0", signal=True)
+    writer.add_process(h["bkg"], "bkg", "ch0")
+    writer.add_norm_systematic("bkg_norm", "bkg", "ch0", 1.05)
+    writer.add_systematic(
+        [h["syst_up"], h["syst_dn"]], "bkg_shape", "bkg", "ch0", symmetrize="average"
+    )
+    writer.write(outfolder=outdir, outfilename="linear")
+    return os.path.join(outdir, "linear.hdf5")
+
+
+@pytest.mark.parametrize("noHessian", [False, True])
+def test_linear_solve_keeps_the_frozen_parameter(noHessian):
+    """The Cholesky (and the --noHessian CG) solve on the floating block."""
+    with tempfile.TemporaryDirectory() as outdir:
+        indata_obj = inputdata.FitInputData(_linear_tensor(outdir))
+        param_model = load_model("Mu", indata_obj, allowNegativeParam=True)
+        f = fitter.Fitter(
+            indata_obj,
+            param_model,
+            make_options(
+                chisqFit=True,
+                noBinByBinStat=True,
+                noHessian=noHessian,
+                freezeParameters=["bkg_norm"],
+            ),
+        )
+        assert f.is_linear
+        f.set_nobs(indata_obj.data_obs)
+        idx = int(np.where(f.parms.astype(str) == "bkg_norm")[0][0])
+        x = f.x.numpy().copy()
+        x[idx] = 0.5
+        f.x.assign(x)
+        f.minimize()
+        assert f.x.numpy()[idx] == 0.5
+        # one exact Newton step: the floating gradient vanishes
+        _, grad = f.loss_val_grad()
+        assert np.max(np.abs(grad.numpy()[f.floating_indices])) < 1e-6
