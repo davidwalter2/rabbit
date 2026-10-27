@@ -32,6 +32,7 @@ from rabbit import tfhelpers as tfh
 from rabbit.param_models.helpers import load_model
 from rabbit.param_models.param_model import Mu, compute_batched
 
+from .mcstat_helpers import fit_toy, make_small_fold_toy
 from .test_sparse_fit import make_histograms, make_options
 
 NBATCH = 4
@@ -489,12 +490,70 @@ def test_mthetaalpha_keeps_the_column_count_without_systematics(symmetric):
     assert single.shape == (0, 1)
 
 
-def test_mcstat_terms_refuse_the_batched_core(monkeypatch):
+@pytest.mark.parametrize("own_only", ["mcstat", "regularizers"])
+def test_own_point_terms_refuse_the_batched_core(own_only, monkeypatch):
+    """The MC-stat de-biasing terms and the regularization penalties are
+    built from self.x: an explicit point, even of one element, is refused."""
     with tempfile.TemporaryDirectory() as tmp:
         f = _fitter(tmp, "dense")
-        monkeypatch.setattr(f, "_mcstat_terms_in_nll", lambda: True)
+        if own_only == "mcstat":
+            monkeypatch.setattr(f, "_mcstat_terms_in_nll", lambda: True)
+        else:
+            monkeypatch.setattr(f, "regularizers", [object()])
+        for X in (_points(f), f.x.numpy()[:, None]):
+            with pytest.raises(NotImplementedError):
+                f._compute_nll_batched(tf.constant(X))
+
+
+@pytest.mark.parametrize(
+    "bbb",
+    [
+        ["--noBinByBinStat"],
+        ["--binByBinStatType", "normal-additive", "--binByBinStatDynamic"],
+    ],
+    ids=["no-bbb", "nadd-dynamic"],
+)
+def test_kfold_nll_is_the_sum_of_its_components(bbb, tmp_path):
+    """With k-fold MC-stat de-biasing active, _compute_nll is the sum of the
+    terms of _compute_nll_components (the jackknife data term among them),
+    and only the fitter's own point and inputs are accepted."""
+    fn, _ = make_small_fold_toy(tmp_path, 4)
+    f = fit_toy(
+        fn,
+        tmp_path,
+        "--chisqFit",
+        "--allowNegativeParam",
+        "--mcStatDebias",
+        "kfold",
+        *bbb,
+    )
+    assert f._fold_debias_active()
+    f.x.assign(1.1 * f.x)  # off the minimum
+    for full_nll in (False, True):
+        ln, lc, lbeta, lpenalty, lext, lmcstat, _ = f._compute_nll_components(
+            full_nll=full_nll
+        )
+        assert (lbeta is None) == (bbb == ["--noBinByBinStat"])
+        terms = [t for t in (ln, lc, lbeta, lpenalty, lext, lmcstat) if t is not None]
+        assert lmcstat is not None
+        assert all(t.shape == (1,) for t in terms)
+        np.testing.assert_allclose(
+            f._compute_nll(full_nll=full_nll).numpy(),
+            sum(float(t[0]) for t in terms),
+            rtol=1e-12,
+        )
+    # the data term is the jackknife combination, not the plain one
+    nexp = f._compute_yields_with_beta(compute_norm=False, full=False)[0]
+    assert not np.isclose(float(ln[0]), float(f._compute_ln(nexp, True)))
+
+    own = dict(
+        x=tf.constant(f.x.numpy()[:, None]),
+        data=tf.convert_to_tensor(f.nobs)[:, None],
+        x0=tf.convert_to_tensor(f.x0)[:, None],
+    )
+    for name, value in own.items():
         with pytest.raises(NotImplementedError):
-            f._compute_nll_batched(tf.constant(_points(f)))
+            f._compute_nll_batched(**{name: value})
 
 
 def test_param_model_compute_batched_is_compute_per_column():

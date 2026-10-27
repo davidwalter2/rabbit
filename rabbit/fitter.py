@@ -4569,15 +4569,54 @@ class Fitter:
                 ln = tf.reduce_sum(-nobs * (lognexp - lognobs) + nexp - nobs, axis=0)
         return ln
 
-    def _compute_nll_components(self, profile=True, full_nll=False):
-        nexpfullcentral, _, beta = self._compute_yields_with_beta(
+    def _compute_nll_components(
+        self, x=None, data=None, x0=None, beta0=None, profile=True, full_nll=False
+    ):
+        """The terms of the negative log-likelihood, each [B] or None, at the B
+        columns of x [npar, B]: (ln, lc, lbeta, lpenalty, lext, lmcstat, beta).
+
+        x=None is the fitter's own point (self.x as one column). Per-element
+        inputs, each with the batch axis last and of size 1 when all elements
+        share it (default: the fitter's own, as for a fit):
+        - data: the observed counts nobs [nbins, .], or (nobs, variances) with
+          the chi2 data variances; the data term is derived from them as
+          set_nobs does (_observations);
+        - x0 [npar, .]: the constraint centres;
+        - beta0 [.., .]: the bin-by-bin stat constraint centres, of the β shape
+          (bbstat.beta_shape: [nbinsfull] in lite mode, [nbinsfull, nproc] in
+          full mode, masked channels included).
+        A frequentist toy changes all three, a Bayesian toy only data. The
+        batch axis goes last throughout, so B = 1 runs the same operations as
+        an unbatched evaluation.
+
+        The regularization penalties and the MC-stat de-biasing terms (the
+        cross-fit jackknife, _compute_mcstat_penalty) are built from self.x and
+        the fitter's own observations, so they are only defined at the
+        fitter's own point with its own inputs; elsewhere they are refused.
+        """
+        if (
+            x is not None or data is not None or x0 is not None or beta0 is not None
+        ) and (len(self.regularizers) or self._mcstat_terms_in_nll()):
+            raise NotImplementedError(
+                "The regularization penalties and the MC-stat de-biasing terms "
+                "are defined at the fitter's own point and inputs only."
+            )
+        if x is None:
+            x = self.x[:, None]
+        if data is not None:
+            data = self._observations(
+                *(data if isinstance(data, (tuple, list)) else (data,))
+            )
+        nexpfullcentral, _, beta = self._compute_yields_with_beta_batched(
+            x,
+            data,
             profile=profile,
             compute_norm=False,
             # only build the full (masked-channel-inclusive) yields if some
             # regularizer actually reads them
             full=self._regularizers_need_observables(),
+            beta0=beta0,
         )
-
         nexp = nexpfullcentral[: self.indata.nbins]
 
         if self._fold_debias_active():
@@ -4587,24 +4626,41 @@ class Fitter:
             # so this de-biases the point (gradient = cross-fit score) and the
             # curvature (cross-half Fisher) regardless of nonlinearity; each
             # term carries its own bin-by-bin stat beta and constraint
-            # (_jackknife_terms), weighted like its data term.
-            terms = self._jackknife_terms(nexp, beta, profile=profile)
-            ln = tf.add_n([c * self._compute_ln(n, full_nll) for n, c, _ in terms])
+            # (_jackknife_terms), weighted like its data term. Own point only,
+            # B = 1.
+            terms = self._jackknife_terms(
+                nexp[:, 0], None if beta is None else beta[..., 0], profile=profile
+            )
+            ln = tf.add_n([c * self._compute_ln(n, full_nll) for n, c, _ in terms])[
+                None
+            ]
             lbeta = None
             if self.bbstat.enabled:
                 lbeta = tf.add_n(
                     [c * self._compute_lbeta(b, full_nll) for _, c, b in terms]
-                )
+                )[None]
         else:
-            ln = self._compute_ln(nexp, full_nll)
-            lbeta = self._compute_lbeta(beta, full_nll)
+            ln = self._compute_ln_batched(nexp, data, full_nll)
+            lbeta = self._compute_lbeta_batched(beta, full_nll, beta0=beta0)
 
         # lc (theta priors) is counted once.
-        lc = self._compute_lc(full_nll)
+        lc = self._compute_lc_batched(x, x0, full_nll)
 
-        lpenalty = self._compute_lpenalty(nexpfullcentral)
+        # None without regularizers; own point only, B = 1
+        lpenalty = None
+        if len(self.regularizers):
+            lpenalty = self._compute_lpenalty(nexpfullcentral[:, 0])[None]
 
-        return ln, lc, lbeta, lpenalty, beta
+        lext = external_likelihood.compute_external_nll(
+            self.external_terms, x, self.indata.dtype, full_nll=full_nll
+        )
+
+        # None unless de-biasing; own point only, B = 1
+        lmcstat = self._compute_mcstat_penalty(full_nll=full_nll)
+        if lmcstat is not None:
+            lmcstat = lmcstat[None]
+
+        return ln, lc, lbeta, lpenalty, lext, lmcstat, beta
 
     def _compute_lpenalty(self, nexpfullcentral, x=None):
         """Sum of the regularization penalties (None without regularizers);
@@ -4647,8 +4703,9 @@ class Fitter:
     def _mcstat_terms_in_nll(self):
         """Whether the NLL carries MC-stat de-biasing terms: the cross-fit
         jackknife (_jackknife_terms) or _compute_mcstat_penalty. Their fold and
-        half yields and compensators are built from self.x, so the batched
-        likelihood does not cover them."""
+        half yields and compensators are built from self.x, so
+        _compute_nll_components refuses any point or inputs but the fitter's
+        own while they are active."""
         if self._fold_debias_active():
             return True
         if self._mcstat_debias_suspended:
@@ -4660,96 +4717,22 @@ class Fitter:
         )
 
     def _compute_nll_batched(
-        self, x, data=None, x0=None, beta0=None, profile=True, full_nll=False
+        self, x=None, data=None, x0=None, beta0=None, profile=True, full_nll=False
     ):
-        """Negative log-likelihood [B] at the B columns of x [npar, B].
-
-        The core of the likelihood: _compute_nll is this at self.x[:, None].
-        Per-element inputs, each with the batch axis last and of size 1 when
-        all elements share it (default: the fitter's own, as for a fit):
-        - data: the observed counts nobs [nbins, .], or (nobs, variances) with
-          the chi2 data variances; the data term is derived from them as
-          set_nobs does (_observations);
-        - x0 [npar, .]: the constraint centres;
-        - beta0 [.., .]: the bin-by-bin stat constraint centres, of the β shape
-          (bbstat.beta_shape: [nbinsfull] in lite mode, [nbinsfull, nproc] in
-          full mode, masked channels included).
-        A frequentist toy changes all three, a Bayesian toy only data. The
-        batch axis goes last throughout, so B = 1 runs the same operations as
-        an unbatched evaluation.
-
-        Not batched yet: the regularization penalties (B = 1 only) and the
-        MC-stat de-biasing terms (none; _compute_nll keeps them).
-        """
-        if self._mcstat_terms_in_nll():
-            raise NotImplementedError(
-                "The MC-stat de-biasing terms are evaluated at self.x only; "
-                "use _compute_nll."
-            )
-        if len(self.regularizers) and x.shape[-1] != 1:
-            raise NotImplementedError("Regularizers support a batch of 1 only.")
-
-        if data is not None:
-            data = self._observations(
-                *(data if isinstance(data, (tuple, list)) else (data,))
-            )
-        nexpfullcentral, _, beta = self._compute_yields_with_beta_batched(
-            x,
-            data,
-            profile=profile,
-            compute_norm=False,
-            # only build the full (masked-channel-inclusive) yields if some
-            # regularizer actually reads them
-            full=self._regularizers_need_observables(),
-            beta0=beta0,
+        """Negative log-likelihood [B] at the B columns of x [npar, B]: the sum
+        of the terms of _compute_nll_components (see there for the inputs).
+        _compute_nll is this at the fitter's own point."""
+        ln, lc, *rest, _ = self._compute_nll_components(
+            x, data=data, x0=x0, beta0=beta0, profile=profile, full_nll=full_nll
         )
-        nexp = nexpfullcentral[: self.indata.nbins]
-
-        l = self._compute_ln_batched(nexp, data, full_nll) + self._compute_lc_batched(
-            x, x0, full_nll
-        )
-
-        lbeta = self._compute_lbeta_batched(beta, full_nll, beta0=beta0)
-        if lbeta is not None:
-            l = l + lbeta
-
-        if len(self.regularizers):
-            l = l + self._compute_lpenalty(nexpfullcentral[:, 0], x=self.get_x(x)[:, 0])
-
-        lext = external_likelihood.compute_external_nll(
-            self.external_terms, x, self.indata.dtype, full_nll=full_nll
-        )
-        if lext is not None:
-            l = l + lext
+        l = ln + lc  # main's order of summation, so B = 1 stays as it is
+        for t in rest:
+            if t is not None:
+                l = l + t
         return l
 
     def _compute_nll(self, profile=True, full_nll=False):
-        if not self._mcstat_terms_in_nll():
-            return self._compute_nll_batched(
-                self.x[:, None], profile=profile, full_nll=full_nll
-            )[0]
-
-        # MC-stat de-biasing: the same terms, combined with the de-biasing
-        # ones at self.x
-        ln, lc, lbeta, lpenalty, beta = self._compute_nll_components(
-            profile=profile, full_nll=full_nll
-        )
-        l = ln + lc
-
-        if lbeta is not None:
-            l = l + lbeta
-
-        if lpenalty is not None:
-            l = l + lpenalty
-
-        lext = self._compute_external_nll(full_nll=full_nll)
-        if lext is not None:
-            l = l + lext
-
-        lmcstat = self._compute_mcstat_penalty(full_nll=full_nll)
-        if lmcstat is not None:
-            l = l + lmcstat
-        return l
+        return self._compute_nll_batched(profile=profile, full_nll=full_nll)[0]
 
     def _compute_mcstat_penalty(self, full_nll=False):
         """The MC-stat de-biasing terms outside the data term: the continuous-M
