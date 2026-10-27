@@ -1763,8 +1763,8 @@ def main():
                     ifitter.set_nobs(ifitter.expected_yield())
                 else:
                     if ifit == 0:
-                        # the chi2 fit takes the data variances, as the toys
-                        # do (None: Poisson, i.e. the data themselves)
+                        # with its data variances, as the toys: the chi2
+                        # variances of --chisqVariance data (None: Poisson)
                         ifitter.set_nobs(data_values, data_variances)
                     elif ifit >= 1:
                         group.append(f"toy{ifit}")
