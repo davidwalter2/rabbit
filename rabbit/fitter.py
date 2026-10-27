@@ -44,6 +44,99 @@ logger = logging.child_logger(__name__)
 # contour_scan validation.
 CONTOUR_HESS_MODES = ("exact", "hvp", "frozen", "bfgs", "sr1")
 
+# Relative cutoff of chi2_pseudo_inverse: a direction of the residual correlation
+# matrix whose eigenvalue is at most this times the largest one has no variance.
+CHI2_RTOL = 1e-10
+
+
+def chi2_pseudo_inverse(res, res_cov, ndf_reduction=0, rtol=CHI2_RTOL):
+    """chi2 = r^T C^+ r of residuals r with covariance C, and ndf = rank C.
+
+    Residuals can obey exact linear identities: two projections of one channel
+    have the same total, a normalized distribution sums to one, and the postfit
+    residuals of the ABCD model sum to zero over each pair of A and B bins and
+    over all bins. C is then exactly singular: its null eigenvalues are rounding
+    noise of either sign, and so are the components of r along them. A solve
+    divides one by the other, so its chi2 depends on the last bits of the
+    inputs, or it fails. These directions carry no information and are dropped:
+
+    * C is symmetrized and scaled to unit diagonal, so that the cutoff is
+      relative to the variances of the residuals themselves, whatever their
+      units (a composite of a normalized distribution and event counts spans
+      many orders of magnitude). Variances below eps times the largest one are
+      not scaled up beyond it: they are rounding noise of a zero variance.
+    * Directions with an eigenvalue at most max(rtol, 100 n eps) times the
+      largest one are dropped.
+    * chi2 sums the squared components of r over the eigenvalues of the kept
+      directions, and ndf is their number: a Gaussian r with a covariance of
+      rank k has r^T C^+ r ~ chi2(k), whatever its size. For a regular C this
+      is r^T C^-1 r with ndf = n.
+
+    The identities a mapping declares (ndf_reduction, e.g. the normalization of
+    Normalize) are null directions and found as such; the argument is only
+    compared with what is found.
+
+    Non-finite residuals or covariance raise: they are a bug or an ill-defined
+    mapping (e.g. 0/0 in a ratio), not a singular covariance, and a NaN chi2
+    would pass unnoticed into the output.
+
+    The decomposition runs on the host (LAPACK): for 500 to 5000 residuals
+    tf.linalg.eigh is 15 to 60 times slower, while numpy's takes 6 to 1.2 times
+    as long as tf.linalg.solve (0.24 s for 2000).
+    """
+    r = np.asarray(res).reshape(-1)
+    n = r.size
+    if n == 0:
+        return 0.0, 0
+    cov = np.asarray(res_cov).reshape(n, n)
+    for what, value in (("residuals are", r), ("residual covariance is", cov)):
+        if not np.all(np.isfinite(value)):
+            raise ValueError(
+                f"chi2: the {what} not finite "
+                f"({np.count_nonzero(~np.isfinite(value))} of {value.size} entries); "
+                "--noChi2 skips the chi2 of the mappings"
+            )
+
+    cov = 0.5 * (cov + cov.T)
+    var = np.diag(cov)
+    vmax = np.max(var)
+    if vmax <= 0:
+        if np.any(r != 0):
+            logger.warning("chi2: residuals without any variance, left out.")
+        return 0.0, 0
+
+    eps = np.finfo(cov.dtype).eps
+    scale = 1.0 / np.sqrt(np.maximum(var, eps * vmax))
+    lam, vecs = np.linalg.eigh(scale[:, None] * cov * scale[None, :])
+    z = vecs.T @ (scale * r)
+
+    tol = max(rtol, 100 * n * eps) * lam[-1]
+    keep = lam > tol
+    ndf = int(np.count_nonzero(keep))
+
+    if lam[0] < -tol:
+        logger.warning(
+            "chi2: the residual covariance has an eigenvalue of "
+            f"{lam[0] / lam[-1]:.3g} relative to the largest one, so it is not "
+            "positive semi-definite to the precision of the rank cutoff, and the "
+            "chi2 may not be stable."
+        )
+    if np.any(np.square(z[~keep]) > 1.0):
+        logger.warning(
+            "chi2: the residuals have a component of up to "
+            f"{np.max(np.abs(z[~keep])):.3g} (in units of their own standard "
+            "deviations) along directions without variance, which is left out: "
+            "they violate an exact identity of their covariance."
+        )
+    if n - ndf < ndf_reduction:
+        logger.debug(
+            f"chi2: {ndf_reduction} identities declared, but the residual "
+            f"covariance has rank {ndf} of {n}"
+        )
+
+    chi2_value = float(np.sum(np.square(z[keep]) / lam[keep]))
+    return chi2_value, ndf
+
 
 def make_fitter(indata, param_model, options, **kwargs):
     """Construct the Fitter appropriate for the requested device count.
@@ -4376,34 +4469,18 @@ class Fitter:
         res_cov = pred_cov + data_cov
         return residuals, res_cov
 
-    def _chi2(self, res, res_cov, ndf_reduction=0, pseudo_inverse=False):
-        res = tf.reshape(res, (-1, 1))
-        ndf = tf.size(res) - ndf_reduction
-
-        if pseudo_inverse:
-            # the fallback is for an exactly singular covariance only: a
-            # non-finite one (e.g. NaN) still fails loudly, as the solve did
-            res_cov = tf.debugging.assert_all_finite(
-                res_cov, "chi2: the residual covariance is not finite"
-            )
-        if ndf_reduction > 0 or pseudo_inverse:
-            # covariance matrix is in general non invertible with ndf < n
-            # compute chi2 using pseudo inverse
-            chi_square_value = tf.transpose(res) @ tf.linalg.pinv(res_cov) @ res
-        else:
-            chi_square_value = tf.transpose(res) @ tf.linalg.solve(res_cov, res)
-
-        return tf.squeeze(chi_square_value), ndf
-
     @tf.function
-    def chi2(
-        self, fun, fun_data=None, ndf_reduction=0, profile=False, pseudo_inverse=False
-    ):
+    def residuals(self, fun, fun_data=None, profile=False):
+        """Residuals (prediction - data) of a mapping and their covariance."""
         if profile:
-            residuals, res_cov = self._residuals_profiled(fun)
-        else:
-            residuals, res_cov = self._residuals(fun, fun_data)
-        return self._chi2(residuals, res_cov, ndf_reduction, pseudo_inverse)
+            return self._residuals_profiled(fun)
+        return self._residuals(fun, fun_data)
+
+    def chi2(self, fun, fun_data=None, ndf_reduction=0, profile=False):
+        """chi2 of the residuals of a mapping and its ndf, the rank of their
+        covariance (see chi2_pseudo_inverse)."""
+        residuals, res_cov = self.residuals(fun, fun_data, profile)
+        return chi2_pseudo_inverse(residuals.numpy(), res_cov.numpy(), ndf_reduction)
 
     def expected_events(
         self,
@@ -4463,16 +4540,14 @@ class Fitter:
             )
 
         if compute_chi2:
-            chi2_args = (mapping.compute_flat, mapping._get_data, mapping.ndf_reduction)
-            try:
-                chi2val, ndf = self.chi2(*chi2_args, profile=profile)
-            except tf.errors.InvalidArgumentError:
-                # The residual covariance is exactly singular when the mapped bins obey
-                # an exact linear relation (e.g. two projections of one channel), and
-                # the solve can then fail depending on rounding: use the pseudo inverse.
-                chi2val, ndf = self.chi2(
-                    *chi2_args, profile=profile, pseudo_inverse=True
-                )
+            # an exactly singular residual covariance (mapped bins obeying an exact
+            # linear relation) is handled by the rank-revealing chi2 itself
+            chi2val, ndf = self.chi2(
+                mapping.compute_flat,
+                mapping._get_data,
+                mapping.ndf_reduction,
+                profile=profile,
+            )
             aux.append(chi2val)
             aux.append(ndf)
         else:
