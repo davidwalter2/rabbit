@@ -5342,7 +5342,12 @@ class Fitter:
         """One minimisation from self.x. tc_start (trust-constr + --constraints
         only): "cold" = scipy's interior-point start with rabbit's
         keep_feasible rule; "warm" = no row held, slacks at c - lb, centred
-        barrier; "release" = no row held, scipy's start (last resort)."""
+        barrier; "release" = no row held, scipy's start (last resort).
+
+        A minimizer that raises leaves the fit at the last accepted iterate,
+        or where an earlier round stalled (status -3). Only if the first round
+        raises before accepting a step is there nothing to keep: this raises
+        RuntimeError then, chained to the error, with self.x at the start."""
         logger.info("Perform iterative fit")
 
         # Optional reparameterisation. Built once at the starting point, it is
@@ -5571,6 +5576,9 @@ class Fitter:
         attempt = 0
         # how the loop ended on a stall, for the minimizer status message
         stall_exit = None
+        # where the first round starts: a minimizer that raises there, before
+        # accepting a step, leaves nothing to keep
+        xval_start = xval
 
         # to_physical is the whole reason this is built here rather than in the
         # callback: under preconditioning the minimiser's iterate is in internal
@@ -5655,13 +5663,39 @@ class Fitter:
                     # thus leaves a minimizer status, as a normal return does.
                     self.minimizer_result = cb.stopped_result(ex)
                     if not cb.stopped_early:
-                        # a real failure, not a stall: surface it rather than
-                        # letting a broken callback look like a converged fit
-                        logger.warning(f"Minimizer raised: {ex}")
-                        # the expensive case: a failure here used to discard the
-                        # whole fit, however close to the minimum it had got
+                        # a real failure, not a stall. Snapshot first: a failure
+                        # here used to discard the whole fit, however close to
+                        # the minimum it had got.
                         snapshotter.save(
                             cb.xval, "minimizer-failed", error=str(ex)[:200]
+                        )
+                        # A later round keeps what the earlier ones reached
+                        # (they ended by a stall, a result in itself). The
+                        # first one has nothing to keep if it never accepted
+                        # a step -- not if it merely iterated: the callback
+                        # also runs on rejected steps, but its x only moves on
+                        # accepted ones. Carrying on would then report the
+                        # start point as the fit result, with no error, and an
+                        # error before the first step is almost always
+                        # systematic (an op the backend cannot run, a loss
+                        # that cannot be evaluated at the start).
+                        if attempt == 0 and np.array_equal(xval, xval_start):
+                            self.minimizer_result.message += (
+                                "; it never accepted a step, so the fit has no "
+                                "result."
+                            )
+                            self.minimizer_result.restarts = attempt
+                            self.x.assign(pc_cell[0].to_physical(xval))
+                            raise RuntimeError(self.minimizer_result.message) from ex
+                        self.minimizer_result.message += (
+                            "; kept the last accepted iterate."
+                        )
+                        # recover, but say so: the postfit is computed at that
+                        # iterate, and its EDM tells whether it is a minimum
+                        logger.warning(
+                            f"{self.minimizer_result.message} The results are "
+                            "computed there; its EDM tells whether it is a "
+                            "minimum."
                         )
                     logger.debug(ex)
                 else:
@@ -5752,7 +5786,9 @@ class Fitter:
         success False and status -2 for an --earlyStopping stop (the message
         says how the restarts ended) or -3 for a minimizer that raised, with
         nit (and nfev where the method reports it, else -1) at the last
-        accepted iterate. ``restarts`` counts the rounds before the last one,
+        accepted iterate. If the first round raised before accepting a step
+        there is no result, and :meth:`fit` raises instead; the status -3 is
+        still recorded. ``restarts`` counts the rounds before the last one,
         each ended by a stall; nit and nfev cover the last round only.
         """
         res = self.minimizer_result

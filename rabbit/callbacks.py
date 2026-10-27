@@ -191,7 +191,8 @@ class FitterCallback:
         for a converged trust-region fit to end. The fitter keeps the last
         accepted iterate, so nit (and for trust-constr nfev and the KKT
         measures) are those of that iterate. The other methods pass the
-        callback no evaluation count: nfev is -1, unknown.
+        callback no evaluation count: nfev is -1, unknown. The message says
+        what stopped the round; the fitter appends what it did about it.
         """
         if self.stopped_early:
             status, message = STATUS_STOPPED_EARLY, str(ex)
@@ -199,7 +200,7 @@ class FitterCallback:
             status = STATUS_MINIMIZER_RAISED
             text = str(ex)[:200]
             what = f"{type(ex).__name__}: {text}" if text else type(ex).__name__
-            message = f"Minimizer raised {what}; kept the last accepted iterate."
+            message = f"Minimizer raised {what}"
         if self.last_state is None:
             state = dict(nit=self.iiter, nfev=-1)
         else:
