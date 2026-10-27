@@ -341,26 +341,25 @@ class BinByBinStat:
             )
 
     def randomize_postfit(self):
-        """Postfit toy: randomize β around β0 using a normal with stddev
-        ``sqrt(varbeta)``.
+        """Starting-point toy: randomize β around β0 with a normal of the
+        width of its constraint (:meth:`_constraint_width`), independently
+        per entry.
 
         Used by :meth:`Fitter.toyassign` when ``randomize_parameters=True``
-        — i.e., when the toy-throwing routine wants to perturb β alongside
-        the fit parameters ``x``. No-op when BBB is disabled.
-
-        Note: type-agnostic (unlike :meth:`randomize_bayes`); always uses
-        the normal-multiplicative-form stddev. Preserves the legacy
-        behaviour from ``Fitter.toyassign`` and is correct in expectation
-        for ``normal-multiplicative``; the gamma and normal-additive cases
-        re-use the same approximation as before.
+        (--toysRandomizeParameters), which randomizes the starting values of
+        the fit parameters ``x`` alike. A profiled fit does not read the
+        starting β; the predictions without profiling (e.g. the prefit
+        histograms of the toy) do. For gamma the normal can draw β < 0 where
+        kstat·β0 is small (probability Φ(-sqrt(kstat·β0))). No-op when BBB
+        is disabled.
         """
         if not self.enabled:
             return
         self.beta.assign(
             tf.random.normal(
-                shape=[],
+                shape=tf.shape(self.beta0),
                 mean=self.beta0,
-                stddev=tf.sqrt(self.varbeta),
+                stddev=self._constraint_width(),
                 dtype=self.beta.dtype,
             )
         )

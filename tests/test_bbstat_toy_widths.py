@@ -135,6 +135,31 @@ def test_normal_draws_are_independent(stat_type, mode, randomize):
     assert np.abs(offdiag).max() < 0.1
 
 
+@pytest.mark.parametrize("mode", ["full", "lite"])
+@pytest.mark.parametrize("stat_type", TYPES)
+def test_starting_values(stat_type, mode):
+    """--toysRandomizeParameters: beta around beta0 with the width of its
+    constraint at its minimum (it drew with sqrt(varbeta) for every type),
+    each entry independently; masked entries keep beta0."""
+    bb = _bbstat(stat_type, mode)
+    kstat = bb.kstat.numpy()
+    beta0 = bb.default_beta0().numpy()
+    width = {
+        "gamma": np.sqrt(beta0 / kstat),
+        "normal-multiplicative": 1.0 / np.sqrt(kstat),
+        "normal-additive": np.ones_like(kstat),
+    }[stat_type]
+    draws = _draws(bb, bb.randomize_postfit, bb.beta)
+    mask = bb.betamask.numpy()
+    if stat_type != "normal-additive":
+        assert (draws[:, mask] == beta0[mask][None]).all()
+    _check_spread(bb, stat_type, draws, beta0, width)
+    flat = draws.reshape(NDRAW, -1)
+    flat = flat[:, flat.std(axis=0) > 0.0]
+    corr = np.corrcoef(flat.T)
+    assert np.abs(corr[~np.eye(len(corr), dtype=bool)]).max() < 0.1
+
+
 # Seven bins of a "sig" with weight 2 (kstat 10 to 100) and a "bkg" with
 # weight 1 (kstat 150), data at the nominal yields.
 FIT_NSIG = np.array([10.0, 30.0, 60.0, 100.0, 60.0, 30.0, 10.0])
