@@ -66,18 +66,21 @@ def test_duplicated_projection_counts_once(postfit):
         [single, mh.load_mapping("Project", f.indata, "ch0", "x")]
     )
 
-    # the duplicated covariance [[C, C], [C, C]] has the rank of C
+    # the postfit residuals of all bins lose the direction the free signal
+    # strength absorbs, and the duplicated covariance [[C, C], [C, C]] has the
+    # rank of C
+    ndf = 20 - f.nfreeparms
     _, cov = f.residuals(twice.compute_flat, twice._get_data, profile=True)
-    lam = np.linalg.eigvalsh(cov.numpy())
-    assert np.count_nonzero(lam > 1e-10 * lam[-1]) == 20
+    lam = np.linalg.eigvalsh(cov)
+    assert np.count_nonzero(lam > 1e-10 * lam[-1]) == ndf
 
     _, (*_, chi2_single, ndf_single) = f.expected_events(single, compute_chi2=True)
     _, (*_, chi2_twice, ndf_twice) = f.expected_events(twice, compute_chi2=True)
 
-    # [r, r]^T pinv([[C, C], [C, C]]) [r, r] = r^T C^-1 r
+    # [r, r]^T pinv([[C, C], [C, C]]) [r, r] = r^T C^+ r
     np.testing.assert_allclose(chi2_twice, chi2_single, rtol=1e-8)
-    assert int(ndf_single) == 20
-    assert int(ndf_twice) == 20  # the rank: the duplicate adds no information
+    assert int(ndf_single) == ndf == 19
+    assert int(ndf_twice) == ndf  # the rank: the duplicate adds no information
 
 
 def test_a_singular_but_not_a_non_finite_covariance():

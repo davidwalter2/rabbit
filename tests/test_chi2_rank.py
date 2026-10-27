@@ -7,7 +7,9 @@ and over all bins. The null eigenvalues are then rounding noise, and a solve
 gave a chi2 that depended on the last bits of the parameters (the CI ABCD fit:
 1.76 to 1.89 for shifts of 1e-14 sigma) or failed (two projections of one
 channel). chi2_pseudo_inverse drops these directions and counts the others
-as the ndf.
+as the ndf. Postfit, the covariance is the fit's response to its inputs, which
+also nulls the directions the free parameters absorb (more in
+tests/test_chi2_fit_response.py).
 """
 
 import os
@@ -126,11 +128,13 @@ def _postfit(f):
     f.cov.assign(cov)
 
 
-def make_abcd_tensor(outdir):
+def make_abcd_tensor(outdir, n_pt=5):
     """The CI ABCD tensor, tests/make_abcd_tensor.py: four regions of five pt
-    bins, nonprompt in all of them and signal in C and D."""
+    bins, nonprompt in all of them and signal in C and D. More pt bins keep the
+    events per bin."""
     rng = np.random.default_rng(42)
-    ax_pt = hist.axis.Regular(5, 0, 50, name="pt")
+    ax_pt = hist.axis.Regular(n_pt, 0, 50, name="pt")
+    scale = n_pt // 5
 
     def make_hist(n_events, mean_weight):
         h = hist.Hist(ax_pt, storage=hist.storage.Weight())
@@ -144,12 +148,12 @@ def make_abcd_tensor(outdir):
         h.view()[:] = rng.poisson(np.maximum(sig + bkg_h.values(), 0))
         return h
 
-    sig = {r: make_hist(5000, 1.0) for r in "CD"}
+    sig = {r: make_hist(5000 * scale, 1.0) for r in "CD"}
     npr = {
-        "A": make_hist(8000, 2.0),
-        "B": make_hist(8000, 4.0),
-        "C": make_hist(6000, 1.5),
-        "D": make_hist(3000, 0.75),
+        "A": make_hist(8000 * scale, 2.0),
+        "B": make_hist(8000 * scale, 4.0),
+        "C": make_hist(6000 * scale, 1.5),
+        "D": make_hist(3000 * scale, 0.75),
     }
     data = {r: make_data(sig.get(r), npr[r]) for r in "ABCD"}
 
@@ -162,8 +166,8 @@ def make_abcd_tensor(outdir):
         writer.add_process(sig[r], "signal", f"ch_{r}", signal=True)
     for r in "ABCD":
         writer.add_process(npr[r], "nonprompt", f"ch_{r}")
-    writer.write(outfolder=outdir, outfilename="abcd")
-    return os.path.join(outdir, "abcd.hdf5")
+    writer.write(outfolder=outdir, outfilename=f"abcd{n_pt}")
+    return os.path.join(outdir, f"abcd{n_pt}.hdf5")
 
 
 @pytest.fixture(scope="module")
@@ -184,11 +188,12 @@ def abcd_fit():
 
 def test_abcd_identities_are_not_counted(abcd_fit):
     """The six identities of the ABCD residuals (A + B in each pt bin, and the
-    total) are null directions of their covariance; the chi2 and its ndf are
-    taken over the other 14."""
+    total) are null directions of the covariance propagated through the fit's
+    covariance as well; the other ten directions the 16 free parameters absorb
+    are null only in the fit response, whose rank is the saturated ndf, 4."""
     f = abcd_fit
     m = mh.load_mapping("BaseMapping", f.indata)
-    res, cov = (t.numpy() for t in f.residuals(m.compute_flat, None, True))
+    res, cov = f.residuals(m.compute_flat, None, True)
     a, b, c, d = res.reshape(4, 5)
     scale = np.abs(res).max()
     np.testing.assert_allclose(a + b, 0, atol=1e-9 * scale)
@@ -198,15 +203,20 @@ def test_abcd_identities_are_not_counted(abcd_fit):
         m, compute_variance=False, compute_chi2=True, profile=True
     )
     chi2, ndf = aux[-2:]
-    assert ndf == 20 - 6
+    assert ndf == 20 - f.nfreeparms == 4
 
     # the chi2 over the regular eigen-directions of the covariance
     lam, u = np.linalg.eigh(cov)
     keep = lam > 1e-10 * lam[-1]
-    assert np.count_nonzero(keep) == 14
+    assert np.count_nonzero(keep) == 4
     np.testing.assert_allclose(
         chi2, np.sum((u.T @ res)[keep] ** 2 / lam[keep]), rtol=1e-8
     )
+
+    res_prop, cov_prop = f._residual_terms(m.compute_flat, None, True)
+    chi2_prop, ndf_prop = chi2_pseudo_inverse(res_prop.numpy(), cov_prop.numpy())
+    assert ndf_prop == 20 - 6
+    np.testing.assert_allclose(chi2_prop, chi2, rtol=1e-3)
 
 
 def test_abcd_chi2_does_not_depend_on_rounding(abcd_fit):
@@ -226,7 +236,7 @@ def test_abcd_chi2_does_not_depend_on_rounding(abcd_fit):
     finally:
         f.x.assign(x)
     chi2s, ndfs = np.array(results).T
-    assert set(ndfs) == {14}
+    assert set(ndfs) == {4}
     np.testing.assert_allclose(chi2s, chi2s[0], rtol=1e-9)
 
 
@@ -263,11 +273,12 @@ def fit_1d():
 @pytest.mark.parametrize("profile", [False, True])
 def test_two_groupings_of_the_same_bins(fit_1d, profile):
     """A projection next to itself, or next to its own total, adds no
-    information: same chi2, same ndf. The solve failed on the duplicate."""
+    information: same chi2, same ndf. The solve failed on the duplicate.
+    Postfit, the free signal strength absorbs one direction."""
     f = fit_1d
     single = mh.load_mapping("Project", f.indata, "ch0", "x")
     chi2, ndf = f.chi2(single.compute_flat, single._get_data, 0, profile)
-    assert ndf == 20
+    assert ndf == (20 - f.nfreeparms if profile else 20)
     for other in [
         mh.load_mapping("Project", f.indata, "ch0", "x"),
         mh.load_mapping("Project", f.indata, "ch0"),
@@ -285,7 +296,7 @@ def test_a_regular_covariance_is_solved_as_before(fit_1d, profile):
     """Without identities nothing changes: r^T C^-1 r, ndf = n."""
     f = fit_1d
     m = mh.load_mapping("Select", f.indata, "ch0", "x:rebin(-5,-2,-1,0,1,2,5)")
-    res, cov = (t.numpy() for t in f.residuals(m.compute_flat, m._get_data, profile))
+    res, cov = f.residuals(m.compute_flat, m._get_data, profile)
     lam = np.linalg.eigvalsh(cov)
     assert lam[0] > 1e-4 * lam[-1]  # the test is about a well-conditioned case
     chi2, ndf = f.chi2(m.compute_flat, m._get_data, m.ndf_reduction, profile)
@@ -310,8 +321,7 @@ def test_declared_identities(fit_1d, profile, args, ndf):
     m = mh.load_mapping(args[0], f.indata, *args[1:])
     assert m.ndf_reduction == 1
     res, cov = f.residuals(m.compute_flat, m._get_data, profile)
-    res = tf.reshape(res, (-1, 1))
-    pinv_chi2 = float(tf.squeeze(tf.transpose(res) @ tf.linalg.pinv(cov) @ res))
+    pinv_chi2 = float(res @ np.linalg.pinv(cov) @ res)
     chi2, ndf_found = f.chi2(m.compute_flat, m._get_data, m.ndf_reduction, profile)
     assert ndf_found == ndf
     np.testing.assert_allclose(chi2, pinv_chi2, rtol=1e-9)

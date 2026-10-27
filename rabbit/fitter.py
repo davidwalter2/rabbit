@@ -138,6 +138,25 @@ def chi2_pseudo_inverse(res, res_cov, ndf_reduction=0, rtol=CHI2_RTOL):
     return chi2_value, ndf
 
 
+def covariance_outside_scores(B, K):
+    """B (1 - U U^T) B^T, with U an orthonormal basis of the row space of K.
+
+    B [m, N] and K [p, N] are derivatives with respect to N whitened inputs
+    (independent, unit variance): of m residuals at fixed parameters, and of the
+    scores of p fitted parameters. This is the covariance of the residuals once
+    the fit has absorbed their component along its scores. The rank of K is
+    taken after scaling its rows to unit norm, so it does not depend on the
+    units of the parameters.
+    """
+    norms = np.linalg.norm(K, axis=1)
+    K = K[norms > 0] / norms[norms > 0, None]
+    if K.shape[0]:
+        u, s, _ = np.linalg.svd(K.T, full_matrices=False)
+        u = u[:, s > max(K.shape) * np.finfo(K.dtype).eps * s[0]]
+        B = B - (B @ u) @ u.T
+    return B @ B.T
+
+
 def make_fitter(indata, param_model, options, **kwargs):
     """Construct the Fitter appropriate for the requested device count.
 
@@ -4470,17 +4489,259 @@ class Fitter:
         return residuals, res_cov
 
     @tf.function
-    def residuals(self, fun, fun_data=None, profile=False):
-        """Residuals (prediction - data) of a mapping and their covariance."""
+    def _residual_terms(self, fun, fun_data=None, profile=False):
+        """Residuals of a mapping and their covariance propagated through the
+        fit's covariance (postfit) or added up from the prediction's and the
+        data's (prefit)."""
         if profile:
             return self._residuals_profiled(fun)
         return self._residuals(fun, fun_data)
 
+    def _fit_response_unsupported(self):
+        """Why the postfit residual covariance cannot be the fit response
+        (_fit_response_covariance), or None."""
+        if len(self.regularizers):
+            return "regularization"
+        if len(self.external_terms):
+            return "external likelihood terms"
+        if self.mcstat_debias_active or self._mcstat_terms_in_nll():
+            return "MC-stat de-biasing"
+        if self.postfit_faces is not None:
+            return "active constraint faces"
+        return None
+
+    def _nll_fixed_beta(self, beta):
+        """The data, constraint and bin-by-bin stat terms of the likelihood with
+        the bin-by-bin stat parameters at beta instead of profiled (beta None
+        without bin-by-bin stat): the terms whose inputs fluctuate."""
+        nexp, norm = self._compute_yields_noBBB(
+            full=False, compute_norm=self.bbstat.needs_per_proc_norm()
+        )
+        l = self._compute_lc()
+        if self.bbstat.enabled:
+            nexp, _, beta = self.bbstat.profile_and_apply(
+                nexp,
+                norm,
+                self.nobs,
+                self.varnobs,
+                self.lognobs,
+                profile=False,
+                full=False,
+                fixed_beta=beta,
+            )
+            l = l + self._compute_lbeta(beta)
+        nexp = nexp[: self.indata.nbins]
+        if self.chisqFit or self.covarianceFit:
+            return self._compute_ln(nexp) + l
+        # the Poisson term without the guard of _compute_ln for empty bins,
+        # which keeps its value but zeroes its derivative with respect to the
+        # observation there
+        lognexp = tf.math.log(tf.where(nexp > 0.0, nexp, tf.ones_like(nexp)))
+        return tf.reduce_sum(nexp - self.nobs * lognexp) + l
+
+    @tf.function
+    def _fit_response_terms(self, fun, dense_beta=False):
+        """The derivatives _fit_response_covariance assembles, at the fit's
+        point, with the bin-by-bin stat parameters at their profiled values.
+
+        res: the postfit residuals of the mapping fun; res_n: their derivative
+        with respect to the observations at fixed parameters; score_x0, score_n:
+        the derivatives of the parameters' scores with respect to the constraint
+        centres and the observations; var_n: the variance of the observations
+        (the prediction for a Poisson likelihood, the chi2 variances).
+        With bin-by-bin stat, score_beta_n: the derivative of the score of each
+        bin-by-bin stat parameter with respect to the observation of its bin (all
+        observations: [.., nbins], for dense_beta), and curv_beta: the curvature
+        of its constraint.
+        """
+        nexp, _, beta = self._compute_yields_with_beta(
+            profile=True, compute_norm=False, full=False
+        )
+        with tf.GradientTape() as t:
+            t.watch(self.nobs)
+            observed = tf.reshape(fun(None, self.nobs), [-1])
+        res = tf.reshape(fun(self.x, nexp), [-1]) - observed
+        terms = {
+            "res": res,
+            "res_n": -tf.reshape(
+                t.jacobian(observed, self.nobs), [-1, self.nobs.shape[0]]
+            ),
+            "var_n": self.varnobs if self.varnobs is not None else nexp,
+        }
+        if beta is not None:
+            beta = tf.stop_gradient(beta)
+
+        with tf.GradientTape() as t2:
+            t2.watch([self.x0, self.nobs])
+            with tf.GradientTape() as t1:
+                val = self._nll_fixed_beta(beta)
+            score = t1.gradient(val, self.x)
+        terms["score_x0"], terms["score_n"] = t2.jacobian(
+            score, [self.x0, self.nobs], unconnected_gradients="zero"
+        )
+
+        if beta is not None:
+            if dense_beta or self.covarianceFit:
+                with tf.GradientTape() as t2:
+                    t2.watch([self.nobs, beta])
+                    with tf.GradientTape() as t1:
+                        t1.watch(beta)
+                        val = self._nll_fixed_beta(beta)
+                    score_beta = t1.gradient(val, beta)
+                terms["score_beta_n"] = t2.jacobian(score_beta, self.nobs)
+            else:
+                # the score of a bin's parameters depends on that bin's
+                # observation only: one forward pass gives each derivative
+                with tf.autodiff.ForwardAccumulator(
+                    self.nobs, tf.ones_like(self.nobs)
+                ) as acc:
+                    with tf.GradientTape() as t1:
+                        t1.watch(beta)
+                        val = self._nll_fixed_beta(beta)
+                    score_beta = t1.gradient(val, beta)
+                terms["score_beta_n"] = acc.jvp(score_beta)
+            with tf.GradientTape() as t2:
+                t2.watch(beta)
+                with tf.GradientTape() as t1:
+                    t1.watch(beta)
+                    lbeta = self._compute_lbeta(beta)
+                dlbeta = t1.gradient(lbeta, beta)
+            # the constraint is a sum over the parameters: its Hessian is diagonal
+            terms["curv_beta"] = t2.gradient(dlbeta, beta)
+        return terms
+
+    def _fit_response_covariance(self, terms, dense_beta=False):
+        """Postfit residuals and their covariance from the fit's response to
+        its fluctuating inputs, in the linear approximation.
+
+        The inputs are the observations n, the constraint centres x0 and the
+        bin-by-bin stat centres beta0, whitened with the variances the
+        likelihood assigns them: the prediction for a Poisson likelihood (or
+        the chi2 variances, the data covariance), 1/cw, and the inverse
+        curvature of the bin-by-bin stat constraint. In these coordinates the
+        residuals' derivative at fixed parameters is B, and the scores of the
+        fitted parameters -- the floating ones and the bin-by-bin stat ones --
+        span a subspace; at the minimum the fit absorbs exactly that subspace,
+        so the residual covariance is B (1 - P) B^T with P its projector
+        (covariance_outside_scores). It is the propagated one in the linear,
+        Gaussian limit; unlike a propagation through the observed covariance,
+        it keeps the directions an unconstrained parameter absorbs exactly
+        without variance, so that the ndf of the chi2 (the rank) is the number
+        of bins less the free directions the mapping resolves: for a mapping
+        of all bins the saturated ndf, nbins - nfreeparms. For such a mapping
+        and a Poisson likelihood without constrained parameters and bin-by-bin
+        stat the chi2 is Pearson's, sum (n - mu)^2 / mu. The prediction, not the
+        observation, is the Poisson variance: it is the one the likelihood's
+        curvature corresponds to, and it does not vanish in empty bins.
+
+        The bin-by-bin stat parameters are fitted parameters too, constrained
+        by beta0. A bin's parameters only see that bin's observation, so they
+        are projected out per bin in closed form: the observation keeps the
+        weight 1 / (1 + q) with q = var(n) sum_beta (d2L / dbeta dn)^2 /
+        (d2L / dbeta2)_constraint, the share of the bin's information not taken
+        by them (q infinite for an unconstrained one, e.g. a gamma centre at 0).
+        With a data covariance they see all observations, and are projected out
+        with the parameters (dense_beta).
+        """
+        t = {k: np.asarray(v) for k, v in terms.items()}
+        res, res_n = t["res"], t["res_n"]
+        fl = np.asarray(self.floating_indices)
+        var_x0 = self.var_x0.numpy()
+        cons = var_x0 > 0
+        k_x0 = t["score_x0"][fl][:, cons] * np.sqrt(var_x0[cons])
+        k_n = t["score_n"][fl]
+        nbins = self.indata.nbins
+        dense_beta = dense_beta or self.covarianceFit
+
+        if self.covarianceFit:
+            from scipy.linalg import solve_triangular
+
+            # whiten with L L^T = C = W^-1: A L = (R^-1 A^T)^T for W = R R^T
+            chol = np.linalg.cholesky(self.data_cov_inv.numpy())
+
+            def white(a):
+                return solve_triangular(chol, a.T, lower=True).T
+
+        else:
+            # observations without variance (e.g. no prediction) are not inputs
+            sd = np.sqrt(np.maximum(t["var_n"], 0.0))
+
+            def white(a):
+                return a * sd
+
+        blocks_b = [np.zeros((res.size, k_x0.shape[1])), white(res_n)]
+        blocks_k = [k_x0, white(k_n)]
+        scores_beta = None
+        if self.bbstat.enabled:
+            kb = t["score_beta_n"]
+            curv = t["curv_beta"]
+            if dense_beta:
+                # [nbeta, nbins]: the parameters of the masked channels and the
+                # masked entries do not see any observation
+                kb = kb.reshape(-1, kb.shape[-1])
+                curv = curv.reshape(-1)
+                seen = np.any(kb != 0, axis=1)
+                kb, curv = kb[seen], curv[seen]
+                scores_beta = np.concatenate(
+                    [
+                        np.zeros((kb.shape[0], k_x0.shape[1])),
+                        white(kb),
+                        np.diag(np.sqrt(np.maximum(curv, 0.0))),
+                    ],
+                    axis=1,
+                )
+                blocks_b.append(np.zeros((res.size, kb.shape[0])))
+                blocks_k.append(np.zeros((k_x0.shape[0], kb.shape[0])))
+            else:
+                kb2 = np.square(
+                    kb[:nbins] * sd.reshape((nbins,) + (1,) * (kb.ndim - 1))
+                )
+                curv = curv[:nbins]
+                ratio = np.where(
+                    (kb2 > 0) & (curv > 0), kb2 / np.where(curv > 0, curv, 1.0), 0.0
+                )
+                free = (kb2 > 0) & ~(curv > 0)
+                if kb2.ndim > 1:
+                    ratio, free = ratio.sum(axis=-1), free.any(axis=-1)
+                share = np.where(free, 0.0, 1.0 / (1.0 + ratio))
+                blocks_b[1] = blocks_b[1] * np.sqrt(share)
+                blocks_k[1] = blocks_k[1] * np.sqrt(share)
+
+        b = np.concatenate(blocks_b, axis=1)
+        k = np.concatenate(blocks_k, axis=1)
+        if scores_beta is not None:
+            k = np.concatenate([k, scores_beta], axis=0)
+        return res, covariance_outside_scores(b, k)
+
+    def residuals(self, fun, fun_data=None, profile=False):
+        """Residuals (prediction - data) of a mapping and their covariance.
+
+        Postfit (profile), the covariance is the fit's response to its inputs
+        (_fit_response_covariance). Where that response is not a projection --
+        regularization or external likelihood terms (curvature without a
+        fluctuating input), the MC-stat de-biased estimator (whose minimum is
+        not one of the ordinary likelihood) and active constraint faces (a
+        restricted response) -- it is propagated through the fit's covariance,
+        whose rank then also counts the directions the fit absorbs.
+        """
+        if profile:
+            reason = self._fit_response_unsupported()
+            if reason is None:
+                return self._fit_response_covariance(self._fit_response_terms(fun))
+            logger.info(
+                f"Postfit residual covariance propagated through the fit "
+                f"covariance ({reason}): the ndf of the chi2 counts the "
+                "directions the fit absorbs as well."
+            )
+        res, cov = self._residual_terms(fun, fun_data, profile)
+        return res.numpy(), cov.numpy()
+
     def chi2(self, fun, fun_data=None, ndf_reduction=0, profile=False):
         """chi2 of the residuals of a mapping and its ndf, the rank of their
-        covariance (see chi2_pseudo_inverse)."""
-        residuals, res_cov = self.residuals(fun, fun_data, profile)
-        return chi2_pseudo_inverse(residuals.numpy(), res_cov.numpy(), ndf_reduction)
+        covariance (see chi2_pseudo_inverse and residuals)."""
+        return chi2_pseudo_inverse(
+            *self.residuals(fun, fun_data, profile), ndf_reduction
+        )
 
     def expected_events(
         self,
