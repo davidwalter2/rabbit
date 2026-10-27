@@ -239,15 +239,34 @@ class BinByBinStat:
         elif self.binByBinStatType == "normal-additive":
             return tf.zeros(self.beta_shape, dtype=self.dtype)
 
+    @staticmethod
+    def log_beta0(values):
+        """log β0 as the gamma constraint uses it, with log 1 = 0 where β0 = 0.
+
+        It is the offset that gives the saturated likelihood, for numerical
+        precision in the minimizer; β0 = 0 entries carry no constraint.
+        """
+        values = tf.convert_to_tensor(values)
+        return tf.math.log(
+            tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
+        )
+
+    def _constraint_centres(self, beta0=None, logbeta0=None):
+        """(β0, log β0): the stored ones, or a given β0 with its log β0
+        (log_beta0(β0) unless given too)."""
+        if beta0 is None:
+            if logbeta0 is not None:
+                raise ValueError("logbeta0 given without beta0")
+            return tf.convert_to_tensor(self.beta0), tf.convert_to_tensor(self.logbeta0)
+        beta0 = tf.convert_to_tensor(beta0)
+        if logbeta0 is None:
+            return beta0, self.log_beta0(beta0)
+        return beta0, tf.convert_to_tensor(logbeta0)
+
     def set_beta0(self, values):
         """Assign β0 and update the cached log β0 used in the gamma constraint."""
         self.beta0.assign(values)
-        # Compute offset for Gamma NLL improved numerical precision in the
-        # minimizer; the offset is chosen to give the saturated likelihood.
-        beta0safe = tf.where(
-            values == 0.0, tf.constant(1.0, dtype=values.dtype), values
-        )
-        self.logbeta0.assign(tf.math.log(beta0safe))
+        self.logbeta0.assign(self.log_beta0(values))
 
     def beta0_default_assign(self):
         self.set_beta0(self.default_beta0())
@@ -367,7 +386,7 @@ class BinByBinStat:
 
     # --- constraint NLL term -----------------------------------------------
 
-    def lbeta(self, beta, full_nll=False):
+    def lbeta(self, beta, full_nll=False, beta0=None, logbeta0=None):
         """Constraint-NLL contribution from the β nuisance.
 
         Returns ``None`` when BBB is disabled. Otherwise returns the scalar
@@ -376,11 +395,15 @@ class BinByBinStat:
         on β/β0 are dropped — this is the variant used inside the
         minimizer; ``full_nll=True`` adds them back, e.g. for absolute
         likelihood reporting).
+
+        ``beta0`` / ``logbeta0``: the constraint centres (default the stored
+        ``self.beta0`` / ``self.logbeta0``), e.g. one toy's randomized β0;
+        ``logbeta0`` defaults to ``log_beta0(beta0)`` for a given ``beta0``.
         """
         if not self.enabled:
             return None
 
-        beta0 = self.beta0
+        beta0, logbeta0 = self._constraint_centres(beta0, logbeta0)
         if self.binByBinStatType == "gamma":
             kstat = self.kstat
             betasafe = tf.where(beta0 == 0.0, tf.constant(1.0, dtype=beta.dtype), beta)
@@ -394,9 +417,7 @@ class BinByBinStat:
                     -kstat * beta0 * logbeta + kstat * beta + lgammaalpha + alphalntheta
                 )
             else:
-                lbeta = -kstat * beta0 * (logbeta - self.logbeta0) + kstat * (
-                    beta - beta0
-                )
+                lbeta = -kstat * beta0 * (logbeta - logbeta0) + kstat * (beta - beta0)
 
         elif self.binByBinStatType == "normal-multiplicative":
             kstat = self.kstat
@@ -515,6 +536,8 @@ class BinByBinStat:
         full=True,
         fixed_beta=None,
         add_ubeta=True,
+        beta0=None,
+        logbeta0=None,
     ):
         """Profile β (when ``profile=True``) and apply it to ``nexp`` / ``norm``.
 
@@ -525,7 +548,10 @@ class BinByBinStat:
         ``fixed_beta``: the β applied when not profiling (default the stored
         ``self.beta``). ``add_ubeta``: add the dummy ``ubeta`` through which
         callers differentiate by β; off for predictions whose β is not the
-        fit's (the MC-stat de-biasing's half terms).
+        fit's (the MC-stat de-biasing's half terms). ``beta0`` / ``logbeta0``:
+        the constraint centres the profiled β is solved for (default the
+        stored ``self.beta0`` / ``self.logbeta0``), e.g. one toy's randomized β0;
+        ``logbeta0`` defaults to ``log_beta0(beta0)`` for a given ``beta0``.
         """
         if not self.enabled:
             return nexp, norm, None
@@ -544,9 +570,10 @@ class BinByBinStat:
             lognobs = tf.convert_to_tensor(lognobs)
             if varnobs is not None:
                 varnobs = tf.convert_to_tensor(varnobs)
+            beta0_all, logbeta0_all = self._constraint_centres(beta0, logbeta0)
 
             nexp_profile = nexp[: self.indata.nbins]
-            beta0 = self.beta0[: self.indata.nbins]
+            beta0 = beta0_all[: self.indata.nbins]
 
             # In lite mode, split nexp_profile into per-bin sums over
             # processes with finite variance (sumw2 > 0) and zero variance
@@ -600,7 +627,7 @@ class BinByBinStat:
                         beta = solve_quad_eq(abeta, bbeta, cbeta)
                     elif self.binByBinStatMode == "full":
                         norm_profile = norm[: self.indata.nbins]
-                        logbeta0 = self.logbeta0[: self.indata.nbins]
+                        logbeta0 = logbeta0_all[: self.indata.nbins]
 
                         # Minimum total expected yield for which all betas are
                         # positive. Optimise in log-space u = log(x - threshold)
@@ -832,7 +859,7 @@ class BinByBinStat:
                         beta = solve_quad_eq(abeta, bbeta, cbeta)
                     elif self.binByBinStatMode == "full":
                         norm_profile = norm[: self.indata.nbins]
-                        logbeta0 = self.logbeta0[: self.indata.nbins]
+                        logbeta0 = logbeta0_all[: self.indata.nbins]
 
                         # Minimum total expected yield for which all betas are
                         # positive. Optimise in log-space u = log(x - threshold)
@@ -959,7 +986,7 @@ class BinByBinStat:
                         beta = beta0 + (nobs / nbeta - 1)[..., None] * sbeta
 
             if self.indata.nbinsmasked:
-                beta = tf.concat([beta, self.beta0[self.indata.nbins :]], axis=0)
+                beta = tf.concat([beta, beta0_all[self.indata.nbins :]], axis=0)
         else:
             beta = self.beta if fixed_beta is None else fixed_beta
 

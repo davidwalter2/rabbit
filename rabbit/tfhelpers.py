@@ -29,6 +29,73 @@ def simple_sparse_slice0end(in_sparse, end):
     )
 
 
+def per_parameter(v, like):
+    """A per-parameter vector `v` of shape [n], laid out against `like`.
+
+    `like` is [n], or [n, B] with the batch axis last (the batched likelihood,
+    Fitter._compute_nll_batched); `v` then becomes the column [n, 1].
+    """
+    return v if like.shape.rank == 1 else v[:, None]
+
+
+def _batch_first(a):
+    rank = a.shape.rank
+    return tf.transpose(a, [rank - 1] + list(range(rank - 1)))
+
+
+def _batch_last(a):
+    rank = a.shape.rank
+    return tf.transpose(a, list(range(1, rank)) + [0])
+
+
+def map_batch(fn, args):
+    """Apply a per-element function over the trailing batch axis of `args`.
+
+    `args` is a sequence of tensors whose last axis is the batch axis, of size
+    B or of size 1 for an argument all B elements share, or None. `fn` takes
+    the per-element tensors (the batch axis dropped, None passed through) and
+    returns a nest of tensors or None; they come back with the batch axis last.
+
+    Without a batch axis of size other than 1 this is one direct call of `fn`,
+    so B == 1 runs exactly the per-element code. Otherwise the same `fn` is
+    vectorized with tf.vectorized_map, the shared arguments captured as they
+    are.
+    """
+    args = [None if a is None else tf.convert_to_tensor(a) for a in args]
+    batched = [a is not None and a.shape[-1] != 1 for a in args]
+
+    def call(elems):
+        it = iter(elems)
+        return fn(
+            *[
+                next(it) if b else (None if a is None else a[..., 0])
+                for a, b in zip(args, batched)
+            ]
+        )
+
+    if not any(batched):
+        out = call(())
+        return tf.nest.map_structure(lambda o: None if o is None else o[..., None], out)
+
+    # vectorized_map cannot return None: map the tensor outputs only and put
+    # the Nones back in place afterwards
+    structure = []
+
+    def one(elems):
+        out = call(elems)
+        flat = tf.nest.flatten(out)
+        structure[:] = [out, [o is None for o in flat]]
+        return tuple(o for o in flat if o is not None)
+
+    mapped = tf.vectorized_map(
+        one, tuple(_batch_first(a) for a, b in zip(args, batched) if b)
+    )
+    out, nones = structure
+    it = iter(mapped)
+    flat = [None if none else _batch_last(next(it)) for none in nones]
+    return tf.nest.pack_sequence_as(out, flat)
+
+
 def is_diag(x):
     return tf.equal(
         tf.math.count_nonzero(x), tf.math.count_nonzero(tf.linalg.diag_part(x))

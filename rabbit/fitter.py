@@ -31,6 +31,9 @@ from rabbit.minimizer import (
     minimize_trust_krylov,
     minimize_trust_ncg,
 )
+from rabbit.param_models.param_model import (
+    compute_batched as param_model_compute_batched,
+)
 from rabbit.snapshot import Snapshotter, snapshot_on_signal
 from rabbit.tfhelpers import edmval_cov
 
@@ -964,33 +967,41 @@ class Fitter:
 
         self._check_blinded_start_is_evaluable()
 
-    def get_theta(self):
+    # The parameter getters read self.x, or the B columns of x = [npar, B]
+    # (the batched likelihood, _compute_nll_batched); the per-parameter masks
+    # and offsets then broadcast as columns.
+    def get_theta(self, x=None):
+        x = self.x if x is None else x
         start = self.param_model.nparams
-        theta = self.x[start : start + self.indata.nsyst]
+        theta = x[start : start + self.indata.nsyst]
         theta = tf.where(
-            self.frozen_params_mask[start : start + self.indata.nsyst],
+            tfh.per_parameter(
+                self.frozen_params_mask[start : start + self.indata.nsyst], theta
+            ),
             tf.stop_gradient(theta),
             theta,
         )
         return self.blinding.apply_theta(theta)
 
-    def get_model_nui(self):
+    def get_model_nui(self, x=None):
+        x = self.x if x is None else x
         npoi = self.param_model.npoi
         npou = self.param_model.npou
-        nui = self.x[npoi : npoi + npou]
+        nui = x[npoi : npoi + npou]
         # Apply frozen_params_mask the same way get_poi() and get_theta() do.
         # Without this, --freezeParameters silently fails to freeze POUs:
         # the param is registered as frozen but no stop_gradient is applied,
         # so the optimizer updates it anyway.
         nui = tf.where(
-            self.frozen_params_mask[npoi : npoi + npou],
+            tfh.per_parameter(self.frozen_params_mask[npoi : npoi + npou], nui),
             tf.stop_gradient(nui),
             nui,
         )
         return nui
 
-    def get_poi(self):
-        xpoi = self.x[: self.param_model.npoi]
+    def get_poi(self, x=None):
+        x = self.x if x is None else x
+        xpoi = x[: self.param_model.npoi]
         # Offset BEFORE the positivity transform, not after. (x + off)**2 is
         # non-negative for ANY offset, so an additive offset composes with the
         # squared storage rather than fighting it -- x**2 + off is the form
@@ -1005,12 +1016,14 @@ class Fitter:
         else:
             poi = tf.square(xpoi)
         return tf.where(
-            self.frozen_params_mask[: self.param_model.npoi], tf.stop_gradient(poi), poi
+            tfh.per_parameter(self.frozen_params_mask[: self.param_model.npoi], poi),
+            tf.stop_gradient(poi),
+            poi,
         )
 
-    def get_x(self):
+    def get_x(self, x=None):
         return tf.concat(
-            [self.get_poi(), self.get_model_nui(), self.get_theta()], axis=0
+            [self.get_poi(x), self.get_model_nui(x), self.get_theta(x)], axis=0
         )
 
     @property
@@ -1104,21 +1117,42 @@ class Fitter:
 
         return val, jac
 
-    def set_nobs(self, values, variances=None):
+    def _observations(self, nobs, variances=None):
+        """(nobs, varnobs, lognobs) of the observed counts nobs, as the data
+        term reads them; any shape, e.g. [nbins] or [nbins, B] for B toys.
+
+        lognobs is log(nobs) with log 1 = 0 in empty bins: the offset that
+        gives the saturated Poisson likelihood, for numerical precision in the
+        minimizer (a plain log(nobs) makes -nobs (log nexp - log nobs) NaN
+        there). varnobs is the chi2 data variance, `variances` or else nobs,
+        and None for the other fits; a chi2 fit needs nobs > 0.
+        """
+        nobs = tf.convert_to_tensor(nobs, dtype=self.indata.dtype)
+        varnobs = None
         if self.chisqFit:
             # covariance from data stat
-            if tf.math.reduce_any(values <= 0).numpy():
-                raise RuntimeError(
-                    "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
-                )
-            self.varnobs.assign(values if variances is None else variances)
+            message = "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
+            if tf.executing_eagerly():
+                if tf.math.reduce_any(nobs <= 0).numpy():
+                    raise RuntimeError(message)
+            else:
+                tf.debugging.assert_positive(nobs, message=message)
+            varnobs = (
+                nobs
+                if variances is None
+                else tf.convert_to_tensor(variances, dtype=self.indata.dtype)
+            )
+        nobssafe = tf.where(nobs == 0.0, tf.constant(1.0, dtype=nobs.dtype), nobs)
+        return nobs, varnobs, tf.math.log(nobssafe)
+
+    def set_nobs(self, values, variances=None):
+        values, varnobs, lognobs = self._observations(values, variances)
+        if self.chisqFit:
+            self.varnobs.assign(varnobs)
 
         self._check_mcstat_empty_halves(values)
         self.nobs.assign(values)
-        # compute offset for poisson nll improved numerical precision in minimizatoin
-        # the offset is chosen to give the saturated likelihood
-        nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
-        self.lognobs.assign(tf.math.log(nobssafe))
+        self.lognobs.assign(lognobs)
         if self.chisqFit and getattr(self, "mcstat_bb_vref", None) is not None:
             # its per-bin variance is the data variance
             self._update_mcstat_bb_vref()
@@ -2036,17 +2070,21 @@ class Fitter:
         )
 
     def _mthetaalpha(self, theta):
-        """Systematic coefficient vector contracted with logk: theta for a
-        symmetric tensor, [theta, theta*alpha] for the asymmetric interpolation."""
+        """Systematic coefficient columns contracted with logk: theta for a
+        symmetric tensor, [theta, theta*alpha] for the asymmetric interpolation.
+        theta [nsyst] gives one column, [nsyst, 1]; theta [nsyst, B] gives B."""
+        # the column count is explicit: with nsyst == 0, a -1 would be inferred
+        # from the non-zero dimensions alone
+        ncol = 1 if theta.shape.rank == 1 else tf.shape(theta)[-1]
         if self.indata.symmetric_tensor:
-            return tf.reshape(theta, [self.indata.nsyst, 1])
+            return tf.reshape(theta, [self.indata.nsyst, ncol])
         twox = 2.0 * theta
         twox2 = twox * twox
         alpha = 0.125 * twox * (twox2 * (3.0 * twox2 - 10.0) + 15.0)
         alpha = tf.clip_by_value(alpha, -1.0, 1.0)
         thetaalpha = theta * alpha
-        mthetaalpha = tf.stack([theta, thetaalpha], axis=0)  # [2, nsyst]
-        return tf.reshape(mthetaalpha, [2 * self.indata.nsyst, 1])
+        mthetaalpha = tf.stack([theta, thetaalpha], axis=0)  # [2, nsyst(, B)]
+        return tf.reshape(mthetaalpha, [2 * self.indata.nsyst, ncol])
 
     def _fold_norm(self, halves):
         """The raw fold templates ([k, ...], halves=False) or the two rescaled
@@ -4002,29 +4040,29 @@ class Fitter:
         # needed when an external caller requests per-process yields, or for
         # binByBinStat in "full" mode. The default is True for backward
         # compatibility; the NLL/grad/HVP path passes compute_norm=False.
-        poi = self.get_poi()
-        model_nui = self.get_model_nui()
-        theta = self.get_theta()
+        nexpcentral, normcentral = self._compute_yields_noBBB_batched(
+            self.x[:, None], full=full, compute_norm=compute_norm
+        )
+        if normcentral is not None:
+            normcentral = normcentral[..., 0]
+        return nexpcentral[:, 0], normcentral
+
+    def _compute_yields_noBBB_batched(self, x, full=True, compute_norm=True):
+        """Yields without bin-by-bin stat at the B columns of x [npar, B]:
+        nexpcentral [nbins, B] and, with compute_norm, normcentral
+        [nbins, nproc, B] (else None). The batch axis goes last, so the logk
+        contraction is the same [.., nsyst] x [nsyst, B] product for B = 1
+        and reads logk once for all B columns otherwise."""
+        poi = self.get_poi(x)
+        model_nui = self.get_model_nui(x)
+        theta = self.get_theta(x)
 
         all_params = tf.concat([poi, model_nui], axis=0)
-        rnorm = self.param_model.compute(all_params, full)
+        rnorm = param_model_compute_batched(self.param_model, all_params, full)
 
         normcentral = None
-        if self.indata.symmetric_tensor:
-            mthetaalpha = tf.reshape(theta, [self.indata.nsyst, 1])
-        else:
-            # interpolation for asymmetric log-normal
-            twox = 2.0 * theta
-            twox2 = twox * twox
-            alpha = 0.125 * twox * (twox2 * (3.0 * twox2 - 10.0) + 15.0)
-            alpha = tf.clip_by_value(alpha, -1.0, 1.0)
-
-            thetaalpha = theta * alpha
-
-            mthetaalpha = tf.stack(
-                [theta, thetaalpha], axis=0
-            )  # now has shape [2,nsyst]
-            mthetaalpha = tf.reshape(mthetaalpha, [2 * self.indata.nsyst, 1])
+        # [nsyst, B], or [2 * nsyst, B] with the asymmetric interpolation
+        mthetaalpha = self._mthetaalpha(theta)
 
         if self.indata.sparse:
             # Inner contraction logk · mthetaalpha via tf.linalg.sparse's
@@ -4033,52 +4071,75 @@ class Fitter:
             # kernel. NOTE: SparseMatrixMatMul has no XLA kernel, so the
             # enclosing loss/grad/HVP tf.functions are built with
             # jit_compile=False in sparse mode (see _make_tf_functions).
-            logsnorm = tf.squeeze(
-                tf_sparse_csr.matmul(self.logk_csr, mthetaalpha),
-                axis=-1,
-            )
+            logsnorm = tf_sparse_csr.matmul(self.logk_csr, mthetaalpha)  # [nnz, B]
 
-            # Build a sparse [nbinsfull, nproc] tensor whose values absorb
-            # the per-entry syst variation and the per-(bin, proc) POI
-            # scaling rnorm. The sparsity pattern is unchanged from
-            # self.indata.norm, so with_values lets us reuse the indices.
+            # The values of a [nbinsfull, nproc] sparse tensor with the sparsity
+            # pattern of self.indata.norm (without the masked channels' entries
+            # unless full), which absorb the per-entry syst variation and the
+            # per-(bin, proc) POI scaling rnorm.
+            indices = self.indata.norm.indices
+            normvalues = self.indata.norm.values[:, None]
+            rnorm_init_at_norm = self.rnorm_init_at_norm
+            nbins_out = int(self.indata.norm.dense_shape[0])
+            if not full and self.indata.nbinsmasked:
+                keep = indices[:, 0] < self.indata.nbins
+                indices = tf.boolean_mask(indices, keep)
+                normvalues = tf.boolean_mask(normvalues, keep)
+                logsnorm = tf.boolean_mask(logsnorm, keep)
+                if rnorm_init_at_norm is not None:
+                    rnorm_init_at_norm = tf.boolean_mask(rnorm_init_at_norm, keep)
+                nbins_out = self.indata.nbins
+
+            # rnorm is [nbins or 1, nproc or 1, B]: its value at each entry,
+            # broadcasting a singleton bin or process axis
+            if rnorm.shape[0] == 1 and rnorm.shape[1] == 1:
+                rnorm_at_norm = rnorm[0]
+            elif rnorm.shape[0] == 1:
+                rnorm_at_norm = tf.gather(rnorm[0], indices[:, 1])
+            elif rnorm.shape[1] == 1:
+                rnorm_at_norm = tf.gather(rnorm[:, 0], indices[:, 0])
+            else:
+                rnorm_at_norm = tf.gather_nd(rnorm, indices)
             if self.indata.systematic_type == "log_normal":
                 # values[i] = norm[i] * exp(logsnorm[i]) * rnorm[bin, proc]
-                snormnorm_sparse = self.indata.norm.with_values(
-                    tf.exp(logsnorm) * self.indata.norm.values
-                )
-                snormnorm_sparse = snormnorm_sparse * rnorm
+                values = tf.exp(logsnorm) * normvalues * rnorm_at_norm
             else:  # "normal"
                 # values[i] = norm[i] * rnorm[bin, proc] + logsnorm[i]
                 # rnorm_init factors out of the contraction (see
                 # _init_logk_scaled), so it is applied here rather than
                 # being baked into logk.
-                if self.rnorm_init_at_norm is not None:
-                    logsnorm = logsnorm * self.rnorm_init_at_norm
-                snormnorm_sparse = self.indata.norm * rnorm
-                snormnorm_sparse = snormnorm_sparse.with_values(
-                    snormnorm_sparse.values + logsnorm
-                )
-
-            if not full and self.indata.nbinsmasked:
-                snormnorm_sparse = tfh.simple_sparse_slice0end(
-                    snormnorm_sparse, self.indata.nbins
-                )
+                if rnorm_init_at_norm is not None:
+                    logsnorm = logsnorm * rnorm_init_at_norm[:, None]
+                values = normvalues * rnorm_at_norm + logsnorm
 
             # Per-bin yields via unsorted_segment_sum on the sparse values
-            # keyed by bin index. Equivalent to tf.sparse.reduce_sum(...,
-            # axis=-1) but uses the dedicated segment_sum kernel directly,
-            # which has lower per-call overhead. The dense [nbinsfull,
-            # nproc] grid is only materialized when an external caller
-            # requested per-process yields (compute_norm=True).
-            nbinsfull_int = int(snormnorm_sparse.dense_shape[0])
+            # keyed by bin index, the dedicated segment_sum kernel with low
+            # per-call overhead. The dense [nbins, nproc] grid is only
+            # materialized when an external caller requested per-process
+            # yields (compute_norm=True).
             nexpcentral = tf.math.unsorted_segment_sum(
-                snormnorm_sparse.values,
-                snormnorm_sparse.indices[:, 0],
-                num_segments=nbinsfull_int,
+                values, indices[:, 0], num_segments=nbins_out
             )
             if compute_norm:
-                normcentral = tf.sparse.to_dense(snormnorm_sparse)
+                nproc = tf.cast(self.indata.nproc, indices.dtype)
+                if values.shape[-1] == 1:
+                    # B = 1: tf.sparse.to_dense, the fastest densification
+                    # (on CPU about 4x faster than a scatter_nd)
+                    dense_shape = tf.stack([tf.cast(nbins_out, indices.dtype), nproc])
+                    normcentral = tf.sparse.to_dense(
+                        tf.SparseTensor(indices, values[:, 0], dense_shape)
+                    )[..., None]
+                else:
+                    # a segment sum over the flat (bin, proc) index, the
+                    # kernel of nexpcentral above
+                    normcentral = tf.reshape(
+                        tf.math.unsorted_segment_sum(
+                            values,
+                            indices[:, 0] * nproc + indices[:, 1],
+                            num_segments=tf.cast(nbins_out, indices.dtype) * nproc,
+                        ),
+                        [nbins_out, self.indata.nproc, -1],
+                    )
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull
@@ -4101,41 +4162,82 @@ class Fitter:
                 )
 
             logsnorm = tf.matmul(mlogk, mthetaalpha)
-            logsnorm = tf.reshape(logsnorm, [nbins, self.indata.nproc])
+            logsnorm = tf.reshape(
+                logsnorm, [nbins, self.indata.nproc, tf.shape(mthetaalpha)[-1]]
+            )
 
             if self.indata.systematic_type == "log_normal":
                 snorm = tf.exp(logsnorm)
-                snormnorm = snorm * norm
+                snormnorm = snorm * norm[..., None]
                 normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
                 # rnorm_init factors out of the contraction (see
                 # _init_logk_scaled), so it is applied here rather than
                 # being baked into logk.
                 if self.rnorm_init is not None:
-                    logsnorm = logsnorm * self.rnorm_init[:nbins]
-                normcentral = norm * rnorm + logsnorm
+                    logsnorm = logsnorm * self.rnorm_init[:nbins][..., None]
+                normcentral = norm[..., None] * rnorm + logsnorm
 
-            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
+            nexpcentral = tf.reduce_sum(normcentral, axis=1)
 
         return nexpcentral, normcentral
 
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
+        nexp, norm, beta = self._compute_yields_with_beta_batched(
+            self.x[:, None], profile=profile, compute_norm=compute_norm, full=full
+        )
+        return tuple(None if t is None else t[..., 0] for t in (nexp, norm, beta))
+
+    def _observed_data(self):
+        """The observations (nobs, varnobs, lognobs) as columns [nbins, 1]
+        shared by every element of a batch (varnobs None without one)."""
+        return tuple(
+            None if t is None else tf.convert_to_tensor(t)[:, None]
+            for t in (self.nobs, self.varnobs, self.lognobs)
+        )
+
+    def _compute_yields_with_beta_batched(
+        self, x, data=None, profile=True, compute_norm=False, full=True, beta0=None
+    ):
+        """_compute_yields_with_beta at the B columns of x [npar, B]: nexp
+        [nbins, B], norm [nbins, nproc, B] or None, beta [.., B] or None.
+
+        data: (nobs, varnobs, lognobs), each [nbins, 1] (shared) or [nbins, B]
+        (see _observations); default the fitter's observations. beta0: the
+        bin-by-bin stat constraint centres, of bbstat.beta_shape (masked
+        channels included) plus the batch axis (default the stored ones). Bin-by-bin stat is element-wise in the bins:
+        B = 1 calls profile_and_apply directly, larger batches vectorize the
+        same call (tfh.map_batch)."""
         # Only materialize the dense [nbins, nproc] normcentral when an
         # external caller requested it, when BBB "full" mode needs per-process
         # yields for the analytic β solution, or when "lite" mode needs to
         # split finite-variance (sumw2>0) and zero-variance (sumw2==0)
         # contributions per bin.
         need_norm = compute_norm or self.bbstat.needs_per_proc_norm()
-        nexp, norm = self._compute_yields_noBBB(full=full, compute_norm=need_norm)
-        return self.bbstat.profile_and_apply(
-            nexp,
-            norm,
-            self.nobs,
-            self.varnobs,
-            self.lognobs,
-            profile=profile,
-            compute_norm=compute_norm,
-            full=full,
+        nexp, norm = self._compute_yields_noBBB_batched(
+            x, full=full, compute_norm=need_norm
+        )
+        if not self.bbstat.enabled:
+            return nexp, norm, None
+        nobs, varnobs, lognobs = self._observed_data() if data is None else data
+        logbeta0 = None if beta0 is None else self.bbstat.log_beta0(beta0)
+
+        def profile_and_apply(nexp, norm, nobs, varnobs, lognobs, beta0, logbeta0):
+            return self.bbstat.profile_and_apply(
+                nexp,
+                norm,
+                nobs,
+                varnobs,
+                lognobs,
+                profile=profile,
+                compute_norm=compute_norm,
+                full=full,
+                beta0=beta0,
+                logbeta0=logbeta0,
+            )
+
+        return tfh.map_batch(
+            profile_and_apply, (nexp, norm, nobs, varnobs, lognobs, beta0, logbeta0)
         )
 
     @tf.function
@@ -4397,12 +4499,18 @@ class Fitter:
         return self._compute_nll(full_nll=False)
 
     def _compute_lc(self, full_nll=False):
+        return self._compute_lc_batched(self.x[:, None], full_nll=full_nll)[0]
+
+    def _compute_lc_batched(self, x, x0=None, full_nll=False):
+        """Constraint term [B] at the B columns of x [npar, B]; x0 [npar, 1]
+        (default self.x0) or [npar, B]."""
         # One constraint term over the full effective parameter vector
         # [poi, model_nui, theta]: the ParamModel block is constrained by the
         # declared priors (cw = 0 -> free) and the nuisance block by
         # indata.constraintweights, all folded into cw / x0.
-        cw = self.cw
-        lc = cw * 0.5 * tf.square(self.get_x() - self.x0)
+        cw = self.cw[:, None]
+        x0 = self.x0[:, None] if x0 is None else x0
+        lc = cw * 0.5 * tf.square(self.get_x(x) - x0)
         if full_nll:
             # normalization factor 0.5*log(2*pi*sigma^2) for constrained
             # entries, with sigma^2 = 1/cw and
@@ -4414,50 +4522,105 @@ class Fitter:
                 tf.zeros_like(lc),
             )
 
-        return tf.reduce_sum(lc)
+        return tf.reduce_sum(lc, axis=0)
 
     def _compute_lbeta(self, beta, full_nll=False):
-        return self.bbstat.lbeta(beta, full_nll=full_nll)
+        lbeta = self._compute_lbeta_batched(
+            None if beta is None else beta[..., None], full_nll=full_nll
+        )
+        return None if lbeta is None else lbeta[0]
+
+    def _compute_lbeta_batched(self, beta, full_nll=False, beta0=None):
+        """Bin-by-bin stat constraint [B] of beta [.., B] (None when disabled);
+        beta0 [.., B] or [.., 1]: the constraint centres (default the stored
+        ones)."""
+        if not self.bbstat.enabled:
+            return None
+        logbeta0 = None if beta0 is None else self.bbstat.log_beta0(beta0)
+        return tfh.map_batch(
+            lambda beta, beta0, logbeta0: self.bbstat.lbeta(
+                beta, full_nll=full_nll, beta0=beta0, logbeta0=logbeta0
+            ),
+            (beta, beta0, logbeta0),
+        )
 
     def _compute_ln(self, nexp, full_nll=False):
+        return self._compute_ln_batched(nexp[:, None], full_nll=full_nll)[0]
+
+    def _compute_ln_batched(self, nexp, data=None, full_nll=False):
+        """Data term [B] of the yields nexp [nbins, B]. data: (nobs, varnobs,
+        lognobs), each [nbins, 1] (shared) or [nbins, B]; default the
+        fitter's observations."""
+        nobs, varnobs, lognobs = self._observed_data() if data is None else data
         if self.chisqFit:
-            ln = 0.5 * tf.reduce_sum((nexp - self.nobs) ** 2 / self.varnobs, axis=-1)
+            ln = 0.5 * tf.reduce_sum((nexp - nobs) ** 2 / varnobs, axis=0)
         elif self.covarianceFit:
             # Solve the system without inverting
-            residual = tf.reshape(self.nobs - nexp, [-1, 1])  # chi2 residual
+            residual = nobs - nexp  # chi2 residual
             ln = 0.5 * tf.reduce_sum(
-                tf.matmul(
-                    residual,
-                    tf.matmul(self.data_cov_inv, residual),
-                    transpose_a=True,
-                )
+                residual * tf.matmul(self.data_cov_inv, residual), axis=0
             )
         else:
-            nexpsafe = tf.where(
-                self.nobs == 0.0, tf.constant(1.0, dtype=nexp.dtype), nexp
-            )
+            nexpsafe = tf.where(nobs == 0.0, tf.constant(1.0, dtype=nexp.dtype), nexp)
             lognexp = tf.math.log(nexpsafe)
 
             # poisson term
             if full_nll:
-                ldatafac = tf.math.lgamma(self.nobs + 1)
-                ln = tf.reduce_sum(-self.nobs * lognexp + nexp + ldatafac, axis=-1)
+                ldatafac = tf.math.lgamma(nobs + 1)
+                ln = tf.reduce_sum(-nobs * lognexp + nexp + ldatafac, axis=0)
             else:
                 # poisson w/o constant factorial part term and with offset to improve numerical precision
-                ln = tf.reduce_sum(
-                    -self.nobs * (lognexp - self.lognobs) + nexp - self.nobs, axis=-1
-                )
+                ln = tf.reduce_sum(-nobs * (lognexp - lognobs) + nexp - nobs, axis=0)
         return ln
 
-    def _compute_nll_components(self, profile=True, full_nll=False):
-        nexpfullcentral, _, beta = self._compute_yields_with_beta(
+    def _compute_nll_components(
+        self, x=None, data=None, x0=None, beta0=None, profile=True, full_nll=False
+    ):
+        """The terms of the negative log-likelihood, each [B] or None, at the B
+        columns of x [npar, B]: (ln, lc, lbeta, lpenalty, lext, lmcstat, beta).
+
+        x=None is the fitter's own point (self.x as one column). Per-element
+        inputs, each with the batch axis last and of size 1 when all elements
+        share it (default: the fitter's own, as for a fit):
+        - data: the observed counts nobs [nbins, .], or (nobs, variances) with
+          the chi2 data variances; the data term is derived from them as
+          set_nobs does (_observations);
+        - x0 [npar, .]: the constraint centres;
+        - beta0 [.., .]: the bin-by-bin stat constraint centres, of the β shape
+          (bbstat.beta_shape: [nbinsfull] in lite mode, [nbinsfull, nproc] in
+          full mode, masked channels included).
+        A frequentist toy changes all three, a Bayesian toy only data. The
+        batch axis goes last throughout, so B = 1 runs the same operations as
+        an unbatched evaluation.
+
+        The regularization penalties and the MC-stat de-biasing terms (the
+        cross-fit jackknife, _compute_mcstat_penalty) are built from self.x and
+        the fitter's own observations, so they are only defined at the
+        fitter's own point with its own inputs; elsewhere they are refused.
+        """
+        if (
+            x is not None or data is not None or x0 is not None or beta0 is not None
+        ) and (len(self.regularizers) or self._mcstat_terms_in_nll()):
+            raise NotImplementedError(
+                "The regularization penalties and the MC-stat de-biasing terms "
+                "are defined at the fitter's own point and inputs only."
+            )
+        if x is None:
+            x = self.x[:, None]
+        if data is not None:
+            data = self._observations(
+                *(data if isinstance(data, (tuple, list)) else (data,))
+            )
+        nexpfullcentral, _, beta = self._compute_yields_with_beta_batched(
+            x,
+            data,
             profile=profile,
             compute_norm=False,
             # only build the full (masked-channel-inclusive) yields if some
             # regularizer actually reads them
             full=self._regularizers_need_observables(),
+            beta0=beta0,
         )
-
         nexp = nexpfullcentral[: self.indata.nbins]
 
         if self._fold_debias_active():
@@ -4467,28 +4630,46 @@ class Fitter:
             # so this de-biases the point (gradient = cross-fit score) and the
             # curvature (cross-half Fisher) regardless of nonlinearity; each
             # term carries its own bin-by-bin stat beta and constraint
-            # (_jackknife_terms), weighted like its data term.
-            terms = self._jackknife_terms(nexp, beta, profile=profile)
-            ln = tf.add_n([c * self._compute_ln(n, full_nll) for n, c, _ in terms])
+            # (_jackknife_terms), weighted like its data term. Own point only,
+            # B = 1.
+            terms = self._jackknife_terms(
+                nexp[:, 0], None if beta is None else beta[..., 0], profile=profile
+            )
+            ln = tf.add_n([c * self._compute_ln(n, full_nll) for n, c, _ in terms])[
+                None
+            ]
             lbeta = None
             if self.bbstat.enabled:
                 lbeta = tf.add_n(
                     [c * self._compute_lbeta(b, full_nll) for _, c, b in terms]
-                )
+                )[None]
         else:
-            ln = self._compute_ln(nexp, full_nll)
-            lbeta = self._compute_lbeta(beta, full_nll)
+            ln = self._compute_ln_batched(nexp, data, full_nll)
+            lbeta = self._compute_lbeta_batched(beta, full_nll, beta0=beta0)
 
         # lc (theta priors) is counted once.
-        lc = self._compute_lc(full_nll)
+        lc = self._compute_lc_batched(x, x0, full_nll)
 
-        lpenalty = self._compute_lpenalty(nexpfullcentral)
+        # None without regularizers; own point only, B = 1
+        lpenalty = None
+        if len(self.regularizers):
+            lpenalty = self._compute_lpenalty(nexpfullcentral[:, 0])[None]
 
-        return ln, lc, lbeta, lpenalty, beta
+        lext = external_likelihood.compute_external_nll(
+            self.external_terms, x, self.indata.dtype, full_nll=full_nll
+        )
 
-    def _compute_lpenalty(self, nexpfullcentral):
+        # None unless de-biasing; own point only, B = 1
+        lmcstat = self._compute_mcstat_penalty(full_nll=full_nll)
+        if lmcstat is not None:
+            lmcstat = lmcstat[None]
+
+        return ln, lc, lbeta, lpenalty, lext, lmcstat, beta
+
+    def _compute_lpenalty(self, nexpfullcentral, x=None):
         """Sum of the regularization penalties (None without regularizers);
-        `nexpfullcentral` are the profiled yields the regularizers read."""
+        `nexpfullcentral` are the profiled yields the regularizers read, at the
+        physical parameters `x` (default get_x())."""
         if not len(self.regularizers):
             return None
         if not getattr(self, "_regularizers_armed", False):
@@ -4496,7 +4677,7 @@ class Fitter:
                 "Regularizers not armed against the current parameter layout; "
                 "call arm_regularizers() (or defaultassign()) first."
             )
-        x = self.get_x()
+        x = self.get_x() if x is None else x
         penalties = [
             reg.compute_nll_penalty(
                 x,
@@ -4523,26 +4704,39 @@ class Fitter:
             self.external_terms, self.x, self.indata.dtype, full_nll=full_nll
         )
 
-    def _compute_nll(self, profile=True, full_nll=False):
-        ln, lc, lbeta, lpenalty, beta = self._compute_nll_components(
-            profile=profile, full_nll=full_nll
+    def _mcstat_terms_in_nll(self):
+        """Whether the NLL carries MC-stat de-biasing terms: the cross-fit
+        jackknife (_jackknife_terms) or _compute_mcstat_penalty. Their fold and
+        half yields and compensators are built from self.x, so
+        _compute_nll_components refuses any point or inputs but the fitter's
+        own while they are active."""
+        if self._fold_debias_active():
+            return True
+        if self._mcstat_debias_suspended:
+            return False
+        return (
+            bool(self.mcstat_terms)
+            or self.mcstat_bb_vref is not None
+            or bool(self.mcstat_debias_active)
         )
-        l = ln + lc
 
-        if lbeta is not None:
-            l = l + lbeta
-
-        if lpenalty is not None:
-            l = l + lpenalty
-
-        lext = self._compute_external_nll(full_nll=full_nll)
-        if lext is not None:
-            l = l + lext
-
-        lmcstat = self._compute_mcstat_penalty(full_nll=full_nll)
-        if lmcstat is not None:
-            l = l + lmcstat
+    def _compute_nll_batched(
+        self, x=None, data=None, x0=None, beta0=None, profile=True, full_nll=False
+    ):
+        """Negative log-likelihood [B] at the B columns of x [npar, B]: the sum
+        of the terms of _compute_nll_components (see there for the inputs).
+        _compute_nll is this at the fitter's own point."""
+        ln, lc, *rest, _ = self._compute_nll_components(
+            x, data=data, x0=x0, beta0=beta0, profile=profile, full_nll=full_nll
+        )
+        l = ln + lc  # main's order of summation, so B = 1 stays as it is
+        for t in rest:
+            if t is not None:
+                l = l + t
         return l
+
+    def _compute_nll(self, profile=True, full_nll=False):
+        return self._compute_nll_batched(profile=profile, full_nll=full_nll)[0]
 
     def _compute_mcstat_penalty(self, full_nll=False):
         """The MC-stat de-biasing terms outside the data term: the continuous-M
