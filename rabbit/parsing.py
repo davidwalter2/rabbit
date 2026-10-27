@@ -476,7 +476,10 @@ def common_parser():
         "--chisqFit",
         default=False,
         action="store_true",
-        help="Perform diagonal chi-square fit instead of poisson likelihood fit",
+        help="Perform diagonal chi-square fit instead of poisson likelihood fit. "
+        "The per-bin variances are the data variances of the input tensor if it "
+        "has them, otherwise the data themselves (Poisson); for the Asimov "
+        "dataset they are the expected yields",
     )
     parser.add_argument(
         "--covarianceFit",

@@ -1124,8 +1124,11 @@ class Fitter:
         lognobs is log(nobs) with log 1 = 0 in empty bins: the offset that
         gives the saturated Poisson likelihood, for numerical precision in the
         minimizer (a plain log(nobs) makes -nobs (log nexp - log nobs) NaN
-        there). varnobs is the chi2 data variance, `variances` or else nobs,
-        and None for the other fits; a chi2 fit needs nobs > 0.
+        there). varnobs is the chi2 data variance, `variances` (the data
+        variances, e.g. of weighted data) or else nobs (Poisson), and None for
+        the other fits, which do not read `variances` (--covarianceFit has its
+        data covariance from the input). A chi2 fit needs nobs > 0 and
+        variances > 0.
         """
         nobs = tf.convert_to_tensor(nobs, dtype=self.indata.dtype)
         varnobs = None
@@ -1137,15 +1140,24 @@ class Fitter:
                     raise RuntimeError(message)
             else:
                 tf.debugging.assert_positive(nobs, message=message)
-            varnobs = (
-                nobs
-                if variances is None
-                else tf.convert_to_tensor(variances, dtype=self.indata.dtype)
-            )
+            varnobs = nobs
+            if variances is not None:
+                varnobs = tf.convert_to_tensor(variances, dtype=self.indata.dtype)
+                message = (
+                    "Bins with data variance <= 0 encountered, chi^2 fit can not "
+                    "be performed."
+                )
+                if tf.executing_eagerly():
+                    if tf.math.reduce_any(varnobs <= 0).numpy():
+                        raise RuntimeError(message)
+                else:
+                    tf.debugging.assert_positive(varnobs, message=message)
         nobssafe = tf.where(nobs == 0.0, tf.constant(1.0, dtype=nobs.dtype), nobs)
         return nobs, varnobs, tf.math.log(nobssafe)
 
     def set_nobs(self, values, variances=None):
+        """Set the observed data; `variances` are the chi2 data variances
+        (see _observations)."""
         values, varnobs, lognobs = self._observations(values, variances)
         if self.chisqFit:
             self.varnobs.assign(varnobs)
