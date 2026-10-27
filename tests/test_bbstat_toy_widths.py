@@ -8,16 +8,24 @@ constraints. For normal-multiplicative the width is 1/sqrt(kstat) =
 sqrt(varbeta) / sumw; the toys drew with sqrt(varbeta), the absolute MC stat
 uncertainty of the yield, a factor sumw too wide (sqrt(varbeta) was the
 relative width while varbeta was 1/kstat). Masked entries have no constraint
-and keep their centre.
+and keep their centre. The normal types also drew one deviate for all entries
+(tf.random.normal with shape=[]), fully correlated MC stat fluctuations that
+made the toy pulls of the signal strength 1.4 to 1.8 wide.
 """
 
+import os
 from types import SimpleNamespace
 
+import hist
 import numpy as np
 import pytest
 import tensorflow as tf
 
+from rabbit import fitter, inputdata, tensorwriter
 from rabbit.bbstat.bbstat import BinByBinStat
+from rabbit.param_models.helpers import load_model
+
+from .test_sparse_fit import make_options
 
 # Four bins, three processes: "sig" (weight 5, kstat 4 to 400), "bkg"
 # (weight 0.5, kstat 400) and "flat" without MC stat uncertainty (masked in
@@ -109,3 +117,81 @@ def test_bayesian_values(stat_type, mode):
     }[stat_type]
     draws = _draws(bb, bb.randomize_bayes, bb.beta)
     _check_spread(bb, stat_type, draws, centre, width)
+
+
+@pytest.mark.parametrize("randomize", ["frequentist", "bayes"])
+@pytest.mark.parametrize("mode", ["full", "lite"])
+@pytest.mark.parametrize("stat_type", ["normal-multiplicative", "normal-additive"])
+def test_normal_draws_are_independent(stat_type, mode, randomize):
+    """Each entry draws its own normal deviate: tf.random.normal with
+    shape=[] drew one and scaled it by every entry's width."""
+    bb = _bbstat(stat_type, mode)
+    method = getattr(bb, f"randomize_{randomize}")
+    variable = bb.beta0 if randomize == "frequentist" else bb.beta
+    draws = _draws(bb, method, variable).reshape(NDRAW, -1)
+    draws = draws[:, draws.std(axis=0) > 0.0]
+    corr = np.corrcoef(draws.T)
+    offdiag = corr[~np.eye(len(corr), dtype=bool)]
+    assert np.abs(offdiag).max() < 0.1
+
+
+# Seven bins of a "sig" with weight 2 (kstat 10 to 100) and a "bkg" with
+# weight 1 (kstat 150), data at the nominal yields.
+FIT_NSIG = np.array([10.0, 30.0, 60.0, 100.0, 60.0, 30.0, 10.0])
+FIT_SUMW = np.stack([2.0 * FIT_NSIG, np.full(7, 150.0)], axis=-1)
+FIT_SUMW2 = np.stack([4.0 * FIT_NSIG, np.full(7, 150.0)], axis=-1)
+NTOYS = 40
+
+
+def _fitter(outdir, stat_type, mode):
+    ax = hist.axis.Regular(len(FIT_NSIG), 0, len(FIT_NSIG), name="x")
+    data = hist.Hist(ax, storage=hist.storage.Double())
+    data.values()[...] = FIT_SUMW.sum(axis=-1)
+    writer = tensorwriter.TensorWriter()
+    writer.add_channel(data.axes, "ch0")
+    writer.add_data(data, "ch0")
+    for i, name in enumerate(["sig", "bkg"]):
+        h = hist.Hist(ax, storage=hist.storage.Weight())
+        h.values()[...] = FIT_SUMW[:, i]
+        h.variances()[...] = FIT_SUMW2[:, i]
+        writer.add_process(h, name, "ch0", signal=name == "sig")
+    writer.add_norm_systematic("bkg_norm", "bkg", "ch0", 1.05)
+    writer.write(outfolder=outdir, outfilename="toy_widths")
+
+    indata = inputdata.FitInputData(os.path.join(outdir, "toy_widths.hdf5"))
+    options = make_options(
+        binByBinStatType=stat_type, binByBinStatMode=mode, earlyStopping=20
+    )
+    f = fitter.Fitter(indata, load_model("Mu", indata), options)
+    f.set_nobs(indata.data_obs)
+    return f
+
+
+@pytest.mark.parametrize(
+    "stat_type, mode",
+    [
+        ("normal-multiplicative", "full"),
+        ("normal-multiplicative", "lite"),
+        ("normal-additive", "full"),
+    ],
+)
+def test_normal_toy_pulls(stat_type, mode, tmp_path):
+    """Frequentist toys fit, and the pulls of the signal strength and the
+    background normalization have unit width (within the statistics of NTOYS
+    toys; 200 toys give 1.02 to 1.13 against 1.05 to 1.09 for gamma)."""
+    f = _fitter(str(tmp_path), stat_type, mode)
+    xtrue = f.x0default.numpy()
+    tf.random.set_seed(11)
+    pulls = []
+    for _ in range(NTOYS):
+        f.defaultassign()
+        f.toyassign(syst_randomize="frequentist", data_randomize="poisson")
+        f.minimize()
+        val, grad, hess = [t.numpy() for t in f.loss_val_grad_hess()]
+        assert np.isfinite(val) and np.max(np.abs(grad)) < 1e-3
+        err = np.sqrt(np.diag(np.linalg.inv(hess)))
+        pulls.append((f.x.numpy() - xtrue) / err)
+    pulls = np.array(pulls)
+    assert np.abs(pulls).max() < 4.5
+    np.testing.assert_allclose(pulls.mean(axis=0), 0.0, atol=0.6)
+    np.testing.assert_allclose(pulls.std(axis=0), 1.0, atol=0.45)

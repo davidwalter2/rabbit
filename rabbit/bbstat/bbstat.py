@@ -333,7 +333,7 @@ class BinByBinStat:
                 stddev_beta0 = tf.ones_like(self.beta0)
             self.beta.assign(
                 tf.random.normal(
-                    shape=[],
+                    shape=tf.shape(self.beta0),
                     mean=self.beta0,
                     stddev=stddev_beta0,
                     dtype=self.beta.dtype,
@@ -395,7 +395,7 @@ class BinByBinStat:
                 stddev_beta = tf.ones_like(self.beta)
             self.set_beta0(
                 tf.random.normal(
-                    shape=[],
+                    shape=tf.shape(self.beta),
                     mean=self.beta,
                     stddev=stddev_beta,
                     dtype=self.beta.dtype,
