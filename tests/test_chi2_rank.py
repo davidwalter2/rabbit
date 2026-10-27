@@ -306,20 +306,21 @@ def test_a_regular_covariance_is_solved_as_before(fit_1d, profile):
 
 @pytest.mark.parametrize("profile", [False, True])
 @pytest.mark.parametrize(
-    "args,ndf",
+    "args,declared,ndf",
     [
         # sums to one: one null direction, as its ndf_reduction declares
-        (["Normalize", "ch0", "x"], 19),
-        # declares one too, but a ratio of two normalized distributions obeys
-        # no fixed linear identity: its covariance is regular
-        (["Normratio", "ch0", "ch0", "x:slice(0,10)", "x:slice(10,20)"], 10),
+        (["Normalize", "ch0", "x"], 1, 19),
+        # a ratio of two normalized distributions obeys no fixed linear
+        # identity: its covariance is regular (it declared one until the ndf
+        # became the rank)
+        (["Normratio", "ch0", "ch0", "x:slice(0,10)", "x:slice(10,20)"], 0, 10),
     ],
 )
-def test_declared_identities(fit_1d, profile, args, ndf):
+def test_declared_identities(fit_1d, profile, args, declared, ndf):
     """The value is the one of the previous pseudo-inverse, the ndf the rank."""
     f = fit_1d
     m = mh.load_mapping(args[0], f.indata, *args[1:])
-    assert m.ndf_reduction == 1
+    assert m.ndf_reduction == declared
     res, cov = f.residuals(m.compute_flat, m._get_data, profile)
     pinv_chi2 = float(res @ np.linalg.pinv(cov) @ res)
     chi2, ndf_found = f.chi2(m.compute_flat, m._get_data, m.ndf_reduction, profile)
