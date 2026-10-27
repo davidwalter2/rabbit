@@ -10,7 +10,9 @@ to 10) with every point at maxiter; dogleg's Cholesky failed on the same
 Hessian and its scan points were not minimised at all. These tests pin down
 that the scanned parameter stays exactly at the scan value and that the
 profile is trust-krylov's, which never moved it. The closed-form solve of a
-quadratic likelihood factorises the same Hessian and failed outright.
+quadratic likelihood factorises the same Hessian and failed outright, and
+contour_scan's hess_mode="frozen" took its constraint Hessian from cov^-1,
+which couples a frozen parameter to the floating ones.
 """
 
 import os
@@ -162,3 +164,55 @@ def test_linear_solve_keeps_the_frozen_parameter(noHessian):
         # one exact Newton step: the floating gradient vanishes
         _, grad = f.loss_val_grad()
         assert np.max(np.abs(grad.numpy()[f.floating_indices])) < 1e-6
+
+
+def _tensor_with_signal_norm(outdir):
+    """make_test_tensor plus a 10% signal normalisation, degenerate with the
+    POI: freezing it narrows the POI interval about fivefold."""
+    h = make_histograms()
+    writer = tensorwriter.TensorWriter()
+    writer.add_channel(h["data"].axes, "ch0")
+    writer.add_data(h["data"], "ch0")
+    writer.add_process(h["sig"], "sig", "ch0", signal=True)
+    writer.add_process(h["bkg"], "bkg", "ch0")
+    writer.add_norm_systematic("bkg_norm", "bkg", "ch0", 1.05)
+    writer.add_norm_systematic("sig_norm", "sig", "ch0", 1.10)
+    writer.add_systematic(
+        [h["syst_up"], h["syst_dn"]], "bkg_shape", "bkg", "ch0", symmetrize="average"
+    )
+    writer.write(outfolder=outdir, outfilename="signorm")
+    return os.path.join(outdir, "signorm.hdf5")
+
+
+def test_contour_frozen_hessian_mode_keeps_the_frozen_parameter():
+    """contour_scan(hess_mode="frozen") (--asymImpactsHess frozen) uses cov^-1
+    as the constraint Hessian, also when parameters are frozen (the
+    freeze-group asymmetric impacts, --freezeParameters). Its frozen rows and
+    columns must be zero, as in the exact Hessian: through the coupling,
+    trust-constr moved a frozen sig_norm by about one sigma and returned a
+    wrong, sign-flipped interval."""
+    with tempfile.TemporaryDirectory() as outdir:
+        f = _fitted(_tensor_with_signal_norm(outdir), "trust-krylov")
+        nll_min = f.reduced_nll().numpy()
+        ifz = int(np.where(f.parms.astype(str) == "sig_norm")[0][0])
+
+        def contour(mode):
+            intervals, dx = f.contour_scan("sig", nll_min, q=1, hess_mode=mode)
+            # dx is res.x - xval per side, NaN where the side did not converge
+            return intervals, dx[:, ifz]
+
+        free_exact, _ = contour("exact")
+        free_frozen, _ = contour("frozen")
+        f.freeze_params("sig_norm")
+        exact, dfz_exact = contour("exact")
+        frozen, dfz_frozen = contour("frozen")
+        f.defreeze_params("sig_norm")
+
+    np.testing.assert_array_equal(dfz_exact, [0.0, 0.0])
+    np.testing.assert_array_equal(dfz_frozen, [0.0, 0.0])
+    np.testing.assert_allclose(frozen, exact, rtol=1e-4)
+    # nothing frozen: the mode agrees with "exact", as it always did
+    np.testing.assert_allclose(free_frozen, free_exact, rtol=1e-4)
+    # signed [down, up], and freezing the degenerate normalisation narrows it
+    assert exact[0] < 0 < exact[1]
+    assert np.all(np.abs(exact) < 0.5 * np.abs(free_exact))

@@ -6262,6 +6262,13 @@ class Fitter:
 
         elif hess_mode == "frozen":
             postfit_hess = np.linalg.inv(self.cov.numpy())
+            # Frozen rows and columns zero, as in the exact Hessian
+            # (stop_gradient). cov^-1 couples a frozen parameter to the
+            # floating ones, and trust-constr's projected CG would move it
+            # through that coupling: its constraint-Jacobian column is zero, so
+            # nothing holds it back.
+            self._zero_frozen_columns(postfit_hess, axis=0)
+            self._zero_frozen_columns(postfit_hess, axis=1)
 
             def scipy_hess(x, v):
                 return v[0] * postfit_hess
