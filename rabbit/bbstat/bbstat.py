@@ -274,6 +274,24 @@ class BinByBinStat:
     def beta_default_assign(self):
         self.beta.assign(self.beta0)
 
+    def _constraint_width(self):
+        """Standard deviation of β under its constraint, at its minimum β = β0.
+
+        From :meth:`lbeta`: 1/sqrt(kstat) for normal-multiplicative
+        (0.5·kstat·(β - β0)²), 1 for normal-additive (0.5·(β - β0)², β in
+        units of sqrt(varbeta)), and sqrt(β0/kstat) for gamma (the inverse
+        square root of the curvature kstat·β0/β² of kstat·(β - β0·log β) at
+        β = β0). Masked entries of the multiplicative types have no
+        constraint (and a placeholder kstat): 0.
+        """
+        if self.binByBinStatType == "normal-additive":
+            return tf.ones_like(self.beta0)
+        if self.binByBinStatType == "normal-multiplicative":
+            width = tf.math.rsqrt(self.kstat)
+        else:
+            width = tf.sqrt(self.beta0 / self.kstat)
+        return tf.where(self.betamask, tf.zeros_like(width), width)
+
     @property
     def is_linear(self):
         """Whether the BBB contribution to the loss is purely quadratic.
@@ -310,7 +328,7 @@ class BinByBinStat:
             self.beta.assign(betagen)
         else:
             if self.binByBinStatType == "normal-multiplicative":
-                stddev_beta0 = tf.sqrt(self.varbeta)
+                stddev_beta0 = self._constraint_width()
             elif self.binByBinStatType == "normal-additive":
                 stddev_beta0 = tf.ones_like(self.beta0)
             self.beta.assign(
@@ -372,7 +390,7 @@ class BinByBinStat:
             self.set_beta0(beta0gen)
         else:
             if self.binByBinStatType == "normal-multiplicative":
-                stddev_beta = tf.sqrt(self.varbeta)
+                stddev_beta = self._constraint_width()
             elif self.binByBinStatType == "normal-additive":
                 stddev_beta = tf.ones_like(self.beta)
             self.set_beta0(
