@@ -5777,10 +5777,14 @@ class Fitter:
         return callback
 
     def minimizer_status(self):
-        """Convergence outcome of the last :meth:`fit`, or None if none ran.
+        """The minimizer's outcome of the last :meth:`fit`, or None if none ran.
 
-        NB ``success`` is scipy's flag, not a convergence test on its own:
-        BFGS reports False ("precision loss") at points with EDM ~1e-17.
+        A diagnostic, not the fit's convergence verdict, which is the EDM: the
+        default tolerances (gtol 0) run the minimizer until it cannot improve,
+        so at a converged point it usually reports a failure (trust-krylov
+        status 2, "A bad approximation caused failure to predict
+        improvement"). Likewise ``success`` is scipy's flag: BFGS reports False
+        ("precision loss") at points with EDM ~1e-17.
 
         A round the minimizer did not finish has no scipy result; it reports
         success False and status -2 for an --earlyStopping stop (the message
