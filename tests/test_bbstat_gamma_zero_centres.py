@@ -18,7 +18,9 @@ reach the threshold, so the likelihood was NaN where every centre of a bin is 0
 - through the Fitter: finite value, gradient (also jit-compiled) and Hessian,
   equal to finite differences;
 - a frequentist toy with zero centres converges to the minimum of the same toy
-  with the zero centres replaced by a small epsilon.
+  with the zero centres replaced by a small epsilon;
+- columns of centres with zeros in one batched evaluation equal the single
+  evaluations.
 """
 
 import os
@@ -226,3 +228,39 @@ def test_frequentist_toy_fit(chisq, tmp_path):
     f.minimize()
     np.testing.assert_allclose(f.x.numpy(), x, rtol=0, atol=1e-5)
     assert abs(f.reduced_nll().numpy() - nll) < 1e-4
+
+
+@pytest.mark.parametrize("chisq", [False, True])
+def test_batched_equals_single(chisq, tmp_path):
+    """B columns of centres with zeros (vectorized over the batch, Newton solve
+    and threshold profile included) at B points equal B single evaluations,
+    value and gradient."""
+    f = _fitter(str(tmp_path), chisq)
+    nominal = f.bbstat.beta0.numpy()
+    whole_bins = nominal.copy()
+    whole_bins[[0, 3]] = 0.0
+    sig = nominal.copy()
+    sig[:, 0] = 0.0
+    columns = [np.where(ZERO[:, :2], 0.0, nominal), whole_bins, sig, nominal]
+    beta0 = np.stack(columns, axis=-1)
+    rng = np.random.default_rng(5)
+    X = f.x.numpy()[:, None] + 0.2 * rng.standard_normal((f.x.shape[0], len(columns)))
+
+    Xt = tf.constant(X)
+    with tf.GradientTape() as tape:
+        tape.watch(Xt)
+        batched = f._compute_nll_batched(Xt, beta0=tf.constant(beta0))
+        total = tf.reduce_sum(batched)
+    grads = tape.gradient(total, Xt).numpy()
+    batched = batched.numpy()
+    assert np.isfinite(batched).all() and np.isfinite(grads).all()
+
+    xsave = f.x.numpy()
+    for b in range(len(columns)):
+        f.bbstat.set_beta0(tf.constant(beta0[..., b]))
+        f.x.assign(X[:, b])
+        val, grad = [t.numpy() for t in f.loss_val_grad()]
+        np.testing.assert_allclose(batched[b], val, rtol=1e-11)
+        np.testing.assert_allclose(grads[:, b], grad, rtol=1e-9, atol=1e-10)
+    f.x.assign(xsave)
+    f.bbstat.set_beta0(tf.constant(nominal))
