@@ -16,7 +16,8 @@ baseline_models = {
     "ExtendedABCDIsoMT": "abcd_isomtmt_model",
     "SmoothABCDIsoMT": "abcd_isomtmt_model",
     "SmoothExtendedABCDIsoMT": "abcd_isomtmt_model",
-    "LIV": "sme_model"
+    "LIV": "sme_model",
+    "LIV_rapidity": "sme_double_differential"
 }
 
 
