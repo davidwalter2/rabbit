@@ -131,6 +131,15 @@ def parseArgs():
     parser.add_argument(
         "--annot", type = bool, default = False, help="display values in center of the cell"
     )
+    parser.add_argument(
+        "--paramOrder",
+        nargs="+",
+        default=[],
+        help="""
+        Parameter names to plot first, in the given order (e.g. '--paramOrder cxxu dxxu').
+        Remaining parameters follow in their original order; combine with --n_params N to keep only the first N.
+        """,
+    )
     args = parser.parse_args()
 
 
@@ -162,10 +171,27 @@ def plot_matrix(
     # fig, ax = plt.subplots(figsize=(8, 6))
     fig, ax = plt.subplots(figsize=(15, 13))
 
+    labels = None
+    if len(args.paramOrder) > 0:
+        names = [str(n) for n in hist_obj.axes[0]]
+        missing = [p for p in args.paramOrder if p not in names]
+        if missing:
+            raise ValueError(f"Parameters {missing} from --paramOrder not found in the fit output")
+        order = [names.index(p) for p in args.paramOrder]
+        order += [i for i in range(len(names)) if i not in order]
+        matrix = matrix[np.ix_(order, order)]
+        labels = [names[i] for i in order]
+
     if args.n_params != 0:
         start = int(1*args.n_params)
         # matrix = matrix[start:, start:]
         matrix = matrix[:start, :start]
+        if labels is not None:
+            labels = labels[:start]
+    if len(args.cols) != 0:
+        labels = args.cols
+    elif labels is None:
+        labels = np.linspace(0, matrix.shape[0], matrix.shape[0])
     sns.heatmap(
         matrix,
         cmap=cmap,
@@ -178,8 +204,8 @@ def plot_matrix(
         ax=ax,
         vmin=-1 if args.correlation else None,
         vmax=1 if args.correlation else None,
-        xticklabels = args.cols if len(args.cols) != 0 else np.linspace(0, matrix.shape[0], matrix.shape[0]), 
-        yticklabels = args.cols if len(args.cols) != 0 else np.linspace(0, matrix.shape[0], matrix.shape[0]), 
+        xticklabels = labels,
+        yticklabels = labels,
         fmt = ".3f"
     )
 
