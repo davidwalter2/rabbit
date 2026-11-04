@@ -371,7 +371,8 @@ def compute_external_nll(terms, x, dtype, full_nll=False):
     terms : list[dict]
         tf-side per-term dicts as returned by :func:`build_tf_external_terms`.
     x : tf.Tensor
-        Current full parameter vector.
+        Current full parameter vector [npar], or a batch of them [npar, B]
+        (batch axis last, see ``Fitter._compute_nll_batched``).
     dtype : tf.DType
         Dtype for the accumulator.
     full_nll : bool
@@ -382,7 +383,8 @@ def compute_external_nll(terms, x, dtype, full_nll=False):
     Returns
     -------
     tf.Tensor or None
-        Scalar contribution to the NLL, or ``None`` if ``terms`` is empty.
+        Scalar contribution to the NLL ([B] for a batch ``x``), or ``None`` if
+        ``terms`` is empty.
     """
     if not terms:
         return None
@@ -390,21 +392,21 @@ def compute_external_nll(terms, x, dtype, full_nll=False):
         t.get("const", 0.0) + (t.get("lognorm", 0.0) if full_nll else 0.0)
         for t in terms
     )
-    total = tf.constant(offset, dtype=dtype)
+    batched = x.shape.rank == 2
+    if not batched:
+        x = x[:, None]
+    total = tf.fill(tf.shape(x)[1:], tf.constant(offset, dtype=dtype))
     for term in terms:
-        x_sub = tf.gather(x, term["indices"])
+        x_sub = tf.gather(x, term["indices"])  # [k, B]
         if term["grad"] is not None:
-            total = total + tf.reduce_sum(term["grad"] * x_sub)
+            total = total + tf.reduce_sum(term["grad"][:, None] * x_sub, axis=0)
         if term["hess_dense"] is not None:
             # 0.5 * x_sub^T H x_sub
             total = total + 0.5 * tf.reduce_sum(
-                x_sub * tf.linalg.matvec(term["hess_dense"], x_sub)
+                x_sub * tf.matmul(term["hess_dense"], x_sub), axis=0
             )
         elif term["hess_csr"] is not None:
-            # Loss = 0.5 * x_sub^T H x_sub via CSR matvec (H symmetric).
-            Hx = tf.squeeze(
-                tf_sparse_csr.matmul(term["hess_csr"], x_sub[:, None]),
-                axis=-1,
-            )
-            total = total + 0.5 * tf.reduce_sum(x_sub * Hx)
-    return total
+            # Loss = 0.5 * x_sub^T H x_sub via CSR matmul (H symmetric).
+            Hx = tf_sparse_csr.matmul(term["hess_csr"], x_sub)
+            total = total + 0.5 * tf.reduce_sum(x_sub * Hx, axis=0)
+    return total if batched else total[0]

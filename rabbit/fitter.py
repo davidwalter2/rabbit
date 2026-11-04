@@ -31,6 +31,9 @@ from rabbit.minimizer import (
     minimize_trust_krylov,
     minimize_trust_ncg,
 )
+from rabbit.param_models.param_model import (
+    compute_batched as param_model_compute_batched,
+)
 from rabbit.snapshot import Snapshotter, snapshot_on_signal
 from rabbit.tfhelpers import edmval_cov
 
@@ -142,6 +145,8 @@ class Fitter:
             "loss_val_grad_hessp_revrev",
             "_hessp_batch_graph",
             "_scalar_hessian_fns",
+            # the batched API's traced functions (_batched_fn)
+            "_batched_tf_fns",
             # the traced functions of the other de-biasing setting
             # (_set_mcstat_debias_suspended)
             "_mcstat_tf_standby",
@@ -279,6 +284,9 @@ class Fitter:
         # the shard evaluators read this flag; the Fitter's own blinding
         # branches go through the collaborator.
         self.do_blinding = do_blinding
+        # Read here rather than passed to init_fit_parms, so the saturated-test
+        # re-init in bin/rabbit_fit.py keeps the same frame without plumbing.
+        self.blinding_frame = getattr(options, "blindingFrame", "auto")
         self.prefit_unconstrained_nuisance_uncertainty = (
             options.prefitUnconstrainedNuisanceUncertainty
         )
@@ -300,15 +308,15 @@ class Fitter:
             )
         elif self.covarianceFit:
             if self.indata.data_cov_inv is None:
-                logger.warning(
-                    "No covariance provided, use reciproval of data variances"
+                # --covarianceFit fits the correlations of the data, so a missing
+                # covariance is an error rather than something to guess
+                raise RuntimeError(
+                    "--covarianceFit needs a data covariance, but the input tensor "
+                    "has none. Check that the tensor was written with one "
+                    "(TensorWriter.add_data_covariance); for a chi-square fit with "
+                    "uncorrelated data variances, use --chisqFit instead."
                 )
-                self.data_cov_inv = tf.linalg.diag(
-                    1.0 / self.indata.getattr("data_obs", "data_var")
-                )
-            else:
-                # provided covariance
-                self.data_cov_inv = self.indata.data_cov_inv
+            self.data_cov_inv = self.indata.data_cov_inv
 
         # --- bin-by-bin statistical treatment (β nuisances + masks + kstat).
         # All BBB state is owned by the BinByBinStat helper. Constructed
@@ -510,6 +518,7 @@ class Fitter:
             enabled=self.do_blinding,
             unblind=unblind,
             blinding_group=blinding_group,
+            frame=getattr(self, "blinding_frame", "auto"),
         )
 
         self.parms = np.concatenate([self.param_model.params, self.indata.systs])
@@ -991,33 +1000,41 @@ class Fitter:
 
         self._check_blinded_start_is_evaluable()
 
-    def get_theta(self):
+    # The parameter getters read self.x, or the B columns of x = [npar, B]
+    # (the batched likelihood, _compute_nll_batched); the per-parameter masks
+    # and offsets then broadcast as columns.
+    def get_theta(self, x=None):
+        x = self.x if x is None else x
         start = self.param_model.nparams
-        theta = self.x[start : start + self.indata.nsyst]
+        theta = x[start : start + self.indata.nsyst]
         theta = tf.where(
-            self.frozen_params_mask[start : start + self.indata.nsyst],
+            tfh.per_parameter(
+                self.frozen_params_mask[start : start + self.indata.nsyst], theta
+            ),
             tf.stop_gradient(theta),
             theta,
         )
         return self.blinding.apply_theta(theta)
 
-    def get_model_nui(self):
+    def get_model_nui(self, x=None):
+        x = self.x if x is None else x
         npoi = self.param_model.npoi
         npou = self.param_model.npou
-        nui = self.x[npoi : npoi + npou]
+        nui = x[npoi : npoi + npou]
         # Apply frozen_params_mask the same way get_poi() and get_theta() do.
         # Without this, --freezeParameters silently fails to freeze POUs:
         # the param is registered as frozen but no stop_gradient is applied,
         # so the optimizer updates it anyway.
         nui = tf.where(
-            self.frozen_params_mask[npoi : npoi + npou],
+            tfh.per_parameter(self.frozen_params_mask[npoi : npoi + npou], nui),
             tf.stop_gradient(nui),
             nui,
         )
         return nui
 
-    def get_poi(self):
-        xpoi = self.x[: self.param_model.npoi]
+    def get_poi(self, x=None):
+        x = self.x if x is None else x
+        xpoi = x[: self.param_model.npoi]
         # Offset BEFORE the positivity transform, not after. (x + off)**2 is
         # non-negative for ANY offset, so an additive offset composes with the
         # squared storage rather than fighting it -- x**2 + off is the form
@@ -1032,12 +1049,14 @@ class Fitter:
         else:
             poi = tf.square(xpoi)
         return tf.where(
-            self.frozen_params_mask[: self.param_model.npoi], tf.stop_gradient(poi), poi
+            tfh.per_parameter(self.frozen_params_mask[: self.param_model.npoi], poi),
+            tf.stop_gradient(poi),
+            poi,
         )
 
-    def get_x(self):
+    def get_x(self, x=None):
         return tf.concat(
-            [self.get_poi(), self.get_model_nui(), self.get_theta()], axis=0
+            [self.get_poi(x), self.get_model_nui(x), self.get_theta(x)], axis=0
         )
 
     @property
@@ -1131,21 +1150,42 @@ class Fitter:
 
         return val, jac
 
-    def set_nobs(self, values, variances=None):
+    def _observations(self, nobs, variances=None):
+        """(nobs, varnobs, lognobs) of the observed counts nobs, as the data
+        term reads them; any shape, e.g. [nbins] or [nbins, B] for B toys.
+
+        lognobs is log(nobs) with log 1 = 0 in empty bins: the offset that
+        gives the saturated Poisson likelihood, for numerical precision in the
+        minimizer (a plain log(nobs) makes -nobs (log nexp - log nobs) NaN
+        there). varnobs is the chi2 data variance, `variances` or else nobs,
+        and None for the other fits; a chi2 fit needs nobs > 0.
+        """
+        nobs = tf.convert_to_tensor(nobs, dtype=self.indata.dtype)
+        varnobs = None
         if self.chisqFit:
             # covariance from data stat
-            if tf.math.reduce_any(values <= 0).numpy():
-                raise RuntimeError(
-                    "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
-                )
-            self.varnobs.assign(values if variances is None else variances)
+            message = "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
+            if tf.executing_eagerly():
+                if tf.math.reduce_any(nobs <= 0).numpy():
+                    raise RuntimeError(message)
+            else:
+                tf.debugging.assert_positive(nobs, message=message)
+            varnobs = (
+                nobs
+                if variances is None
+                else tf.convert_to_tensor(variances, dtype=self.indata.dtype)
+            )
+        nobssafe = tf.where(nobs == 0.0, tf.constant(1.0, dtype=nobs.dtype), nobs)
+        return nobs, varnobs, tf.math.log(nobssafe)
+
+    def set_nobs(self, values, variances=None):
+        values, varnobs, lognobs = self._observations(values, variances)
+        if self.chisqFit:
+            self.varnobs.assign(varnobs)
 
         self._check_mcstat_empty_halves(values)
         self.nobs.assign(values)
-        # compute offset for poisson nll improved numerical precision in minimizatoin
-        # the offset is chosen to give the saturated likelihood
-        nobssafe = tf.where(values == 0.0, tf.constant(1.0, dtype=values.dtype), values)
-        self.lognobs.assign(tf.math.log(nobssafe))
+        self.lognobs.assign(lognobs)
         if self.chisqFit and getattr(self, "mcstat_bb_vref", None) is not None:
             # its per-bin variance is the data variance
             self._update_mcstat_bb_vref()
@@ -2270,17 +2310,21 @@ class Fitter:
         )
 
     def _mthetaalpha(self, theta):
-        """Systematic coefficient vector contracted with logk: theta for a
-        symmetric tensor, [theta, theta*alpha] for the asymmetric interpolation."""
+        """Systematic coefficient columns contracted with logk: theta for a
+        symmetric tensor, [theta, theta*alpha] for the asymmetric interpolation.
+        theta [nsyst] gives one column, [nsyst, 1]; theta [nsyst, B] gives B."""
+        # the column count is explicit: with nsyst == 0, a -1 would be inferred
+        # from the non-zero dimensions alone
+        ncol = 1 if theta.shape.rank == 1 else tf.shape(theta)[-1]
         if self.indata.symmetric_tensor:
-            return tf.reshape(theta, [self.indata.nsyst, 1])
+            return tf.reshape(theta, [self.indata.nsyst, ncol])
         twox = 2.0 * theta
         twox2 = twox * twox
         alpha = 0.125 * twox * (twox2 * (3.0 * twox2 - 10.0) + 15.0)
         alpha = tf.clip_by_value(alpha, -1.0, 1.0)
         thetaalpha = theta * alpha
-        mthetaalpha = tf.stack([theta, thetaalpha], axis=0)  # [2, nsyst]
-        return tf.reshape(mthetaalpha, [2 * self.indata.nsyst, 1])
+        mthetaalpha = tf.stack([theta, thetaalpha], axis=0)  # [2, nsyst(, B)]
+        return tf.reshape(mthetaalpha, [2 * self.indata.nsyst, ncol])
 
     def _fold_norm(self, halves):
         """The raw fold templates ([k, ...], halves=False) or the two rescaled
@@ -4283,29 +4327,29 @@ class Fitter:
         # needed when an external caller requests per-process yields, or for
         # binByBinStat in "full" mode. The default is True for backward
         # compatibility; the NLL/grad/HVP path passes compute_norm=False.
-        poi = self.get_poi()
-        model_nui = self.get_model_nui()
-        theta = self.get_theta()
+        nexpcentral, normcentral = self._compute_yields_noBBB_batched(
+            self.x[:, None], full=full, compute_norm=compute_norm
+        )
+        if normcentral is not None:
+            normcentral = normcentral[..., 0]
+        return nexpcentral[:, 0], normcentral
+
+    def _compute_yields_noBBB_batched(self, x, full=True, compute_norm=True):
+        """Yields without bin-by-bin stat at the B columns of x [npar, B]:
+        nexpcentral [nbins, B] and, with compute_norm, normcentral
+        [nbins, nproc, B] (else None). The batch axis goes last, so the logk
+        contraction is the same [.., nsyst] x [nsyst, B] product for B = 1
+        and reads logk once for all B columns otherwise."""
+        poi = self.get_poi(x)
+        model_nui = self.get_model_nui(x)
+        theta = self.get_theta(x)
 
         all_params = tf.concat([poi, model_nui], axis=0)
-        rnorm = self.param_model.compute(all_params, full)
+        rnorm = param_model_compute_batched(self.param_model, all_params, full)
 
         normcentral = None
-        if self.indata.symmetric_tensor:
-            mthetaalpha = tf.reshape(theta, [self.indata.nsyst, 1])
-        else:
-            # interpolation for asymmetric log-normal
-            twox = 2.0 * theta
-            twox2 = twox * twox
-            alpha = 0.125 * twox * (twox2 * (3.0 * twox2 - 10.0) + 15.0)
-            alpha = tf.clip_by_value(alpha, -1.0, 1.0)
-
-            thetaalpha = theta * alpha
-
-            mthetaalpha = tf.stack(
-                [theta, thetaalpha], axis=0
-            )  # now has shape [2,nsyst]
-            mthetaalpha = tf.reshape(mthetaalpha, [2 * self.indata.nsyst, 1])
+        # [nsyst, B], or [2 * nsyst, B] with the asymmetric interpolation
+        mthetaalpha = self._mthetaalpha(theta)
 
         if self.indata.sparse:
             # Inner contraction logk · mthetaalpha via tf.linalg.sparse's
@@ -4314,52 +4358,75 @@ class Fitter:
             # kernel. NOTE: SparseMatrixMatMul has no XLA kernel, so the
             # enclosing loss/grad/HVP tf.functions are built with
             # jit_compile=False in sparse mode (see _make_tf_functions).
-            logsnorm = tf.squeeze(
-                tf_sparse_csr.matmul(self.logk_csr, mthetaalpha),
-                axis=-1,
-            )
+            logsnorm = tf_sparse_csr.matmul(self.logk_csr, mthetaalpha)  # [nnz, B]
 
-            # Build a sparse [nbinsfull, nproc] tensor whose values absorb
-            # the per-entry syst variation and the per-(bin, proc) POI
-            # scaling rnorm. The sparsity pattern is unchanged from
-            # self.indata.norm, so with_values lets us reuse the indices.
+            # The values of a [nbinsfull, nproc] sparse tensor with the sparsity
+            # pattern of self.indata.norm (without the masked channels' entries
+            # unless full), which absorb the per-entry syst variation and the
+            # per-(bin, proc) POI scaling rnorm.
+            indices = self.indata.norm.indices
+            normvalues = self.indata.norm.values[:, None]
+            rnorm_init_at_norm = self.rnorm_init_at_norm
+            nbins_out = int(self.indata.norm.dense_shape[0])
+            if not full and self.indata.nbinsmasked:
+                keep = indices[:, 0] < self.indata.nbins
+                indices = tf.boolean_mask(indices, keep)
+                normvalues = tf.boolean_mask(normvalues, keep)
+                logsnorm = tf.boolean_mask(logsnorm, keep)
+                if rnorm_init_at_norm is not None:
+                    rnorm_init_at_norm = tf.boolean_mask(rnorm_init_at_norm, keep)
+                nbins_out = self.indata.nbins
+
+            # rnorm is [nbins or 1, nproc or 1, B]: its value at each entry,
+            # broadcasting a singleton bin or process axis
+            if rnorm.shape[0] == 1 and rnorm.shape[1] == 1:
+                rnorm_at_norm = rnorm[0]
+            elif rnorm.shape[0] == 1:
+                rnorm_at_norm = tf.gather(rnorm[0], indices[:, 1])
+            elif rnorm.shape[1] == 1:
+                rnorm_at_norm = tf.gather(rnorm[:, 0], indices[:, 0])
+            else:
+                rnorm_at_norm = tf.gather_nd(rnorm, indices)
             if self.indata.systematic_type == "log_normal":
                 # values[i] = norm[i] * exp(logsnorm[i]) * rnorm[bin, proc]
-                snormnorm_sparse = self.indata.norm.with_values(
-                    tf.exp(logsnorm) * self.indata.norm.values
-                )
-                snormnorm_sparse = snormnorm_sparse * rnorm
+                values = tf.exp(logsnorm) * normvalues * rnorm_at_norm
             else:  # "normal"
                 # values[i] = norm[i] * rnorm[bin, proc] + logsnorm[i]
                 # rnorm_init factors out of the contraction (see
                 # _init_logk_scaled), so it is applied here rather than
                 # being baked into logk.
-                if self.rnorm_init_at_norm is not None:
-                    logsnorm = logsnorm * self.rnorm_init_at_norm
-                snormnorm_sparse = self.indata.norm * rnorm
-                snormnorm_sparse = snormnorm_sparse.with_values(
-                    snormnorm_sparse.values + logsnorm
-                )
-
-            if not full and self.indata.nbinsmasked:
-                snormnorm_sparse = tfh.simple_sparse_slice0end(
-                    snormnorm_sparse, self.indata.nbins
-                )
+                if rnorm_init_at_norm is not None:
+                    logsnorm = logsnorm * rnorm_init_at_norm[:, None]
+                values = normvalues * rnorm_at_norm + logsnorm
 
             # Per-bin yields via unsorted_segment_sum on the sparse values
-            # keyed by bin index. Equivalent to tf.sparse.reduce_sum(...,
-            # axis=-1) but uses the dedicated segment_sum kernel directly,
-            # which has lower per-call overhead. The dense [nbinsfull,
-            # nproc] grid is only materialized when an external caller
-            # requested per-process yields (compute_norm=True).
-            nbinsfull_int = int(snormnorm_sparse.dense_shape[0])
+            # keyed by bin index, the dedicated segment_sum kernel with low
+            # per-call overhead. The dense [nbins, nproc] grid is only
+            # materialized when an external caller requested per-process
+            # yields (compute_norm=True).
             nexpcentral = tf.math.unsorted_segment_sum(
-                snormnorm_sparse.values,
-                snormnorm_sparse.indices[:, 0],
-                num_segments=nbinsfull_int,
+                values, indices[:, 0], num_segments=nbins_out
             )
             if compute_norm:
-                normcentral = tf.sparse.to_dense(snormnorm_sparse)
+                nproc = tf.cast(self.indata.nproc, indices.dtype)
+                if values.shape[-1] == 1:
+                    # B = 1: tf.sparse.to_dense, the fastest densification
+                    # (on CPU about 4x faster than a scatter_nd)
+                    dense_shape = tf.stack([tf.cast(nbins_out, indices.dtype), nproc])
+                    normcentral = tf.sparse.to_dense(
+                        tf.SparseTensor(indices, values[:, 0], dense_shape)
+                    )[..., None]
+                else:
+                    # a segment sum over the flat (bin, proc) index, the
+                    # kernel of nexpcentral above
+                    normcentral = tf.reshape(
+                        tf.math.unsorted_segment_sum(
+                            values,
+                            indices[:, 0] * nproc + indices[:, 1],
+                            num_segments=tf.cast(nbins_out, indices.dtype) * nproc,
+                        ),
+                        [nbins_out, self.indata.nproc, -1],
+                    )
         else:
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull
@@ -4382,41 +4449,82 @@ class Fitter:
                 )
 
             logsnorm = tf.matmul(mlogk, mthetaalpha)
-            logsnorm = tf.reshape(logsnorm, [nbins, self.indata.nproc])
+            logsnorm = tf.reshape(
+                logsnorm, [nbins, self.indata.nproc, tf.shape(mthetaalpha)[-1]]
+            )
 
             if self.indata.systematic_type == "log_normal":
                 snorm = tf.exp(logsnorm)
-                snormnorm = snorm * norm
+                snormnorm = snorm * norm[..., None]
                 normcentral = rnorm * snormnorm
             elif self.indata.systematic_type == "normal":
                 # rnorm_init factors out of the contraction (see
                 # _init_logk_scaled), so it is applied here rather than
                 # being baked into logk.
                 if self.rnorm_init is not None:
-                    logsnorm = logsnorm * self.rnorm_init[:nbins]
-                normcentral = norm * rnorm + logsnorm
+                    logsnorm = logsnorm * self.rnorm_init[:nbins][..., None]
+                normcentral = norm[..., None] * rnorm + logsnorm
 
-            nexpcentral = tf.reduce_sum(normcentral, axis=-1)
+            nexpcentral = tf.reduce_sum(normcentral, axis=1)
 
         return nexpcentral, normcentral
 
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
+        nexp, norm, beta = self._compute_yields_with_beta_batched(
+            self.x[:, None], profile=profile, compute_norm=compute_norm, full=full
+        )
+        return tuple(None if t is None else t[..., 0] for t in (nexp, norm, beta))
+
+    def _observed_data(self):
+        """The observations (nobs, varnobs, lognobs) as columns [nbins, 1]
+        shared by every element of a batch (varnobs None without one)."""
+        return tuple(
+            None if t is None else tf.convert_to_tensor(t)[:, None]
+            for t in (self.nobs, self.varnobs, self.lognobs)
+        )
+
+    def _compute_yields_with_beta_batched(
+        self, x, data=None, profile=True, compute_norm=False, full=True, beta0=None
+    ):
+        """_compute_yields_with_beta at the B columns of x [npar, B]: nexp
+        [nbins, B], norm [nbins, nproc, B] or None, beta [.., B] or None.
+
+        data: (nobs, varnobs, lognobs), each [nbins, 1] (shared) or [nbins, B]
+        (see _observations); default the fitter's observations. beta0: the
+        bin-by-bin stat constraint centres, of bbstat.beta_shape (masked
+        channels included) plus the batch axis (default the stored ones). Bin-by-bin stat is element-wise in the bins:
+        B = 1 calls profile_and_apply directly, larger batches vectorize the
+        same call (tfh.map_batch)."""
         # Only materialize the dense [nbins, nproc] normcentral when an
         # external caller requested it, when BBB "full" mode needs per-process
         # yields for the analytic β solution, or when "lite" mode needs to
         # split finite-variance (sumw2>0) and zero-variance (sumw2==0)
         # contributions per bin.
         need_norm = compute_norm or self.bbstat.needs_per_proc_norm()
-        nexp, norm = self._compute_yields_noBBB(full=full, compute_norm=need_norm)
-        return self.bbstat.profile_and_apply(
-            nexp,
-            norm,
-            self.nobs,
-            self.varnobs,
-            self.lognobs,
-            profile=profile,
-            compute_norm=compute_norm,
-            full=full,
+        nexp, norm = self._compute_yields_noBBB_batched(
+            x, full=full, compute_norm=need_norm
+        )
+        if not self.bbstat.enabled:
+            return nexp, norm, None
+        nobs, varnobs, lognobs = self._observed_data() if data is None else data
+        logbeta0 = None if beta0 is None else self.bbstat.log_beta0(beta0)
+
+        def profile_and_apply(nexp, norm, nobs, varnobs, lognobs, beta0, logbeta0):
+            return self.bbstat.profile_and_apply(
+                nexp,
+                norm,
+                nobs,
+                varnobs,
+                lognobs,
+                profile=profile,
+                compute_norm=compute_norm,
+                full=full,
+                beta0=beta0,
+                logbeta0=logbeta0,
+            )
+
+        return tfh.map_batch(
+            profile_and_apply, (nexp, norm, nobs, varnobs, lognobs, beta0, logbeta0)
         )
 
     @tf.function
@@ -4555,11 +4663,17 @@ class Fitter:
         res_cov = pred_cov + data_cov
         return residuals, res_cov
 
-    def _chi2(self, res, res_cov, ndf_reduction=0):
+    def _chi2(self, res, res_cov, ndf_reduction=0, pseudo_inverse=False):
         res = tf.reshape(res, (-1, 1))
         ndf = tf.size(res) - ndf_reduction
 
-        if ndf_reduction > 0:
+        if pseudo_inverse:
+            # the fallback is for an exactly singular covariance only: a
+            # non-finite one (e.g. NaN) still fails loudly, as the solve did
+            res_cov = tf.debugging.assert_all_finite(
+                res_cov, "chi2: the residual covariance is not finite"
+            )
+        if ndf_reduction > 0 or pseudo_inverse:
             # covariance matrix is in general non invertible with ndf < n
             # compute chi2 using pseudo inverse
             chi_square_value = tf.transpose(res) @ tf.linalg.pinv(res_cov) @ res
@@ -4569,12 +4683,14 @@ class Fitter:
         return tf.squeeze(chi_square_value), ndf
 
     @tf.function
-    def chi2(self, fun, fun_data=None, ndf_reduction=0, profile=False):
+    def chi2(
+        self, fun, fun_data=None, ndf_reduction=0, profile=False, pseudo_inverse=False
+    ):
         if profile:
             residuals, res_cov = self._residuals_profiled(fun)
         else:
             residuals, res_cov = self._residuals(fun, fun_data)
-        return self._chi2(residuals, res_cov, ndf_reduction)
+        return self._chi2(residuals, res_cov, ndf_reduction, pseudo_inverse)
 
     def expected_events(
         self,
@@ -4634,12 +4750,16 @@ class Fitter:
             )
 
         if compute_chi2:
-            chi2val, ndf = self.chi2(
-                mapping.compute_flat,
-                mapping._get_data,
-                mapping.ndf_reduction,
-                profile=profile,
-            )
+            chi2_args = (mapping.compute_flat, mapping._get_data, mapping.ndf_reduction)
+            try:
+                chi2val, ndf = self.chi2(*chi2_args, profile=profile)
+            except tf.errors.InvalidArgumentError:
+                # The residual covariance is exactly singular when the mapped bins obey
+                # an exact linear relation (e.g. two projections of one channel), and
+                # the solve can then fail depending on rounding: use the pseudo inverse.
+                chi2val, ndf = self.chi2(
+                    *chi2_args, profile=profile, pseudo_inverse=True
+                )
             aux.append(chi2val)
             aux.append(ndf)
         else:
@@ -4666,12 +4786,18 @@ class Fitter:
         return self._compute_nll(full_nll=False)
 
     def _compute_lc(self, full_nll=False):
+        return self._compute_lc_batched(self.x[:, None], full_nll=full_nll)[0]
+
+    def _compute_lc_batched(self, x, x0=None, full_nll=False):
+        """Constraint term [B] at the B columns of x [npar, B]; x0 [npar, 1]
+        (default self.x0) or [npar, B]."""
         # One constraint term over the full effective parameter vector
         # [poi, model_nui, theta]: the ParamModel block is constrained by the
         # declared priors (cw = 0 -> free) and the nuisance block by
         # indata.constraintweights, all folded into cw / x0.
-        cw = self.cw
-        lc = cw * 0.5 * tf.square(self.get_x() - self.x0)
+        cw = self.cw[:, None]
+        x0 = self.x0[:, None] if x0 is None else x0
+        lc = cw * 0.5 * tf.square(self.get_x(x) - x0)
         if full_nll:
             # normalization factor 0.5*log(2*pi*sigma^2) for constrained
             # entries, with sigma^2 = 1/cw and
@@ -4683,50 +4809,105 @@ class Fitter:
                 tf.zeros_like(lc),
             )
 
-        return tf.reduce_sum(lc)
+        return tf.reduce_sum(lc, axis=0)
 
     def _compute_lbeta(self, beta, full_nll=False):
-        return self.bbstat.lbeta(beta, full_nll=full_nll)
+        lbeta = self._compute_lbeta_batched(
+            None if beta is None else beta[..., None], full_nll=full_nll
+        )
+        return None if lbeta is None else lbeta[0]
+
+    def _compute_lbeta_batched(self, beta, full_nll=False, beta0=None):
+        """Bin-by-bin stat constraint [B] of beta [.., B] (None when disabled);
+        beta0 [.., B] or [.., 1]: the constraint centres (default the stored
+        ones)."""
+        if not self.bbstat.enabled:
+            return None
+        logbeta0 = None if beta0 is None else self.bbstat.log_beta0(beta0)
+        return tfh.map_batch(
+            lambda beta, beta0, logbeta0: self.bbstat.lbeta(
+                beta, full_nll=full_nll, beta0=beta0, logbeta0=logbeta0
+            ),
+            (beta, beta0, logbeta0),
+        )
 
     def _compute_ln(self, nexp, full_nll=False):
+        return self._compute_ln_batched(nexp[:, None], full_nll=full_nll)[0]
+
+    def _compute_ln_batched(self, nexp, data=None, full_nll=False):
+        """Data term [B] of the yields nexp [nbins, B]. data: (nobs, varnobs,
+        lognobs), each [nbins, 1] (shared) or [nbins, B]; default the
+        fitter's observations."""
+        nobs, varnobs, lognobs = self._observed_data() if data is None else data
         if self.chisqFit:
-            ln = 0.5 * tf.reduce_sum((nexp - self.nobs) ** 2 / self.varnobs, axis=-1)
+            ln = 0.5 * tf.reduce_sum((nexp - nobs) ** 2 / varnobs, axis=0)
         elif self.covarianceFit:
             # Solve the system without inverting
-            residual = tf.reshape(self.nobs - nexp, [-1, 1])  # chi2 residual
+            residual = nobs - nexp  # chi2 residual
             ln = 0.5 * tf.reduce_sum(
-                tf.matmul(
-                    residual,
-                    tf.matmul(self.data_cov_inv, residual),
-                    transpose_a=True,
-                )
+                residual * tf.matmul(self.data_cov_inv, residual), axis=0
             )
         else:
-            nexpsafe = tf.where(
-                self.nobs == 0.0, tf.constant(1.0, dtype=nexp.dtype), nexp
-            )
+            nexpsafe = tf.where(nobs == 0.0, tf.constant(1.0, dtype=nexp.dtype), nexp)
             lognexp = tf.math.log(nexpsafe)
 
             # poisson term
             if full_nll:
-                ldatafac = tf.math.lgamma(self.nobs + 1)
-                ln = tf.reduce_sum(-self.nobs * lognexp + nexp + ldatafac, axis=-1)
+                ldatafac = tf.math.lgamma(nobs + 1)
+                ln = tf.reduce_sum(-nobs * lognexp + nexp + ldatafac, axis=0)
             else:
                 # poisson w/o constant factorial part term and with offset to improve numerical precision
-                ln = tf.reduce_sum(
-                    -self.nobs * (lognexp - self.lognobs) + nexp - self.nobs, axis=-1
-                )
+                ln = tf.reduce_sum(-nobs * (lognexp - lognobs) + nexp - nobs, axis=0)
         return ln
 
-    def _compute_nll_components(self, profile=True, full_nll=False):
-        nexpfullcentral, _, beta = self._compute_yields_with_beta(
+    def _compute_nll_components(
+        self, x=None, data=None, x0=None, beta0=None, profile=True, full_nll=False
+    ):
+        """The terms of the negative log-likelihood, each [B] or None, at the B
+        columns of x [npar, B]: (ln, lc, lbeta, lpenalty, lext, lmcstat, beta).
+
+        x=None is the fitter's own point (self.x as one column). Per-element
+        inputs, each with the batch axis last and of size 1 when all elements
+        share it (default: the fitter's own, as for a fit):
+        - data: the observed counts nobs [nbins, .], or (nobs, variances) with
+          the chi2 data variances; the data term is derived from them as
+          set_nobs does (_observations);
+        - x0 [npar, .]: the constraint centres;
+        - beta0 [.., .]: the bin-by-bin stat constraint centres, of the β shape
+          (bbstat.beta_shape: [nbinsfull] in lite mode, [nbinsfull, nproc] in
+          full mode, masked channels included).
+        A frequentist toy changes all three, a Bayesian toy only data. The
+        batch axis goes last throughout, so B = 1 runs the same operations as
+        an unbatched evaluation.
+
+        The regularization penalties and the MC-stat de-biasing terms (the
+        cross-fit jackknife, _compute_mcstat_penalty) are built from self.x and
+        the fitter's own observations, so they are only defined at the
+        fitter's own point with its own inputs; elsewhere they are refused.
+        """
+        if (
+            x is not None or data is not None or x0 is not None or beta0 is not None
+        ) and (len(self.regularizers) or self._mcstat_terms_in_nll()):
+            raise NotImplementedError(
+                "The regularization penalties and the MC-stat de-biasing terms "
+                "are defined at the fitter's own point and inputs only."
+            )
+        if x is None:
+            x = self.x[:, None]
+        if data is not None:
+            data = self._observations(
+                *(data if isinstance(data, (tuple, list)) else (data,))
+            )
+        nexpfullcentral, _, beta = self._compute_yields_with_beta_batched(
+            x,
+            data,
             profile=profile,
             compute_norm=False,
             # only build the full (masked-channel-inclusive) yields if some
             # regularizer actually reads them
             full=self._regularizers_need_observables(),
+            beta0=beta0,
         )
-
         nexp = nexpfullcentral[: self.indata.nbins]
 
         if self._fold_debias_active():
@@ -4736,28 +4917,46 @@ class Fitter:
             # so this de-biases the point (gradient = cross-fit score) and the
             # curvature (cross-half Fisher) regardless of nonlinearity; each
             # term carries its own bin-by-bin stat beta and constraint
-            # (_jackknife_terms), weighted like its data term.
-            terms = self._jackknife_terms(nexp, beta, profile=profile)
-            ln = tf.add_n([c * self._compute_ln(n, full_nll) for n, c, _ in terms])
+            # (_jackknife_terms), weighted like its data term. Own point only,
+            # B = 1.
+            terms = self._jackknife_terms(
+                nexp[:, 0], None if beta is None else beta[..., 0], profile=profile
+            )
+            ln = tf.add_n([c * self._compute_ln(n, full_nll) for n, c, _ in terms])[
+                None
+            ]
             lbeta = None
             if self.bbstat.enabled:
                 lbeta = tf.add_n(
                     [c * self._compute_lbeta(b, full_nll) for _, c, b in terms]
-                )
+                )[None]
         else:
-            ln = self._compute_ln(nexp, full_nll)
-            lbeta = self._compute_lbeta(beta, full_nll)
+            ln = self._compute_ln_batched(nexp, data, full_nll)
+            lbeta = self._compute_lbeta_batched(beta, full_nll, beta0=beta0)
 
         # lc (theta priors) is counted once.
-        lc = self._compute_lc(full_nll)
+        lc = self._compute_lc_batched(x, x0, full_nll)
 
-        lpenalty = self._compute_lpenalty(nexpfullcentral)
+        # None without regularizers; own point only, B = 1
+        lpenalty = None
+        if len(self.regularizers):
+            lpenalty = self._compute_lpenalty(nexpfullcentral[:, 0])[None]
 
-        return ln, lc, lbeta, lpenalty, beta
+        lext = external_likelihood.compute_external_nll(
+            self.external_terms, x, self.indata.dtype, full_nll=full_nll
+        )
 
-    def _compute_lpenalty(self, nexpfullcentral):
+        # None unless de-biasing; own point only, B = 1
+        lmcstat = self._compute_mcstat_penalty(full_nll=full_nll)
+        if lmcstat is not None:
+            lmcstat = lmcstat[None]
+
+        return ln, lc, lbeta, lpenalty, lext, lmcstat, beta
+
+    def _compute_lpenalty(self, nexpfullcentral, x=None):
         """Sum of the regularization penalties (None without regularizers);
-        `nexpfullcentral` are the profiled yields the regularizers read."""
+        `nexpfullcentral` are the profiled yields the regularizers read, at the
+        physical parameters `x` (default get_x())."""
         if not len(self.regularizers):
             return None
         if not getattr(self, "_regularizers_armed", False):
@@ -4765,7 +4964,7 @@ class Fitter:
                 "Regularizers not armed against the current parameter layout; "
                 "call arm_regularizers() (or defaultassign()) first."
             )
-        x = self.get_x()
+        x = self.get_x() if x is None else x
         penalties = [
             reg.compute_nll_penalty(
                 x,
@@ -4792,26 +4991,39 @@ class Fitter:
             self.external_terms, self.x, self.indata.dtype, full_nll=full_nll
         )
 
-    def _compute_nll(self, profile=True, full_nll=False):
-        ln, lc, lbeta, lpenalty, beta = self._compute_nll_components(
-            profile=profile, full_nll=full_nll
+    def _mcstat_terms_in_nll(self):
+        """Whether the NLL carries MC-stat de-biasing terms: the cross-fit
+        jackknife (_jackknife_terms) or _compute_mcstat_penalty. Their fold and
+        half yields and compensators are built from self.x, so
+        _compute_nll_components refuses any point or inputs but the fitter's
+        own while they are active."""
+        if self._fold_debias_active():
+            return True
+        if self._mcstat_debias_suspended:
+            return False
+        return (
+            bool(self.mcstat_terms)
+            or self.mcstat_bb_vref is not None
+            or bool(self.mcstat_debias_active)
         )
-        l = ln + lc
 
-        if lbeta is not None:
-            l = l + lbeta
-
-        if lpenalty is not None:
-            l = l + lpenalty
-
-        lext = self._compute_external_nll(full_nll=full_nll)
-        if lext is not None:
-            l = l + lext
-
-        lmcstat = self._compute_mcstat_penalty(full_nll=full_nll)
-        if lmcstat is not None:
-            l = l + lmcstat
+    def _compute_nll_batched(
+        self, x=None, data=None, x0=None, beta0=None, profile=True, full_nll=False
+    ):
+        """Negative log-likelihood [B] at the B columns of x [npar, B]: the sum
+        of the terms of _compute_nll_components (see there for the inputs).
+        _compute_nll is this at the fitter's own point."""
+        ln, lc, *rest, _ = self._compute_nll_components(
+            x, data=data, x0=x0, beta0=beta0, profile=profile, full_nll=full_nll
+        )
+        l = ln + lc  # main's order of summation, so B = 1 stays as it is
+        for t in rest:
+            if t is not None:
+                l = l + t
         return l
+
+    def _compute_nll(self, profile=True, full_nll=False):
+        return self._compute_nll_batched(profile=profile, full_nll=full_nll)[0]
 
     def _compute_mcstat_penalty(self, full_nll=False):
         """The MC-stat de-biasing terms outside the data term: the continuous-M
@@ -4846,6 +5058,71 @@ class Fitter:
     # unbound methods onto them shares the yields/NLL mathematics -- both
     # interpolation forms, both systematic types, the BBB machinery -- with
     # the single-device path by construction.
+    # The loss and its derivatives, at the fitter's own point (x=None: self.x
+    # and its observations, constraint centres and bin-by-bin stat centres)
+    # or for B independent likelihoods at the columns of x [npar, B], each
+    # with its own per-element inputs data, x0, beta0 (see
+    # _compute_nll_components). At the own point the value is the scalar
+    # loss, regularizers and MC-stat de-biasing included, differentiated by
+    # self.x; at a batch it is [B], differentiated by x, and the regularizers
+    # and the de-biasing are refused. The likelihoods of a batch share no
+    # parameters, so the gradient of their sum is every element's gradient,
+    # and one HVP with a [npar, B] tangent gives the B HVPs.
+    # _make_tf_functions wraps each of these twice: at the own point
+    # (loss_val, loss_val_grad, ...) and batched (loss_val_batched, ...).
+
+    def _loss_at(self, x, data, x0, beta0, profile):
+        if x is None:
+            return self._compute_loss(profile=profile)
+        return self._compute_nll_batched(
+            x, data=data, x0=x0, beta0=beta0, profile=profile
+        )
+
+    def _val(self, x=None, data=None, x0=None, beta0=None, profile=True):
+        return self._loss_at(x, data, x0, beta0, profile)
+
+    def _val_grad(self, x=None, data=None, x0=None, beta0=None, profile=True):
+        with tf.GradientTape() as t:
+            if x is not None:
+                t.watch(x)
+            val = self._loss_at(x, data, x0, beta0, profile)
+        return val, t.gradient(val, self.x if x is None else x)
+
+    def _val_grad_hessp_fwdrev(
+        self, p, x=None, data=None, x0=None, beta0=None, profile=True
+    ):
+        p = tf.stop_gradient(p)
+        with tf.autodiff.ForwardAccumulator(self.x if x is None else x, p) as acc:
+            val, grad = self._val_grad(x, data, x0, beta0, profile)
+        return val, grad, acc.jvp(grad)
+
+    def _val_grad_hessp_revrev(
+        self, p, x=None, data=None, x0=None, beta0=None, profile=True
+    ):
+        p = tf.stop_gradient(p)
+        with tf.GradientTape() as t2:
+            if x is not None:
+                t2.watch(x)
+            val, grad = self._val_grad(x, data, x0, beta0, profile)
+        hessp = t2.gradient(grad, self.x if x is None else x, output_gradients=p)
+        return val, grad, hessp
+
+    def _val_grad_hess(self, x=None, data=None, x0=None, beta0=None, profile=True):
+        """Value, gradient and Hessian: [npar, npar] by one tape.jacobian at
+        the own point, [npar, npar, B] by one batch_jacobian at a batch."""
+        if x is None:
+            with tf.GradientTape() as t2:
+                val, grad = self._val_grad(profile=profile)
+            return val, grad, t2.jacobian(grad, self.x)
+        # batch_jacobian wants the batch axis first
+        xT = tf.transpose(x)
+        with tf.GradientTape() as t2:
+            t2.watch(xT)
+            val, grad = self._val_grad(tf.transpose(xT), data, x0, beta0, profile)
+            gradT = tf.transpose(grad)
+        hess = t2.batch_jacobian(gradT, xT)  # [B, npar, npar]
+        return val, grad, tf.transpose(hess, [1, 2, 0])
+
     def _make_tf_functions(self):
         # Build tf.function wrappers at instance construction time so that
         # jit_compile and the HVP autodiff mode can be controlled via fit
@@ -4857,48 +5134,15 @@ class Fitter:
         # the kept set of the other de-biasing setting is now stale
         self._mcstat_tf_standby = None
 
-        def _loss_val(self):
-            return self._compute_loss()
-
-        def _loss_val_grad(self):
-            with tf.GradientTape() as t:
-                val = self._compute_loss()
-            grad = t.gradient(val, self.x)
-            return val, grad
-
-        def _loss_val_grad_hessp_fwdrev(self, p):
-            p = tf.stop_gradient(p)
-            with tf.autodiff.ForwardAccumulator(self.x, p) as acc:
-                with tf.GradientTape() as grad_tape:
-                    val = self._compute_loss()
-                grad = grad_tape.gradient(val, self.x)
-            hessp = acc.jvp(grad)
-            return val, grad, hessp
-
-        def _loss_val_grad_hessp_revrev(self, p):
-            p = tf.stop_gradient(p)
-            with tf.GradientTape() as t2:
-                with tf.GradientTape() as t1:
-                    val = self._compute_loss()
-                grad = t1.gradient(val, self.x)
-            hessp = t2.gradient(grad, self.x, output_gradients=p)
-            return val, grad, hessp
-
-        self.loss_val = tf.function(jit_compile=jit)(
-            _loss_val.__get__(self, type(self))
-        )
-        self.loss_val_grad = tf.function(jit_compile=jit)(
-            _loss_val_grad.__get__(self, type(self))
-        )
+        self.loss_val = tf.function(jit_compile=jit)(self._val)
+        self.loss_val_grad = tf.function(jit_compile=jit)(self._val_grad)
         # NOTE: fwdrev HVP is NOT jit-compiled. tf.autodiff.ForwardAccumulator
         # does not propagate JVPs through XLA-compiled subgraphs (the JVP
         # comes back as zero), regardless of inner/outer placement. The
         # loss/grad and revrev HVP wrappers are unaffected.
-        self.loss_val_grad_hessp_fwdrev = tf.function(
-            _loss_val_grad_hessp_fwdrev.__get__(self, type(self))
-        )
+        self.loss_val_grad_hessp_fwdrev = tf.function(self._val_grad_hessp_fwdrev)
         self.loss_val_grad_hessp_revrev = tf.function(jit_compile=jit)(
-            _loss_val_grad_hessp_revrev.__get__(self, type(self))
+            self._val_grad_hessp_revrev
         )
         # Called eagerly, vectorized_map retraces its pfor graph on every
         # batch, which on a large model costs more than the HVPs themselves.
@@ -4916,11 +5160,102 @@ class Fitter:
                 "(tf.autodiff.ForwardAccumulator cannot trace through "
                 "tf.linalg.sparse's CSR matmul); falling back to revrev."
             )
-            self.loss_val_grad_hessp = self.loss_val_grad_hessp_revrev
-        elif self.hvp_method == "fwdrev":
-            self.loss_val_grad_hessp = self.loss_val_grad_hessp_fwdrev
+            self._hvp_mode = "revrev"
         else:
-            self.loss_val_grad_hessp = self.loss_val_grad_hessp_revrev
+            self._hvp_mode = "fwdrev" if self.hvp_method == "fwdrev" else "revrev"
+        self.loss_val_grad_hessp = getattr(
+            self, f"loss_val_grad_hessp_{self._hvp_mode}"
+        )
+        # The same implementations batched (loss_val_batched and friends).
+        # reduce_retracing generalizes the batch width after a second one, so
+        # a stream of batch widths does not retrace each time. Not
+        # XLA-compiled: under XLA the gradient through tf.vectorized_map is
+        # recompiled whenever the values of the batched inputs change (~1 s
+        # for a dense tensor with 190 parameters), and runs slower than
+        # without XLA afterwards; a minimizer changes them on every call.
+        self._batched_tf_fns = {
+            name: tf.function(fn, jit_compile=False, reduce_retracing=True)
+            for name, fn in (
+                ("val", self._val),
+                ("val_grad", self._val_grad),
+                ("val_grad_hessp_fwdrev", self._val_grad_hessp_fwdrev),
+                ("val_grad_hessp_revrev", self._val_grad_hessp_revrev),
+                ("val_grad_hess", self._val_grad_hess),
+                ("hessp_batch", self._hessp_batch),
+            )
+        }
+        # --hvpMethod as for loss_val_grad_hessp
+        self._batched_tf_fns["val_grad_hessp"] = self._batched_tf_fns[
+            f"val_grad_hessp_{self._hvp_mode}"
+        ]
+
+    # Batched API: the loss, gradient, Hessian-vector products and Hessians of
+    # B independent likelihoods at the columns of X [npar, B] (see the
+    # implementations above). The fitter's own state (self.x, its
+    # observations) is left unchanged.
+
+    def loss_val_batched(self, X, data=None, x0=None, beta0=None, profile=True):
+        """Loss [B] at the B columns of X [npar, B]."""
+        fn = self._batched_fn("val")
+        return fn(*self._batched_args(X, data, x0, beta0), profile=profile)
+
+    def loss_val_grad_batched(self, X, data=None, x0=None, beta0=None, profile=True):
+        """Loss [B] and gradients [npar, B] at the B columns of X [npar, B]."""
+        fn = self._batched_fn("val_grad")
+        return fn(*self._batched_args(X, data, x0, beta0), profile=profile)
+
+    def loss_val_grad_hessp_batched(
+        self, X, P, data=None, x0=None, beta0=None, profile=True
+    ):
+        """Loss [B], gradients [npar, B] and the HVPs [npar, B] H_b P[:, b] at
+        the B columns of X [npar, B] (--hvpMethod as loss_val_grad_hessp)."""
+        fn = self._batched_fn("val_grad_hessp")
+        P = tf.convert_to_tensor(P, dtype=self.indata.dtype)
+        return fn(P, *self._batched_args(X, data, x0, beta0), profile=profile)
+
+    def loss_val_grad_hess_batched(
+        self, X, data=None, x0=None, beta0=None, profile=True
+    ):
+        """Loss [B], gradients [npar, B] and Hessians [npar, npar, B] at the B
+        columns of X [npar, B]. Like loss_val_grad_hess: one batch_jacobian, or
+        with --hvpBatch assembled from batches of that many HVPs (each of
+        width B), which bounds the memory by the batch."""
+        fn = self._batched_fn("val_grad_hess")
+        args = self._batched_args(X, data, x0, beta0)
+        if not self.hessian_from_hvp:
+            return fn(*args, profile=profile)
+        val, grad = self._batched_fn("val_grad")(*args, profile=profile)
+        n = int(self.x.shape[0])
+        if n == 0:
+            # no HVP to assemble from, and none would carry the batch axis
+            return val, grad, tf.zeros([0, 0, tf.shape(val)[0]], self.indata.dtype)
+        hessp = self._batched_fn("hessp_batch")
+        width = int(args[0].shape[1])
+        hess = self._hessian_from_hvp_batches(
+            lambda P: hessp(P, *args, profile=profile),
+            np.arange(n),
+            # hvp_batch counts HVPs, and each direction here costs B of them
+            max(1, self.hvp_batch // width),
+            width=width,
+        )
+        return val, grad, tf.constant(hess, dtype=self.indata.dtype)
+
+    def _batched_args(self, X, data, x0, beta0):
+        dtype = self.indata.dtype
+
+        def tensor(v):
+            return None if v is None else tf.convert_to_tensor(v, dtype=dtype)
+
+        if isinstance(data, (tuple, list)):
+            data = tuple(tensor(v) for v in data)
+        else:
+            data = tensor(data)
+        return tensor(X), data, tensor(x0), tensor(beta0)
+
+    def _batched_fn(self, name):
+        """The batched wrapper of the implementation `name` (see
+        _make_tf_functions)."""
+        return self._batched_tf_fns[name]
 
     def loss_val_grad_hess(self, profile=True):
         """Value, gradient and dense Hessian.
@@ -4939,29 +5274,13 @@ class Fitter:
 
     @tf.function
     def _loss_val_grad_hess_jacobian(self, profile=True):
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                val = self._compute_loss(profile=profile)
-            grad = t1.gradient(val, self.x)
-        hess = t2.jacobian(grad, self.x)
-        return val, grad, hess
+        return self._val_grad_hess(profile=profile)
 
     @tf.function
     def _loss_val_grad_profile(self, profile=True):
-        with tf.GradientTape() as t:
-            val = self._compute_loss(profile=profile)
-        grad = t.gradient(val, self.x)
-        return val, grad
-
-    @tf.function
-    def loss_val_valfull_grad_hess(self, profile=True):
-        with tf.GradientTape() as t2:
-            with tf.GradientTape() as t1:
-                val, valfull = self._compute_nll(profile=profile)
-            grad = t1.gradient(val, self.x)
-        hess = t2.jacobian(grad, self.x)
-
-        return val, valfull, grad, hess
+        # not loss_val_grad: without XLA, as _loss_val_grad_hess_jacobian, so
+        # both Hessian paths return the same value and gradient
+        return self._val_grad(profile=profile)
 
     @tf.function
     def loss_val_grad_hess_beta(self, profile=True):
@@ -5029,8 +5348,10 @@ class Fitter:
         _, _, hess = self.loss_val_grad_hess()
         return hess.__array__()
 
-    def _hessp_batch(self, P, profile=True):
-        """Hessian-vector products for a batch of directions P: [k, npar].
+    def _hessp_batch(self, P, x=None, data=None, x0=None, beta0=None, profile=True):
+        """Hessian-vector products for a batch of directions P: [k, npar], at
+        the own point, or [k, npar, B] at the columns of x [npar, B] (each
+        direction for every element: the columns of the B Hessians).
 
         vectorized_map is a pfor of width k, not the while_loop that
         tape.jacobian's non-pfor path builds -- so XLA compiles it without the
@@ -5040,12 +5361,9 @@ class Fitter:
         """
 
         def one(p):
-            p = tf.stop_gradient(p)
-            with tf.GradientTape() as t2:
-                with tf.GradientTape() as t1:
-                    val = self._compute_loss(profile=profile)
-                grad = t1.gradient(val, self.x)
-            return t2.gradient(grad, self.x, output_gradients=p)
+            if x is not None:
+                p = tf.broadcast_to(p[:, None], tf.shape(x))
+            return self._val_grad_hessp_revrev(p, x, data, x0, beta0, profile)[2]
 
         return tf.vectorized_map(one, P)
 
@@ -5087,12 +5405,13 @@ class Fitter:
             v[j] = 0.0
         return out
 
-    def _hessian_from_hvp_batches(self, hessp_batch, idx, k):
+    def _hessian_from_hvp_batches(self, hessp_batch, idx, k, width=1):
         """Columns `idx` of a dense Hessian from `hessp_batch(P)`, the HVPs of a
         [k', npar] batch of directions, k columns at a time (halving k if the
-        device runs out of memory)."""
+        device runs out of memory). HVPs [k', npar, B] give B Hessians,
+        [npar, len(idx), B]; width is B, as each direction then costs B HVPs."""
         n = int(self.x.shape[0])
-        out = np.empty((n, idx.size), dtype=np.float64)
+        out = None
         s0 = 0
         while s0 < idx.size:
             cols = idx[s0 : s0 + k]
@@ -5116,16 +5435,21 @@ class Fitter:
                 # preconditioner rebuild in the restart loop would otherwise
                 # re-discover it -- paying the same compile, allocate and
                 # unwind each time. min() so an explicit oversized batch=
-                # that shrinks cannot raise a lower standing default.
-                self.hvp_batch = min(self.hvp_batch, k)
+                # that shrinks cannot raise a lower standing default. In HVPs:
+                # a batch of B Hessians spends B per direction.
+                self.hvp_batch = min(self.hvp_batch, k * width)
                 logger.warning(
                     f"HVP batch too large for the device; retrying with "
                     f"--hvpBatch {k}"
                 )
                 continue
-            out[:, s0 : s0 + cols.size] = np.asarray(hp).T
+            # hp [k', npar, ...]: trailing axes (a batch of Hessians) kept
+            hp = np.asarray(hp)
+            if out is None:
+                out = np.empty((n, idx.size) + hp.shape[2:], dtype=np.float64)
+            out[:, s0 : s0 + cols.size] = np.moveaxis(hp, 0, 1)
             s0 += cols.size
-        return out
+        return np.empty((n, 0), dtype=np.float64) if out is None else out
 
     def _scalar_hessian(self, key, scalar_fn):
         """Dense Hessian of an auxiliary scalar scalar_fn() (the sandwich meat,
