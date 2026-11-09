@@ -14,11 +14,17 @@ from rabbit import preconditioner as precond
 from rabbit import tfhelpers as tfh
 from rabbit.bbstat.bbstat import BinByBinStat
 from rabbit.blinding import Blinding
-from rabbit.callbacks import RESTART_MIN_IMPROVEMENT, FitterCallback, merge_callbacks
+from rabbit.callbacks import (
+    RESTART_MIN_IMPROVEMENT,
+    FitterCallback,
+    NoAcceptedStepError,
+    merge_callbacks,
+)
 from rabbit.common import match_regexp_params
 from rabbit.constraints import postfit as constraints_postfit
 from rabbit.constraints import scipy_adapter
 from rabbit.constraints import warm_start as tc_warm
+from rabbit.floating_coordinates import FloatingCoordinates
 from rabbit.impacts import (
     asym_impacts,
     global_asym_impacts,
@@ -66,6 +72,10 @@ def make_fitter(indata, param_model, options, **kwargs):
 # scipy methods that honour hard constraints (--constraints,
 # rabbit.constraints.Constraints).
 CONSTRAINED_METHODS = ("trust-constr",)
+
+# Minimizers that solve their subproblem with the dense Hessian. With frozen
+# parameters they iterate over the floating ones only (FloatingCoordinates).
+DENSE_HESSIAN_METHODS = ("trust-exact", "dogleg", "tf-trust-exact")
 
 # Options from --minimizerMaxiter/--minimizerGtol/--minimizerFtol that each
 # native minimizer actually reads. Anything else passed for these methods is
@@ -229,11 +239,11 @@ class Fitter:
         # jitCompile accepts "auto" (the default), "on", or "off".
         # True / False from programmatic callers are accepted as
         # aliases for "on" / "off". The tri-state is resolved to the
-        # final boolean self.jit_compile right here, using the only
-        # runtime condition it can depend on: whether the input is
-        # sparse. Sparse mode uses SparseMatrixMatMul which has no
-        # XLA kernel, so "auto" silently disables jit and "on" warns
-        # and falls back.
+        # final boolean self.jit_compile right here, from the input:
+        # SparseMatrixMatMul (the CSR matmul) has no XLA kernel, and the
+        # likelihood calls it for a sparse tensor and for each external
+        # term whose Hessian is stored sparse, with a dense tensor too.
+        # Either way "auto" disables jit and "on" warns and falls back.
         _jit_opt = getattr(options, "jitCompile", "auto")
         if _jit_opt is True:
             _jit_opt = "on"
@@ -243,20 +253,38 @@ class Fitter:
             raise ValueError(
                 f"jitCompile must be one of 'auto', 'on', 'off'; got {_jit_opt!r}"
             )
-        if _jit_opt == "off":
-            self.jit_compile = False
-        elif _jit_opt == "on":
-            if self.indata.sparse:
-                logger.warning(
-                    "--jitCompile=on requested but input data is sparse; "
-                    "XLA has no kernel for the sparse matmul ops used in "
-                    "sparse mode, so jit_compile will be disabled."
+        # only the external terms the loss evaluates: an MC-stat moment term
+        # is dropped unless --mcStatDebias continuousM (see init_fit_parms)
+        continuous_m = getattr(options, "mcStatDebias", "none") == "continuousM"
+        csr_terms = external_likelihood.sparse_hessian_terms(
+            t
+            for t in self.indata.external_terms
+            if continuous_m or not _is_mcstat_term(t)
+        )
+        no_xla = []
+        if self.indata.sparse:
+            no_xla.append("input data is sparse")
+        if csr_terms:
+            no_xla.append(
+                f"external likelihood term(s) {csr_terms} store their Hessian sparse"
+            )
+        self.jit_compile = _jit_opt != "off" and not no_xla
+        if _jit_opt != "off" and no_xla:
+            why = (
+                f"{' and '.join(no_xla)}; XLA has no kernel for the sparse (CSR) "
+                "matmul ops used there, so jit_compile will be disabled"
+            )
+            if _jit_opt == "on":
+                logger.warning(f"--jitCompile=on requested but {why}.")
+            elif not self.indata.sparse:
+                # A sparse tensor runs without jit by design; a dense one
+                # losing it to an external term is not obvious.
+                logger.info(
+                    f"--jitCompile=auto: {why}. A dense Hessian (hist.Hist "
+                    "instead of wums.SparseHist in "
+                    "TensorWriter.add_external_likelihood_term) would keep "
+                    "jit_compile for this dense tensor."
                 )
-                self.jit_compile = False
-            else:
-                self.jit_compile = True
-        else:  # "auto"
-            self.jit_compile = not self.indata.sparse
         # When --noHessian is requested the postfit Hessian is never
         # computed, so the dense [npar, npar] covariance matrix should
         # not be allocated. self.cov is set to None in that case and
@@ -3925,6 +3953,7 @@ class Fitter:
             self.x,
             self.x0,
             self.frozen_indices,
+            self.floating_indices,
             self.frozen_params,
             self.cw,
             self.indata.systgroups,
@@ -4320,26 +4349,36 @@ class Fitter:
                 # (sliced to nbins when masked channels are excluded).
                 self.rnorm_init = rnorm_init
 
-    def _compute_yields_noBBB(self, full=True, compute_norm=True):
+    def _compute_yields_noBBB(self, full=True, compute_norm=True, forward_mode=False):
         # full: compute yields inclduing masked channels
         # compute_norm: also build the dense [nbins, nproc] normcentral tensor.
         # In sparse mode this is expensive (forward + backward) and is only
         # needed when an external caller requests per-process yields, or for
         # binByBinStat in "full" mode. The default is True for backward
         # compatibility; the NLL/grad/HVP path passes compute_norm=False.
+        # forward_mode: see _compute_yields_noBBB_batched.
         nexpcentral, normcentral = self._compute_yields_noBBB_batched(
-            self.x[:, None], full=full, compute_norm=compute_norm
+            self.x[:, None],
+            full=full,
+            compute_norm=compute_norm,
+            forward_mode=forward_mode,
         )
         if normcentral is not None:
             normcentral = normcentral[..., 0]
         return nexpcentral[:, 0], normcentral
 
-    def _compute_yields_noBBB_batched(self, x, full=True, compute_norm=True):
+    def _compute_yields_noBBB_batched(
+        self, x, full=True, compute_norm=True, forward_mode=False
+    ):
         """Yields without bin-by-bin stat at the B columns of x [npar, B]:
         nexpcentral [nbins, B] and, with compute_norm, normcentral
         [nbins, nproc, B] (else None). The batch axis goes last, so the logk
         contraction is the same [.., nsyst] x [nsyst, B] product for B = 1
-        and reads logk once for all B columns otherwise."""
+        and reads logk once for all B columns otherwise.
+
+        forward_mode: the result is differentiated in forward mode
+        (tf.autodiff.ForwardAccumulator); sparse mode then avoids the CSR
+        matmul, see below. No effect on dense inputs."""
         poi = self.get_poi(x)
         model_nui = self.get_model_nui(x)
         theta = self.get_theta(x)
@@ -4358,7 +4397,20 @@ class Fitter:
             # kernel. NOTE: SparseMatrixMatMul has no XLA kernel, so the
             # enclosing loss/grad/HVP tf.functions are built with
             # jit_compile=False in sparse mode (see _make_tf_functions).
-            logsnorm = tf_sparse_csr.matmul(self.logk_csr, mthetaalpha)  # [nnz, B]
+            #
+            # It cannot be differentiated in forward mode, though: the
+            # ForwardAccumulator gives every input without a tangent a
+            # zeros_like one, the CSRSparseMatrix variant included, and
+            # TensorFlow has no CPU ZEROS_LIKE kernel for that variant
+            # ("No unary variant unary_op function found for op ZEROS_LIKE").
+            # A forward-mode caller (the JVP global impacts) gets the same
+            # contraction from the index/value tensors of logk instead:
+            # slower per call, but off the NLL/grad/HVP path.
+            if forward_mode:
+                logsnorm = tf.sparse.sparse_dense_matmul(self.logk, mthetaalpha)
+            else:
+                logsnorm = tf_sparse_csr.matmul(self.logk_csr, mthetaalpha)
+            # logsnorm: [nnz, B]
 
             # The values of a [nbinsfull, nproc] sparse tensor with the sparsity
             # pattern of self.indata.norm (without the masked channels' entries
@@ -4469,9 +4521,16 @@ class Fitter:
 
         return nexpcentral, normcentral
 
-    def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
+    def _compute_yields_with_beta(
+        self, profile=True, compute_norm=False, full=True, forward_mode=False
+    ):
+        # forward_mode: see _compute_yields_noBBB_batched.
         nexp, norm, beta = self._compute_yields_with_beta_batched(
-            self.x[:, None], profile=profile, compute_norm=compute_norm, full=full
+            self.x[:, None],
+            profile=profile,
+            compute_norm=compute_norm,
+            full=full,
+            forward_mode=forward_mode,
         )
         return tuple(None if t is None else t[..., 0] for t in (nexp, norm, beta))
 
@@ -4484,7 +4543,14 @@ class Fitter:
         )
 
     def _compute_yields_with_beta_batched(
-        self, x, data=None, profile=True, compute_norm=False, full=True, beta0=None
+        self,
+        x,
+        data=None,
+        profile=True,
+        compute_norm=False,
+        full=True,
+        beta0=None,
+        forward_mode=False,
     ):
         """_compute_yields_with_beta at the B columns of x [npar, B]: nexp
         [nbins, B], norm [nbins, nproc, B] or None, beta [.., B] or None.
@@ -4494,7 +4560,8 @@ class Fitter:
         bin-by-bin stat constraint centres, of bbstat.beta_shape (masked
         channels included) plus the batch axis (default the stored ones). Bin-by-bin stat is element-wise in the bins:
         B = 1 calls profile_and_apply directly, larger batches vectorize the
-        same call (tfh.map_batch)."""
+        same call (tfh.map_batch). forward_mode: see
+        _compute_yields_noBBB_batched."""
         # Only materialize the dense [nbins, nproc] normcentral when an
         # external caller requested it, when BBB "full" mode needs per-process
         # yields for the analytic β solution, or when "lite" mode needs to
@@ -4502,7 +4569,7 @@ class Fitter:
         # contributions per bin.
         need_norm = compute_norm or self.bbstat.needs_per_proc_norm()
         nexp, norm = self._compute_yields_noBBB_batched(
-            x, full=full, compute_norm=need_norm
+            x, full=full, compute_norm=need_norm, forward_mode=forward_mode
         )
         if not self.bbstat.enabled:
             return nexp, norm, None
@@ -5128,8 +5195,8 @@ class Fitter:
         # jit_compile and the HVP autodiff mode can be controlled via fit
         # options without redefining the class. self.jit_compile has
         # already been resolved to a plain bool in __init__ (tri-state
-        # "auto"/"on"/"off" collapsed against self.indata.sparse), so
-        # this body just reads it.
+        # "auto"/"on"/"off" collapsed against the sparse tensor and the
+        # sparse external Hessians), so this body just reads it.
         jit = self.jit_compile
         # the kept set of the other de-biasing setting is now stale
         self._mcstat_tf_standby = None
@@ -5152,11 +5219,23 @@ class Fitter:
         self._scalar_hessian_fns = {}
         # tf.autodiff.ForwardAccumulator does not support tangent
         # propagation through SparseMatrixMatMul (no JVP rule for the
-        # CSR variant), so the fwdrev HVP cannot be used in sparse mode.
-        # Fall back to revrev with a warning.
-        if self.hvp_method == "fwdrev" and self.indata.sparse:
+        # CSR variant), so the fwdrev HVP cannot be used in sparse mode,
+        # nor with an external term whose Hessian is stored sparse (also
+        # contracted with it). Fall back to revrev with a warning.
+        csr_terms = [
+            t["name"]
+            for t in self.external_terms + self.mcstat_terms
+            if t["hess_csr"] is not None
+        ]
+        if self.hvp_method == "fwdrev" and (self.indata.sparse or csr_terms):
+            where = (
+                "in sparse mode"
+                if self.indata.sparse
+                else f"with external likelihood term(s) {csr_terms}, whose "
+                "Hessian is stored sparse"
+            )
             logger.warning(
-                "fwdrev HVP is not supported in sparse mode "
+                f"fwdrev HVP is not supported {where} "
                 "(tf.autodiff.ForwardAccumulator cannot trace through "
                 "tf.linalg.sparse's CSR matmul); falling back to revrev."
             )
@@ -5654,7 +5733,11 @@ class Fitter:
                 "--minimizerInitialBarrier* override it), slacks from the "
                 "constraint values, no row held feasible"
             )
-            callback = merge_callbacks(callback, self._fit_leg("warm"))
+            # a later leg starts where the earlier ones got to: theirs is a
+            # result, which a leg failing at its first step does not discard
+            callback = merge_callbacks(
+                callback, self._fit_leg("warm", first_leg=rnd == 0)
+            )
             info["legs"].append("warm")
             bad = self.releasing_constraint_rows()
             if not bad:
@@ -5672,7 +5755,9 @@ class Fitter:
                     "[minimize] no release step; continuing from scipy's own "
                     "interior-point start (expect a detour)"
                 )
-                callback = merge_callbacks(callback, self._fit_leg("release"))
+                callback = merge_callbacks(
+                    callback, self._fit_leg("release", first_leg=False)
+                )
                 info["legs"].append("release")
                 bad = self.releasing_constraint_rows()
                 if bad:
@@ -5737,11 +5822,18 @@ class Fitter:
         self.x.assign(x0)
         return False
 
-    def _fit_leg(self, tc_start="cold"):
+    def _fit_leg(self, tc_start="cold", first_leg=True):
         """One minimisation from self.x. tc_start (trust-constr + --constraints
         only): "cold" = scipy's interior-point start with rabbit's
         keep_feasible rule; "warm" = no row held, slacks at c - lb, centred
-        barrier; "release" = no row held, scipy's start (last resort)."""
+        barrier; "release" = no row held, scipy's start (last resort).
+
+        A minimizer that raises leaves the fit at the last accepted iterate,
+        or where an earlier round stalled (status -3). Only if the first round
+        of the fit's first leg raises before accepting a step is there nothing
+        to keep: this raises NoAcceptedStepError then, chained to the error,
+        with self.x at the start. first_leg=False: an earlier leg of the same
+        fit (the trust-constr warm start) ended with a result, kept instead."""
         logger.info("Perform iterative fit")
 
         # Optional reparameterisation. Built once at the starting point, it is
@@ -5754,9 +5846,21 @@ class Fitter:
         # below must pick the new one up.
         pc_cell = [self._build_preconditioner()]
 
+        # With frozen parameters the dense-Hessian minimizers iterate over the
+        # floating ones only (see FloatingCoordinates): scipy_loss, scipy_hess,
+        # native_loss and native_closure take and return their coordinates.
+        # The identity for every other minimizer, and with nothing frozen.
+        floating = FloatingCoordinates(
+            self.floating_indices
+            if self.minimizer_method in DENSE_HESSIAN_METHODS
+            and len(self.frozen_indices)
+            and len(self.floating_indices)
+            else None
+        )
+
         def scipy_loss(yval):
             pc = pc_cell[0]
-            self.x.assign(pc.to_physical(yval))
+            self.x.assign(pc.to_physical(floating.embed(yval)))
             val, grad = self.loss_val_grad()
             val = val.__array__()
             if not np.isfinite(val):
@@ -5770,7 +5874,7 @@ class Fitter:
                 # shrinks, as in the native minimizers (rabbit.minimizer.base).
                 return np.inf, np.zeros_like(yval)
             grad_y = pc.grad_to_internal(grad.__array__())
-            return val, grad_y
+            return val, floating.restrict(grad_y)
 
         def scipy_hessp(yval, pval):
             pc = pc_cell[0]
@@ -5782,16 +5886,21 @@ class Fitter:
 
             return pc.hessp_to_internal(np.asarray(pval, dtype=np.float64), hvp)
 
+        def log_diagnostics(grad, hess):
+            # on the floating block: a frozen parameter's zero row and column
+            # make the full Hessian singular, and the solve in edmval would
+            # raise and end the fit at its start point
+            grad, hess = floating.restrict(grad), floating.restrict_hess(hess)
+            logger.info(f"  - Condition number: {tfh.cond_number(hess)}")
+            logger.info(f"  - edmval: {tfh.edmval(grad, hess)}")
+
         def scipy_hess(yval):
             pc = pc_cell[0]
-            self.x.assign(pc.to_physical(yval))
+            self.x.assign(pc.to_physical(floating.embed(yval)))
             val, grad, hess = self.loss_val_grad_hess()
             if self.diagnostics:
-                cond_number = tfh.cond_number(hess)
-                logger.info(f"  - Condition number: {cond_number}")
-                edmval = tfh.edmval(grad, hess)
-                logger.info(f"  - edmval: {edmval}")
-            return pc.hess_to_internal(hess.__array__())
+                log_diagnostics(grad, hess)
+            return floating.restrict_hess(pc.hess_to_internal(hess.__array__()))
 
         # Native (TF) minimizer counterparts of the callbacks above. Same
         # contract and the same internal coordinates, but the gradient and
@@ -5799,22 +5908,19 @@ class Fitter:
         # the device, and the subproblem factorizes there either way.
         def native_loss(yval):
             pc = pc_cell[0]
-            self.x.assign(pc.to_physical(yval))
+            self.x.assign(pc.to_physical(floating.embed(yval)))
             return float(self.loss_val())
 
         def native_closure(yval):
             pc = pc_cell[0]
-            self.x.assign(pc.to_physical(yval))
+            self.x.assign(pc.to_physical(floating.embed(yval)))
             val, grad, hess = self.loss_val_grad_hess()
             if self.diagnostics:
-                cond_number = tfh.cond_number(hess)
-                logger.info(f"  - Condition number: {cond_number}")
-                edmval = tfh.edmval(grad, hess)
-                logger.info(f"  - edmval: {edmval}")
+                log_diagnostics(grad, hess)
             if pc.enabled:
                 grad = tf.constant(pc.grad_to_internal(grad.__array__()))
                 hess = tf.constant(pc.hess_to_internal(hess.__array__()))
-            return float(val), grad, hess
+            return float(val), floating.restrict(grad), floating.restrict_hess(hess)
 
         def native_grad_closure(yval):
             pc = pc_cell[0]
@@ -5852,6 +5958,7 @@ class Fitter:
         # scipy works in internal coordinates throughout; y = 0 at the point the
         # transform was built.
         xval = pc_cell[0].from_physical(self.x.numpy())
+        floating.set_anchor(xval)
 
         if len(self.constraints) and self.minimizer_method not in CONSTRAINED_METHODS:
             raise ValueError(
@@ -5968,6 +6075,11 @@ class Fitter:
         callback = None
         prev_loss = None
         attempt = 0
+        # how the loop ended on a stall, for the minimizer status message
+        stall_exit = None
+        # where the first round starts: a minimizer that raises there, before
+        # accepting a step, leaves nothing to keep
+        xval_start = xval
 
         # to_physical is the whole reason this is built here rather than in the
         # callback: under preconditioning the minimiser's iterate is in internal
@@ -5995,10 +6107,10 @@ class Fitter:
                         res = minimize_trust_exact(
                             native_loss,
                             native_closure,
-                            xval,
+                            floating.restrict(xval),
                             gtol=sci_opts.get("gtol", 0.0),
                             maxiter=sci_opts.get("maxiter"),
-                            callback=cb,
+                            callback=floating.callback(cb),
                         )
                     elif self.minimizer_method == "tf-trust-ncg":
                         res = minimize_trust_ncg(
@@ -6033,11 +6145,11 @@ class Fitter:
                         ):
                             res = scipy.optimize.minimize(
                                 scipy_loss,
-                                xval,
+                                floating.restrict(xval),
                                 method=self.minimizer_method,
                                 jac=True,
                                 tol=0.0,
-                                callback=cb,
+                                callback=floating.callback(cb),
                                 options=sci_opts,
                                 **info_minimize,
                             )
@@ -6045,23 +6157,60 @@ class Fitter:
                     # minimizer could have called the loss or hessp functions with "random" values, so restore the
                     # state from the end of the last iteration before the exception
                     xval = cb.xval
-                    # An early stop throws scipy's result away; for a
-                    # constrained fit keep the KKT measures of the last
-                    # accepted iterate (the one xval holds) instead.
-                    self.minimizer_result = getattr(cb, "last_state", None)
+                    # scipy returns no result when the minimizer raises, so
+                    # describe the round from the callback instead, at the last
+                    # accepted iterate (the one xval holds): an early stop is
+                    # status -2, a genuine failure -3. Every exit of this loop
+                    # thus leaves a minimizer status, as a normal return does.
+                    self.minimizer_result = cb.stopped_result(ex)
                     if not cb.stopped_early:
-                        # a real failure, not a stall: surface it rather than
-                        # letting a broken callback look like a converged fit
-                        logger.warning(f"Minimizer raised: {ex}")
-                        # the expensive case: a failure here used to discard the
-                        # whole fit, however close to the minimum it had got
+                        # a real failure, not a stall. Snapshot first: a failure
+                        # here used to discard the whole fit, however close to
+                        # the minimum it had got.
                         snapshotter.save(
                             cb.xval, "minimizer-failed", error=str(ex)[:200]
                         )
+                        # A later round keeps what the earlier ones reached
+                        # (they ended by a stall, a result in itself), and so
+                        # does a later leg (the earlier legs ended with one).
+                        # The first round of the first leg has nothing to keep
+                        # if it never accepted a step -- not if it merely
+                        # iterated: the callback also runs on rejected steps,
+                        # but its x only moves on accepted ones. Carrying on
+                        # would then report the start point as the fit result,
+                        # with no error. For a single fit an error before the
+                        # first step is almost always systematic (an op the
+                        # backend cannot run, a loss that cannot be evaluated
+                        # at the start); the loops over many fits catch
+                        # NoAcceptedStepError and record NaN for that one.
+                        if (
+                            first_leg
+                            and attempt == 0
+                            and np.array_equal(xval, xval_start)
+                        ):
+                            self.minimizer_result.message += (
+                                "; it never accepted a step, so the fit has no "
+                                "result."
+                            )
+                            self.minimizer_result.restarts = attempt
+                            self.x.assign(pc_cell[0].to_physical(xval))
+                            raise NoAcceptedStepError(
+                                self.minimizer_result.message
+                            ) from ex
+                        self.minimizer_result.message += (
+                            "; kept the last accepted iterate."
+                        )
+                        # recover, but say so: the postfit is computed at that
+                        # iterate, and its EDM tells whether it is a minimum
+                        logger.warning(
+                            f"{self.minimizer_result.message} The results are "
+                            "computed there; its EDM tells whether it is a "
+                            "minimum."
+                        )
                     logger.debug(ex)
                 else:
-                    xval = res["x"]
-                    self.minimizer_result = res
+                    xval = floating.embed(res["x"])
+                    self.minimizer_result = floating.embed_result(res)
                     logger.debug(res)
 
                 callback = merge_callbacks(callback, cb)
@@ -6073,15 +6222,29 @@ class Fitter:
                 # bought nothing: a round can never end above where it started
                 # (the trust region accepts improving steps only), so "not below
                 # the previous round" means the descent is genuinely exhausted.
+                # A non-finite loss never counts as an improvement (inf - inf is
+                # NaN, and every comparison with NaN is False: the loop would
+                # never stop); a finite one always improves on a non-finite one.
                 if (
                     prev_loss is not None
                     and last_loss is not None
-                    and last_loss
-                    >= prev_loss - RESTART_MIN_IMPROVEMENT * max(1.0, abs(prev_loss))
+                    and not (
+                        np.isfinite(last_loss)
+                        and (
+                            not np.isfinite(prev_loss)
+                            or last_loss
+                            < prev_loss
+                            - RESTART_MIN_IMPROVEMENT * max(1.0, abs(prev_loss))
+                        )
+                    )
                 ):
                     logger.info(
                         f"Restart did not reduce the loss further ({prev_loss} -> "
                         f"{last_loss}); stopping after {attempt} restart(s)."
+                    )
+                    stall_exit = (
+                        "The last restart did not reduce the loss further "
+                        f"({prev_loss} -> {last_loss})."
                     )
                     break
                 if 0 <= self.max_restarts <= attempt:
@@ -6089,6 +6252,13 @@ class Fitter:
                         f"Minimizer still stalling at loss {last_loss} after "
                         f"{self.max_restarts} restart(s) and the loss was still "
                         "coming down; raise --maxRestarts to let it continue."
+                    )
+                    stall_exit = (
+                        "Restarting is disabled (--maxRestarts 0)."
+                        if attempt == 0
+                        else "The last restart still reduced the loss "
+                        f"({prev_loss} -> {last_loss}), but --maxRestarts "
+                        f"{self.max_restarts} allows no more."
                     )
                     break
                 attempt += 1
@@ -6106,6 +6276,13 @@ class Fitter:
                 self.x.assign(pc_cell[0].to_physical(xval))
                 pc_cell[0] = self._build_preconditioner()
                 xval = pc_cell[0].from_physical(self.x.numpy())
+                floating.set_anchor(xval)
+
+        # The status describes the last round only: its nit and nfev leave out
+        # the rounds before it (each ended by a stall), so say how many there were.
+        self.minimizer_result.restarts = attempt
+        if stall_exit is not None:
+            self.minimizer_result.message += f" {stall_exit}"
 
         # xval (and callback.xval) are internal coordinates; everything outside
         # fit() expects physical parameters.
@@ -6121,10 +6298,24 @@ class Fitter:
         return callback
 
     def minimizer_status(self):
-        """Convergence outcome of the last :meth:`fit`, or None if none ran.
+        """The minimizer's outcome of the last :meth:`fit`, or None if none ran.
 
-        NB ``success`` is scipy's flag, not a convergence test on its own:
-        BFGS reports False ("precision loss") at points with EDM ~1e-17.
+        A diagnostic, not the fit's convergence verdict, which is the EDM: the
+        default tolerances (gtol 0) run the minimizer until it cannot improve,
+        so at a converged point it usually reports a failure (trust-krylov
+        status 2, "A bad approximation caused failure to predict
+        improvement"). Likewise ``success`` is scipy's flag: BFGS reports False
+        ("precision loss") at points with EDM ~1e-17.
+
+        A round the minimizer did not finish has no scipy result; it reports
+        success False and status -2 for an --earlyStopping stop (the message
+        says how the restarts ended) or -3 for a minimizer that raised, with
+        nit (and nfev where the method reports it, else -1) at the last
+        accepted iterate. If the first round raised before accepting a step
+        there is no result, and :meth:`fit` raises NoAcceptedStepError
+        instead; the status -3 is still recorded. ``restarts`` counts the
+        rounds before the last one, each ended by a stall; nit and nfev cover
+        the last round only.
         """
         res = self.minimizer_result
         if res is None:
@@ -6136,6 +6327,9 @@ class Fitter:
             "nfev": int(getattr(res, "nfev", -1)),
             "message": str(getattr(res, "message", "")),
         }
+        restarts = getattr(res, "restarts", None)
+        if restarts is not None:
+            out["restarts"] = int(restarts)
         # Constrained runs: at an active constraint grad f is balanced by the
         # constraint forces, so EDM says nothing. scipy's own test is
         #     optimality < gtol and constr_violation < gtol  ->  status 1
@@ -6248,6 +6442,15 @@ class Fitter:
                 # no need to do a minimization, simple matrix solve is sufficient
                 val, grad, hess = self.loss_val_grad_hess()
 
+                # A frozen parameter's Hessian row and column are exactly zero
+                # (tf.stop_gradient), so no Cholesky of the full matrix exists:
+                # solve on the floating block (see FloatingCoordinates).
+                floating = FloatingCoordinates(
+                    self.floating_indices if len(self.frozen_params) else None
+                )
+                grad = floating.restrict(grad)
+                hess = floating.restrict_hess(hess)
+
                 # use a Cholesky decomposition to easily detect the non-positive-definite case
                 chol = tf.linalg.cholesky(hess)
 
@@ -6262,6 +6465,10 @@ class Fitter:
                 dx = tf.linalg.cholesky_solve(chol, -gradv)[:, 0]
                 del chol
 
+                if floating.idx is not None:
+                    dx = tf.scatter_nd(
+                        floating.idx[:, None], dx, tf.shape(self.x, out_type=tf.int64)
+                    )
                 self.x.assign_add(dx)
             else:
                 # --noHessian: we must not allocate the dense [npar, npar]
@@ -6324,9 +6531,6 @@ class Fitter:
         # make a likelihood scan for a single parameter
         # assuming the likelihood is minimized
 
-        # freeze minimize which mean to not update it in the fit
-        self.freeze_params(param)
-
         idx = np.where(self.parms.astype(str) == param)[0][0]
 
         # store current state of x temporarily
@@ -6350,29 +6554,34 @@ class Fitter:
         else:
             detail = None
 
-        def _record(islot, wall_s):
+        def _record(islot, wall_s, fitted=True):
             """Per-point parameter vector and convergence diagnostics.
 
             Costs one gradient evaluation plus one CG solve against the
             Hessian -- small next to the point's own profile minimisation
             (tens of trust-region iterations), but not free, which is why it
-            is opt-in.
+            is opt-in. A point whose fit never accepted a step (fitted=False)
+            keeps its minimizer status and message; the measures that would
+            evaluate the loss there are NaN.
             """
             detail["x"][islot] = self.x.numpy()
-            _, grad = self.loss_val_grad()
-            # frozen parameters enter the loss through tf.stop_gradient, so
-            # their gradient entries and Hessian rows/columns are exactly zero:
-            # both numbers below only see the parameters that were minimised
-            try:
-                edmval = self.edmval_cov_rows_hessfree(grad, [])[0]
-            except ValueError as e:
-                # one bad point should not lose the scan
-                logger.warning(f"{e}; reporting NaN edmval for this scan point")
-                edmval = float("nan")
+            edmval = grad_max_abs = float("nan")
+            if fitted:
+                _, grad = self.loss_val_grad()
+                # frozen parameters enter the loss through tf.stop_gradient, so
+                # their gradient entries and Hessian rows/columns are exactly
+                # zero: both numbers below only see the parameters that were
+                # minimised
+                try:
+                    edmval = self.edmval_cov_rows_hessfree(grad, [])[0]
+                except ValueError as e:
+                    # one bad point should not lose the scan
+                    logger.warning(f"{e}; reporting NaN edmval for this scan point")
+                grad_max_abs = float(np.max(np.abs(grad.numpy()), initial=0.0))
             status = self.minimizer_status() or {}
             values = {
                 "edmval": edmval,
-                "grad_max_abs": float(np.max(np.abs(grad.numpy()), initial=0.0)),
+                "grad_max_abs": grad_max_abs,
                 "success": float(status.get("success", np.nan)),
                 "status": float(status.get("status", np.nan)),
                 "nit": float(status.get("nit", np.nan)),
@@ -6383,49 +6592,61 @@ class Fitter:
                 detail["diagnostics"][islot, k] = values[field]
             detail["messages"][islot] = str(status.get("message", ""))
 
-        # save delta nll w.r.t. global minimum
-        nll_best = self.reduced_nll().numpy()
-        # set central point
-        dnlls[nscans // 2] = 0
-        scan_vals[nscans // 2] = xval[idx].numpy()
-        if save_detail:
-            # no fit runs here: the caller's minimum IS the central point, so
-            # its minimizer_status belongs to whatever fit produced it
-            _record(nscans // 2, float("nan"))
-        # scan positive side and negative side independently to profit from previous step
-        for sign in [-1, 1]:
-            param_scan_values = xval[idx].numpy() + sign * param_offsets
-            for i, ixval in enumerate(param_scan_values):
-                if i == 0:
-                    continue
+        # freeze minimize which mean to not update it in the fit
+        self.freeze_params(param)
+        try:
+            # save delta nll w.r.t. global minimum
+            nll_best = self.reduced_nll().numpy()
+            # set central point
+            dnlls[nscans // 2] = 0
+            scan_vals[nscans // 2] = xval[idx].numpy()
+            if save_detail:
+                # no fit runs here: the caller's minimum IS the central point,
+                # so its minimizer_status belongs to whatever fit produced it
+                _record(nscans // 2, float("nan"))
+            # scan positive side and negative side independently to profit from previous step
+            for sign in [-1, 1]:
+                param_scan_values = xval[idx].numpy() + sign * param_offsets
+                for i, ixval in enumerate(param_scan_values):
+                    if i == 0:
+                        continue
 
-                logger.debug(f"Now at i={i} x={ixval}")
-                self.x.assign(tf.tensor_scatter_nd_update(self.x, [[idx]], [ixval]))
+                    logger.debug(f"Now at i={i} x={ixval}")
+                    islot = nscans // 2 + sign * i
+                    scan_vals[islot] = ixval
+                    self.x.assign(tf.tensor_scatter_nd_update(self.x, [[idx]], [ixval]))
 
-                _t0 = time.perf_counter()
-                self.fit(warm_start=True)
-                _wall = time.perf_counter() - _t0
+                    _t0 = time.perf_counter()
+                    try:
+                        self.fit(warm_start=True)
+                        fitted = True
+                    except NoAcceptedStepError as e:
+                        # a point the model cannot be fitted at (e.g. negative
+                        # yields with --allowNegativeParam) should not lose the
+                        # scan: NaN there, and the next point starts from here
+                        logger.warning(
+                            f"Scan of {param} at {ixval}: {e} Recording NaN."
+                        )
+                        fitted = False
+                    _wall = time.perf_counter() - _t0
 
-                islot = nscans // 2 + sign * i
-                dnlls[islot] = self.reduced_nll().numpy() - nll_best
+                    if fitted:
+                        dnlls[islot] = self.reduced_nll().numpy() - nll_best
 
-                scan_vals[islot] = ixval
+                    if save_detail:
+                        _record(islot, _wall, fitted)
 
-                if save_detail:
-                    _record(islot, _wall)
-
-            # reset x to original state
+                # reset x to original state
+                self.x.assign(xval)
+        finally:
+            # the caller's state again, whatever a fit raised
             self.x.assign(xval)
-
-        # let the parameter be free again
-        self.defreeze_params(param)
+            # let the parameter be free again
+            self.defreeze_params(param)
 
         return scan_vals, dnlls, detail
 
     def nll_scan2D(self, param_tuple, scan_range, scan_points, use_prefit=False):
-
-        # freeze minimize which mean to not update it in the fit
-        self.freeze_params(param_tuple)
 
         idx0 = np.where(self.parms.astype(str) == param_tuple[0])[0][0]
         idx1 = np.where(self.parms.astype(str) == param_tuple[1])[0][0]
@@ -6442,55 +6663,66 @@ class Fitter:
 
         best_fit = (scan_points + 1) // 2 - 1
         dnlls = np.full((len(x_scans), len(y_scans)), np.nan)
-        nll_best = self.reduced_nll().numpy()
-        dnlls[best_fit, best_fit] = 0
-        # scan in a spiral around the best fit point
-        dcol = -1
-        drow = 0
-        i = 0
-        j = 0
-        r = 1
-        while r - 1 < best_fit:
-            if i == r and drow == 1:
-                drow = 0
-                dcol = 1
-            if j == r and dcol == 1:
-                dcol = 0
-                drow = -1
-            elif i == -r and drow == -1:
-                dcol = -1
-                drow = 0
-            elif j == -r and dcol == -1:
-                drow = 1
-                dcol = 0
 
-            i += drow
-            j += dcol
+        # freeze minimize which mean to not update it in the fit
+        self.freeze_params(param_tuple)
+        try:
+            nll_best = self.reduced_nll().numpy()
+            dnlls[best_fit, best_fit] = 0
+            # scan in a spiral around the best fit point
+            dcol = -1
+            drow = 0
+            i = 0
+            j = 0
+            r = 1
+            while r - 1 < best_fit:
+                if i == r and drow == 1:
+                    drow = 0
+                    dcol = 1
+                if j == r and dcol == 1:
+                    dcol = 0
+                    drow = -1
+                elif i == -r and drow == -1:
+                    dcol = -1
+                    drow = 0
+                elif j == -r and dcol == -1:
+                    drow = 1
+                    dcol = 0
 
-            if i == -r and j == -r:
-                r += 1
+                i += drow
+                j += dcol
 
-            ix = best_fit - i
-            iy = best_fit + j
+                if i == -r and j == -r:
+                    r += 1
 
-            logger.debug(
-                f"Now at (ix,iy) = ({ix},{iy}) (x,y)= ({x_scans[ix]},{y_scans[iy]})"
-            )
+                ix = best_fit - i
+                iy = best_fit + j
 
-            self.x.assign(
-                tf.tensor_scatter_nd_update(
-                    self.x, [[idx0], [idx1]], [x_scans[ix], y_scans[iy]]
+                logger.debug(
+                    f"Now at (ix,iy) = ({ix},{iy}) (x,y)= ({x_scans[ix]},{y_scans[iy]})"
                 )
-            )
 
-            self.fit(warm_start=True)
+                self.x.assign(
+                    tf.tensor_scatter_nd_update(
+                        self.x, [[idx0], [idx1]], [x_scans[ix], y_scans[iy]]
+                    )
+                )
 
-            dnlls[ix, iy] = self.reduced_nll().numpy() - nll_best
+                try:
+                    self.fit(warm_start=True)
+                except NoAcceptedStepError as e:
+                    # as in nll_scan: NaN at this point, the scan goes on
+                    logger.warning(
+                        f"Scan of {param_tuple} at ({float(x_scans[ix])}, "
+                        f"{float(y_scans[iy])}): {e} Recording NaN."
+                    )
+                    continue
 
-        self.x.assign(xval)
-
-        # let the parameter be free again
-        self.defreeze_params(param_tuple)
+                dnlls[ix, iy] = self.reduced_nll().numpy() - nll_best
+        finally:
+            self.x.assign(xval)
+            # let the parameter be free again
+            self.defreeze_params(param_tuple)
 
         return x_scans, y_scans, dnlls
 
@@ -6558,6 +6790,13 @@ class Fitter:
 
         elif hess_mode == "frozen":
             postfit_hess = np.linalg.inv(self.cov.numpy())
+            # Frozen rows and columns zero, as in the exact Hessian
+            # (stop_gradient). cov^-1 couples a frozen parameter to the
+            # floating ones, and trust-constr's projected CG would move it
+            # through that coupling: its constraint-Jacobian column is zero, so
+            # nothing holds it back.
+            self._zero_frozen_columns(postfit_hess, axis=0)
+            self._zero_frozen_columns(postfit_hess, axis=1)
 
             def scipy_hess(x, v):
                 return v[0] * postfit_hess
