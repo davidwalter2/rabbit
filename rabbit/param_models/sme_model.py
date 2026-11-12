@@ -1,10 +1,12 @@
+import pickle
+
 import numpy as np
 import tensorflow as tf
 from rabbit.param_models.liv.sme_constants import *
 from rabbit.param_models.liv.sme_functions import *
 
 import h5py
-from wremnants.utilities.io_tools import input_tools
+from wremnants.utilities.io_tools import base_io
 import pdb
 from scripts.plotting.liv_variation_helpers import *
 from rabbit.param_models.param_model import ParamModel
@@ -120,7 +122,7 @@ class LIV(ParamModel):
         ) 
 
         h5file = h5py.File(histmaker, "r")
-        results = input_tools.base_io.load_results_h5py(h5file)
+        results = base_io.load_results_h5py(h5file)
         data_output = results["SingleMuon_2016PostVFP"]["output"]
         ex_histogram = data_output["time_proj"].get()
                   

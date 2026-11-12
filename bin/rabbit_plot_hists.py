@@ -933,10 +933,14 @@ def make_plot(
             if args.uncertaintyLabel:
                 label_unc = args.uncertaintyLabel
 
+            # Difference-panel uncertainty is centered at zero; retain the
+            # selected denominator for ratio panels, including --ratioToData.
+            lower_hi = std if diff else (nom + std) / den
+            lower_lo = -std if diff else (nom - std) / den
             ax2.fill_between(
                 edges,
-                np.append((nom + std) / den, ((nom + std) / den)[-1]),
-                np.append((nom - std) / den, ((nom - std) / den)[-1]),
+                np.append(lower_hi, lower_hi[-1]),
+                np.append(lower_lo, lower_lo[-1]),
                 step="post",
                 facecolor=facecolor_pred,
                 alpha=facecolor_alpha_pred,
