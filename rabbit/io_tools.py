@@ -24,7 +24,6 @@ def get_fitresult(fitresult_filename, result=None, meta=False):
         return h5results, meta
     return h5results
 
-
 def get_poi_names(meta):
     return np.concatenate((meta.get("pois", meta.get("signals")), meta["nois"])).astype(
         str

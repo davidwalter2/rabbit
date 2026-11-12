@@ -4,6 +4,7 @@ import hist
 import numpy as np
 import tensorflow as tf
 from wums import boostHistHelpers as hh
+import pdb
 
 from rabbit import common, tfhelpers
 
@@ -19,6 +20,9 @@ baseline_mappings = {
     "Asymmetry": "ratio",
     "AngularCoefficients": "angular_coefficients",
     "LamTung": "angular_coefficients",
+    "HLT": "hlt_efficiency", 
+    "ID": "id_efficiency", 
+    "ISO": "iso_efficiency", 
 }
 
 
@@ -59,6 +63,7 @@ def parse_axis_selection(selection_str):
             elif v == "sum":
                 sum_axes.append(k)
             elif v.startswith("rebin"):
+                pdb.set_trace()
                 arr = np.fromstring(v[6:-1], sep=",", dtype=np.float32)
                 rebin_axes[k] = arr
             elif v == "None":

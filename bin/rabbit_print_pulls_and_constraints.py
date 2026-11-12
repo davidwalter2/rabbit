@@ -68,6 +68,8 @@ def main():
         keep_nuisances=args.keepNuisances,
         exclude_nuisances=args.excludeNuisances,
     )
+    print(f"NUMBER OF PARAMETERS: {len(labels)}")
+
     labels, pulls_prefit, constraints_prefit = io_tools.get_pulls_and_constraints(
         fitresult,
         prefit=True,
@@ -113,7 +115,6 @@ def main():
 
         if args.asym:
             constraints_asym = constraints_asym[order]
-
     nround = 5
     prefit_header = (
         "" if args.noPrefit else f" ({'pull prefit':>11} +/- {'constraint prefit':>17})"
@@ -163,6 +164,10 @@ def main():
                 ]
             )
         )
+        
+    # print("\n".join(output_lines))
+        
+        
 
 
 if __name__ == "__main__":

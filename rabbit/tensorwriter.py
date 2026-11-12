@@ -195,13 +195,15 @@ class TensorWriter:
         return np.asarray(values).flatten().astype(self.dtype)
 
     def get_flat_variances(self, h, flow=False):
-        if hasattr(h, "variances"):
+        # if hasattr(h, "variances"):
+        if hasattr(h, "variances") and h.variances() is not None:
             variances = h.variances(flow=flow)
         elif isinstance(h, SparseHist):
             variances = h.toarray(flow=flow)
         elif self._issparse(h):
             variances = np.asarray(h.toarray())
         else:
+            # variances = h.values(flow=flow)
             variances = h
 
         variances = np.asarray(variances).flatten().astype(self.dtype)
