@@ -35,90 +35,13 @@ def files_exist(files):
 
 
 
-### i may want to do this as an array of times
-def get_hour_array():
-    ### expects input of the form: specific_time = datetime(2017, 1, 1, 0, 0)
-    # Define the location of CMS in terms of longitude, latitude and azimuth
-    azimuth = 1.7677    
-    latitude = 0.8082  
-    longitude = 0.1061   
-
-    # Define the Earth's angular velocity (rad/s)
-    omega_utc = 2*pi/(86164)     # Earth's angular velocity in rad/s at UTC.
-    omega_siderial = 2*pi/(86400)
-    # Rotation matrices to go from SCF to CMS frame
-
-    # Rotation around the z-axis by phi (due to the azimuthal angle in spherical coordinates):
-    def R_z(angle):
-        return tn.tensor([
-            [1, 0, 0, 0],
-            [0,  np.cos(angle), -np.sin(angle),0],
-            [0, np.sin(angle),  np.cos(angle),0],
-            [0,0,0,1]
-        ], dtype=tn.float32)
-
-    # Rotation around the y-axis by θ (aligning the z-axis with the polar axis):
-    def R_y(angle):
-        return tn.tensor([
-            [1, 0, 0, 0],
-            [0, np.sin(angle), 0, np.cos(angle)],
-            [0, 0, 1, 0],
-            [0, -np.cos(angle), 0, np.sin(angle)]
-        ], dtype=tn.float32)
-
-    # A final rotation around the Z-axis has two purposes: to follow the rotation of the Earth over time and to synchronize with the SCF:
-    def R_Z(angle):
-        return tn.tensor([
-            [1, 0 , 0, 0],
-            [0, np.cos(angle), -np.sin(angle), 0],
-            [0, np.sin(angle), np.cos(angle), 0],
-            [0, 0, 0, 1]
-        ], dtype=tn.float32)
-
-
-
-    specific_time = datetime(2016, 1, 1, 0, 0)
-
-    start_time = int(specific_time.timestamp())
-
-    # start_time = int(time.time())
-    end_time = start_time + 3600*24 #+ int(timedelta(days=1).total_seconds())
-    step_seconds = int(timedelta(hours=1).total_seconds())
-    num_steps = (end_time - start_time) // step_seconds
-
-    # Lists to store the times and contr matrix elements
-    times = []
-    contrelep1 = []
-    contrelep2 = []
-    R_y_lat = R_y(latitude)
-    R_z_azi = R_z(azimuth)
-    mat_cons = tn.matmul(R_y_lat,R_z_azi)
-    # Main loop
-    current_time = start_time
-    for _ in range(num_steps):
-        # Convert current_time to a timestamp
-        current_datetime = datetime.fromtimestamp(current_time)
-        time_utc = current_datetime.timestamp()
-
-        # Calculate omega_t
-        omega_t_sid = omega_utc * time_utc + 3.2830 
-        # Construct the complete rotation matrix from SCF to CMS
-        R_Z_omega = R_Z(omega_t_sid)
-        R_mat = tn.matmul(R_Z_omega, mat_cons)
-        R_matrix1 = tn.einsum('ma,an->mn', g, R_mat)
-        R_matrix2 = tn.einsum('am,na->mn', g, R_mat)
-        # print(R_matrix1)
-        # Compute contrL and contrR using matrix multiplication
-        contrp1 = tn.einsum('ij,j->i', R_matrix1, p1)
-        contrp2 =  tn.einsum('ij,i->j',R_matrix2, p2)
-        # Record the times and contr matrix elements
-        times.append(current_time)
-        contrelep1.append(contrp1)
-        contrelep2.append(contrp2)
-        # Move to the next time step
-        current_time += step_seconds
-    hour_array = [(t - start_time) / 3600 for t in times]
-    return hour_array, contrelep1, contrelep2   # Convert seconds to hours 
+def get_hour_array(n_time_bins=24):
+    """time bin centers in CMS local sidereal hours (the histmaker time axis, 24 bins over
+    0-24 h) and the beam momenta pm, pn in the SCF at those times, see sme_constants.scf_beams.
+    The beam is horizontal at the CMS azimuth (it was vertical in earlier versions)."""
+    hour_array = list((np.arange(n_time_bins) + 0.5) * 24.0 / n_time_bins)
+    contrelep1, contrelep2 = scf_beams(hour_array)
+    return hour_array, contrelep1, contrelep2
 ##############################################################################        
       
 def num_derivative(func, x, h=1e-8, *args):

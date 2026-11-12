@@ -1,12 +1,15 @@
 
 
+import os
 import time
 import pickle
 
 from sme_functions import *
 
 
-times, pm, pn = get_hour_array() ## i only want to compte this once when i do the 
+# beam momenta in the SCF at the 24 time bin centers (horizontal beam, CMS local sidereal time).
+# The SME_*.pkl integrals do not depend on the beam, only the summation_*.pkl templates do.
+times, pm, pn = get_hour_array()
 t = time.time()
 
 mass_bins = [15, 30, 40, 45, 50, 55, 60, 65, 70, 76, 106, 110, 115, 120]
@@ -17,7 +20,7 @@ n_time_bins = len(pm)
 n_mass_bins = len(mass_bins)-1 
     
     
-add_dir = "precomputed_sigma/"
+add_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "precomputed_sigma/")
 
 all_precomputed_values = []
 all_sm_values = []
@@ -25,6 +28,11 @@ all_sm_values = []
 precomputed = False
 SME = True
 summation = True  
+# python sme_precalculate.py --smOnly: only (re)compute the SM cross section SM_*.pkl
+import sys
+if "--smOnly" in sys.argv:
+    SME = False
+    summation = False
 
 
 if not SME and not summation:
@@ -32,7 +40,8 @@ if not SME and not summation:
     # for i in range(9,10):
         print(mass_bins[m])
         print(mass_bins[m+1])
-        sm = sigma_sm(mass_bins[m], mass_bins[m+1], quark_couplings)
+        # summed over all quarks (sm_quark_couplings: u, d, s, c, b, t), not only those with templates
+        sm = sigma_sm(mass_bins[m], mass_bins[m+1], sm_quark_couplings)
         print(sm)
         all_sm_values.append(sm)
     with open(add_dir + sm_filename, "wb") as f:
@@ -69,7 +78,8 @@ if summation:
     sm_filename = f"SM_{min(mass_bins)}_to_{max(mass_bins)}_GeV_{n_mass_bins}_bins.pkl" 
     sme_filename = f"SME_{min(mass_bins)}_to_{max(mass_bins)}_GeV_{n_mass_bins}_bins.pkl" 
 
-    add_dir = "/home/submit/jbenke/WRemnants/rabbit/rabbit/poi_models/precomputed_sigma/"
+    # the templates read by sme_model.py
+    add_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "precomputed_sigma/")
         
     with open(add_dir + sme_filename, "rb") as f:
         precomp_dict = pickle.load(f)

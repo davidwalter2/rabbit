@@ -17,7 +17,12 @@ baseline_models = {
     "SmoothABCDIsoMT": "abcd_isomtmt_model",
     "SmoothExtendedABCDIsoMT": "abcd_isomtmt_model",
     "LIV": "sme_model",
-    "LIV_rapidity": "sme_double_differential"
+    "LIV_rapidity": "sme_double_differential",
+    "LIV_rapidity_pheno": "sme_double_differential",
+    "LIV_mll_pheno": "sme_double_differential",
+    "LIV_rapidity_ATLAS": "sme_double_differential",
+    "LIV_rapidity_pheno_ATLAS": "sme_double_differential",
+    "LIV_mll_pheno_ATLAS": "sme_double_differential",
 }
 
 

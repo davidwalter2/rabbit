@@ -123,33 +123,66 @@ def d2sigma_dQ2_dy(qid, Q2, y, cL, cR): #Z and photon
     return total * pref
 
 #rotations with sidereal time
-azimuth = 1.7677    
-latitude = 0.8082  
-longitude = 0.1061
+# Sign convention (shared with delta(), i.e. Eqs. 17-19 of the note):
+#   * the lab "3" axis is the experiment's +z axis, i.e. the direction of positive
+#     (pseudo)rapidity of the reconstructed leptons (eta_probe / yll);
+#   * parton 1 (x1 = sqrt(tau) e^{+y}) moves along +z, parton 2 along -z;
+#   * c03 = zhat^i c^{0i}, c33 = zhat^i zhat^j c^{ij}, with zhat the +z unit vector in the
+#     SCF. Spatial rotations act identically on upper and lower spatial indices, so the
+#     SCF coefficients c[0][i], c[i][j] carry the same index position as the paper's lab
+#     c^{03}, c^{33} (no metric factor is applied).
+# Location and +z azimuth (measured from north towards east) of the experiments. Both
+# define x towards the ring centre, y up and z = x cross y along the anticlockwise beam
+# (seen from above). CMS (Point 5) is on the north side of the ring, so its +z points
+# roughly west, towards the Jura (281.3 deg); ATLAS (Point 1) is diametrically opposite
+# and its +z points roughly east, towards the airport (101.3 deg; cf. Carle, Chanon,
+# Perries, arXiv:1909.01990, who quote the 101.28 deg beam line). Only the c03-type
+# (ctx, cty) terms, linear in zhat, change sign between the two; the latitude differs by
+# 0.07 deg.
+EXPERIMENTS = {
+    "CMS": dict(latitude=0.8082, azimuth=1.7677 + np.pi, longitude=0.1061),
+    "ATLAS": dict(
+        latitude=np.deg2rad(46.2358), azimuth=1.7677, longitude=np.deg2rad(6.0554)
+    ),
+}
+azimuth = EXPERIMENTS["CMS"]["azimuth"]
+latitude = EXPERIMENTS["CMS"]["latitude"]
+longitude = EXPERIMENTS["CMS"]["longitude"]
 colatitude = np.pi / 2 - latitude   
 
-# Define the Earth's angular velocity (rad/s)
-omega_sidereal = 2*np.pi/(86164)     # Earth's angular velocity in rad/s at UTC.
-#omega_siderial = 2*np.pi/(86400)
+def get_experiment(experiment):
+    try:
+        return EXPERIMENTS[experiment.upper()]
+    except KeyError:
+        raise ValueError(f"unknown experiment {experiment}, choose from {list(EXPERIMENTS)}")
 
-# time convention of sme_model (liv/sme_functions.py get_hour_array): hour h of the
-# time axis is t = SME_T0 + 3600 * h, rotated by omega_sidereal * t + SME_PHASE.
-# SME_T0 is datetime(2016, 1, 1, 0, 0).timestamp() as evaluated on the (US/Eastern)
-# machine that made the sme_model templates, hardcoded to be timezone independent.
-SME_T0 = 1451624400
-SME_PHASE = 3.2830
+# time is the local sidereal time at the experiment in sidereal hours, as filled by the
+# histmakers (GMST from J2000 plus the experiment longitude). The rotation from the lab
+# frame to the SCF is done here: the angle of the local meridian from the vernal equinox
+# is 2 pi LST / 24, so the longitude must not be added again.
+def sidereal_angle(lst):
+    return 2 * np.pi * np.asarray(lst) / 24.0
 
-def n_scf(t):
-    # beam direction in the SCF, i.e. the spatial part of g R_Z(omega t) R_y(lat) R_z(azi) (0, 0, 0, 1)
-    # of sme_model. R_z(azi) leaves the z axis unchanged, so the azimuth drops out.
-    phi = omega_sidereal * t + SME_PHASE
-    X = -np.cos(latitude) * np.cos(phi)
-    Y = -np.cos(latitude) * np.sin(phi)
-    Z = -np.sin(latitude)
+def n_scf(lst, experiment="CMS"):
+    # unit vector zhat of the experiment's +z axis in the SCF (components zhat^i),
+    # zhat = R_Z(phi) R_y(colatitude) zhat_lab. The local frame is (south, east, up), and
+    # +z is horizontal at an azimuth measured from north towards east:
+    # zhat_lab = (-cos(azi), sin(azi), 0).
+    loc = get_experiment(experiment)
+    lat, azi = loc["latitude"], loc["azimuth"]
+    phi = sidereal_angle(lst)
+    # R_y(colatitude) zhat_lab, the local meridian at phi = 0
+    x = -np.sin(lat) * np.cos(azi)
+    y = np.sin(azi)
+    z = np.cos(lat) * np.cos(azi)
+    # R_Z(phi), the earth rotation
+    X = x * np.cos(phi) - y * np.sin(phi)
+    Y = x * np.sin(phi) + y * np.cos(phi)
+    Z = z + 0 * phi
     return X, Y, Z
 
-def lab_coeffs(t, c):
-    nx, ny, nz = n_scf(t)
+def lab_coeffs(lst, c, experiment="CMS"):
+    nx, ny, nz = n_scf(lst, experiment)
     c00 = c[0][0]
     c03 = nx * c[0][1] + ny * c[0][2] + nz * c[0][3]
     c33 = (nx ** 2 * c[1][1] + ny ** 2 * c[2][2] + nz ** 2 * c[3][3] + 
@@ -170,13 +203,12 @@ def make_matrix(i, j, val):
 
 def sidereal_rotation(qid, Q2, cL, cR, y_range, odd):
     hours = np.linspace(0, 24, 25)                   # sidereal hours (closes at 24)
-    ts = sidereal_seconds(hours)
 
     sigsm = np.array([d2sigma_dQ2_dy(qid, Q2, y, [0, 0, 0], [0, 0, 0]) for y in y_range])
 
     times = hours
     asym = []
-    for t in ts:
+    for t in hours:
         clabLV_L = lab_coeffs(t, cL)
         clabLV_R = lab_coeffs(t, cR)
         sigLV = np.array([d2sigma_dQ2_dy(qid, Q2, y, clabLV_L, clabLV_R) for y in y_range])
@@ -208,19 +240,14 @@ def dsig_dyll(qid, Q, ymin, ymax, cL, cR):
 
 def get_time():
     hours = np.linspace(0, 24, 25)                   # sidereal hours (closes at 24)
-    ts = sidereal_seconds(hours)
     times = []
-    times.append(ts)
+    times.append(hours)
     return times
 
 def sigma_SCF(qid, Qmin, Qmax, ymin, ymax, cL, cR, t):
     clabLV_L = lab_coeffs(t, cL)
     clabLV_R = lab_coeffs(t, cR)
     return integrate_xsec_yll(qid, Qmin, Qmax, ymin, ymax, clabLV_L, clabLV_R)
-
-def sidereal_seconds(hour, n_time_bins = 24):
-    # same as sme_model: one bin per 3600 s starting at SME_T0
-    return SME_T0 + hour * (24 * 3600 / n_time_bins)
 
 
 def d2sigma_p(qid, Q2, y, p1, p2, cL, cR):
