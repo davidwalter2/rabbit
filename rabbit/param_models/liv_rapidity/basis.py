@@ -6,10 +6,8 @@ d (cL = -cR) type coefficients, per quark of LIV_QUARKS. Kept free of tensorflow
 (e.g. by scripts/plotting/liv_pheno_fit_rapidity.py) before running the fit.
 """
 
-import hashlib
 import os
 from concurrent.futures import ProcessPoolExecutor
-from functools import partial
 
 import numpy as np
 
@@ -27,11 +25,6 @@ def bin_xsec(qid, int_bin, cL, cR):
 
 # quarks with SME responses (d, u, s, c, b)
 LIV_QUARKS = [1, 2, 3, 4, 5]
-# quarks with SME responses before bottom was added: their responses in older caches are
-# reused, so that only the bottom responses are integrated
-PREV_LIV_QUARKS = [1, 2, 3, 4]
-# all earlier quark sets whose caches can be extended, newest first (before charm: d, u, s)
-PREV_LIV_QUARK_SETS = [PREV_LIV_QUARKS, [1, 2, 3]]
 # quarks summed in the SM cross section, the denominator of the relative SME shift
 # (d, u, s, c, b, t; the 5 flavour PDF set has no top, which therefore adds zero)
 SM_QUARKS = [1, 2, 3, 4, 5, 6]
@@ -47,13 +40,41 @@ CACHE_DIR = os.path.join(
 )
 
 
-def basis_cache_file(int_bins, sm_quarks=SM_QUARKS, liv_quarks=LIV_QUARKS):
-    """int_bins: list of (Qlo, Qhi, ylo, yhi) python floats, in model order"""
-    key = (list(int_bins), list(liv_quarks), EPS, PDF_NAME)
-    if list(sm_quarks) != list(liv_quarks):
-        key = key + (list(sm_quarks),)
-    cache_key = hashlib.md5(repr(key).encode()).hexdigest()[:12]
-    return os.path.join(CACHE_DIR, f"liv_basis_{cache_key}.npz")
+def _fmt(x):
+    """number for a file name: 91.1879 -> 91p1879, -2.5 -> m2p5"""
+    return f"{x:g}".replace("-", "m").replace(".", "p")
+
+
+def _range_tag(edges, name):
+    """'<n><name><lo>to<hi>' for n bins (lo, hi); '<name><x>' for a single point bin (x, x)"""
+    if len(edges) == 1 and edges[0][0] == edges[0][1]:
+        return f"{name}{_fmt(edges[0][0])}"
+    lo, hi = min(e[0] for e in edges), max(e[1] for e in edges)
+    return f"{len(edges)}{name}{_fmt(lo)}to{_fmt(hi)}"
+
+
+def bin_tag(int_bin):
+    """human readable name of one (Qlo, Qhi, ylo, yhi) bin, e.g. mll66to71_yllm2p5to0"""
+    Qlo, Qhi, ylo, yhi = int_bin
+    mll = f"mll{_fmt(Qlo)}" if Qlo == Qhi else f"mll{_fmt(Qlo)}to{_fmt(Qhi)}"
+    yll = "yllall" if (ylo, yhi) == (-YLL_FULL, YLL_FULL) else f"yll{_fmt(ylo)}to{_fmt(yhi)}"
+    return f"{mll}_{yll}"
+
+
+def basis_tag(int_bins):
+    """human readable name of a list of (Qlo, Qhi, ylo, yhi) bins: number and range of the
+    mll and rapidity bins, e.g. 10mll66to116_2yllm2p5to2p5, mll91p1879_yllall"""
+    mll = sorted({(b[0], b[1]) for b in int_bins})
+    yll = sorted({(b[2], b[3]) for b in int_bins})
+    ytag = "yllall" if yll == [(-YLL_FULL, YLL_FULL)] else _range_tag(yll, "yll")
+    return f"{_range_tag(mll, 'mll')}_{ytag}"
+
+
+def basis_cache_file(int_bins):
+    """int_bins: list of (Qlo, Qhi, ylo, yhi) python floats, in model order. The name gives
+    the number and range of the mll and rapidity bins and the PDF; the bins themselves are
+    stored in the file and checked on loading (bins with the same name but other edges)."""
+    return os.path.join(CACHE_DIR, f"liv_basis_{basis_tag(int_bins)}_{PDF_NAME}.npz")
 
 
 def sm_xsec(int_bin, quarks):
@@ -101,12 +122,6 @@ def bin_response(int_bin):
     return sm + _sm_extra(int_bin), resp
 
 
-def _extend_bin(int_bin, new_quarks, sm_quarks):
-    """SM cross section of sm_quarks and response of new_quarks of one bin"""
-    _, resp = quark_response(int_bin, new_quarks)
-    return sm_xsec(int_bin, sm_quarks), resp
-
-
 def compute_basis(int_bins, jobs=1, logger=None):
     """returns sm_total [nbins], resp [mode, direction, quark, nbins]"""
     sm_total = np.zeros(len(int_bins))
@@ -126,61 +141,25 @@ def compute_basis(int_bins, jobs=1, logger=None):
     return sm_total, resp
 
 
-def _extend_cached_basis(int_bins, jobs, logger):
-    """basis from a cache of an earlier quark set (PREV_LIV_QUARK_SETS; SM cross section
-    summed over SM_QUARKS, or over the earlier quarks only for the oldest caches),
-    integrating only the responses of the added quarks. None if there is no such cache."""
-    for prev_quarks in PREV_LIV_QUARK_SETS:
-        basis = _extend_from(int_bins, prev_quarks, jobs, logger)
-        if basis is not None:
-            return basis
-    return None
-
-
-def _extend_from(int_bins, prev_quarks, jobs, logger):
-    new_quarks = [q for q in LIV_QUARKS if q not in prev_quarks]
-    for old_sm_quarks in (SM_QUARKS, prev_quarks):
-        old_file = basis_cache_file(int_bins, sm_quarks=old_sm_quarks, liv_quarks=prev_quarks)
-        if not os.path.exists(old_file):
-            continue
-        extra_sm = [q for q in SM_QUARKS if q not in old_sm_quarks]
-        if logger is not None:
-            logger.info(
-                f"LIV: reusing the responses of quarks {prev_quarks} from {old_file}, "
-                f"integrating quarks {new_quarks}"
-                + (f" and adding quarks {extra_sm} to the SM cross section" if extra_sm else "")
-            )
-        func = partial(_extend_bin, new_quarks=new_quarks, sm_quarks=extra_sm)
-        if jobs > 1:
-            with ProcessPoolExecutor(jobs) as ex:
-                results = list(ex.map(func, int_bins, chunksize=4))
-        else:
-            results = [func(b) for b in int_bins]
-        cached = np.load(old_file)
-        sm_total = cached["sm_total"] + np.array([r[0] for r in results])
-        resp = np.zeros((2, 3, len(LIV_QUARKS), len(int_bins)))
-        for iq, q in enumerate(prev_quarks):
-            resp[:, :, LIV_QUARKS.index(q)] = cached["resp"][:, :, iq]
-        new_resp = np.stack([r[1] for r in results], axis=-1)  # [mode, direction, quark, nbins]
-        for iq, q in enumerate(new_quarks):
-            resp[:, :, LIV_QUARKS.index(q)] = new_resp[:, :, iq]
-        return sm_total, resp
-    return None
-
-
 def load_or_compute_basis(int_bins, jobs=1, logger=None):
     cache_file = basis_cache_file(int_bins)
     if os.path.exists(cache_file):
         cached = np.load(cache_file)
-        return cached["sm_total"], cached["resp"]
-    basis = _extend_cached_basis(int_bins, jobs, logger)
-    if basis is None:
+        if "int_bins" in cached.files and np.array_equal(
+            cached["int_bins"], np.array(int_bins, dtype=float)
+        ):
+            return cached["sm_total"], cached["resp"]
         if logger is not None:
-            logger.info(
-                f"LIV: integrating response basis for {len(int_bins)} (mll, rapidity) bins, will cache to {cache_file}"
+            logger.warning(
+                f"LIV: {cache_file} was computed for other bins with the same name, recomputing"
             )
-        basis = compute_basis(int_bins, jobs, logger)
-    sm_total, resp = basis
+    if logger is not None:
+        logger.info(
+            f"LIV: integrating response basis for {len(int_bins)} (mll, rapidity) bins, will cache to {cache_file}"
+        )
+    sm_total, resp = compute_basis(int_bins, jobs, logger)
     os.makedirs(CACHE_DIR, exist_ok=True)
-    np.savez(cache_file, sm_total=sm_total, resp=resp)
+    np.savez(
+        cache_file, sm_total=sm_total, resp=resp, int_bins=np.array(int_bins, dtype=float)
+    )
     return sm_total, resp
